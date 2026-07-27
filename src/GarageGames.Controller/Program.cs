@@ -123,6 +123,12 @@ app.MapPost("/api/runs/abort", async (
     CancellationToken cancellationToken) =>
     Results.Ok(await runs.AbortAsync(request.Reason, cancellationToken)));
 
+app.MapPost("/api/runs/finalize", async (
+    ReasonRequest request,
+    RunService runs,
+    CancellationToken cancellationToken) =>
+    Results.Ok(await runs.FinalizeAsync(request.Reason, cancellationToken)));
+
 app.MapPost("/api/runs/undo", async (
     ReasonRequest request,
     RunService runs,

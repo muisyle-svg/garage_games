@@ -57,6 +57,10 @@ public sealed class RunProjector
                     status = RunStatus.TimedOut;
                     finishedAt = item.ReceivedAt;
                     break;
+                case EventTypes.RunFinalized:
+                    status = RunStatus.Completed;
+                    finishedAt = item.ReceivedAt;
+                    break;
                 case EventTypes.AttemptStarted:
                 case EventTypes.GameCompleted:
                 case EventTypes.BonusHit:

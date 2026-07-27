@@ -47,11 +47,13 @@ function render() {
   $("timer").textContent = formatTime(remaining);
   $("timer").className = `timer ${remaining === 0 ? "expired" : remaining <= 30 ? "warning" : ""}`;
 
-  const active = value.run && ["active", "paused", "bonus"].includes(value.run.status);
+  const runStatus = String(value.run?.status || "").toLowerCase();
+  const active = value.run && ["active", "paused", "bonus"].includes(runStatus);
   $("startButton").disabled = active || value.queue.length === 0;
-  $("pauseButton").disabled = !value.run || value.run.status !== "active";
-  $("resumeButton").disabled = !value.run || value.run.status !== "paused";
+  $("pauseButton").disabled = runStatus !== "active";
+  $("resumeButton").disabled = runStatus !== "paused";
   $("undoButton").disabled = !active;
+  $("finalizeButton").disabled = !active;
   $("abortButton").disabled = !active;
 
   const score = value.score;
@@ -164,6 +166,11 @@ $("startButton").addEventListener("click", async () => {
 $("pauseButton").addEventListener("click", () => action("/api/runs/pause", {}));
 $("resumeButton").addEventListener("click", () => action("/api/runs/resume", {}));
 $("undoButton").addEventListener("click", () => action("/api/runs/undo", { reason: "Operator undo" }));
+$("finalizeButton").addEventListener("click", () => {
+  if (confirm("End this run now and save its current score to the leaderboard?")) {
+    action("/api/runs/finalize", { reason: "Operator ended run early" });
+  }
+});
 $("abortButton").addEventListener("click", () => {
   if (confirm("Abort the current run? The partial event history will be preserved.")) {
     action("/api/runs/abort", { reason: "Operator aborted run" });

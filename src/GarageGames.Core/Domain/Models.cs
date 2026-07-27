@@ -11,6 +11,7 @@ public static class EventTypes
     public const string RunResumed = "run_resumed";
     public const string RunAborted = "run_aborted";
     public const string RunTimedOut = "run_timed_out";
+    public const string RunFinalized = "run_finalized";
     public const string AttemptStarted = "attempt_started";
     public const string GameCompleted = "game_completed";
     public const string BonusHit = "bonus_hit";
@@ -25,7 +26,7 @@ public static class EventTypes
     public const string MasterStartRequested = "master_start_requested";
 
     public static bool IsRunEvent(string value) => value is
-        RunStarted or RunPaused or RunResumed or RunAborted or RunTimedOut or
+        RunStarted or RunPaused or RunResumed or RunAborted or RunTimedOut or RunFinalized or
         AttemptStarted or GameCompleted or BonusHit or BonusStarted or BonusCue or
         BonusAllDone or EventVoided or CorrectionApplied;
 }

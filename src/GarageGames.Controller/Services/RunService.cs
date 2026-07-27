@@ -163,6 +163,24 @@ public sealed class RunService(
         return snapshot;
     }
 
+    public async Task<RunSnapshot> FinalizeAsync(
+        string reason,
+        CancellationToken cancellationToken = default)
+    {
+        var snapshot = await AppendToCurrentAsync(
+            EventTypes.RunFinalized,
+            new { reason },
+            "operator",
+            cancellationToken);
+        await SendRunCommandAsync(
+            snapshot,
+            EventTypes.RunAborted,
+            "*",
+            new { reason = "run_finalized" },
+            cancellationToken);
+        return snapshot;
+    }
+
     public async Task<RunSnapshot> UndoAsync(string reason, CancellationToken cancellationToken = default)
     {
         var current = await store.GetCurrentRunAsync(cancellationToken)

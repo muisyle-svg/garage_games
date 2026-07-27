@@ -9,7 +9,8 @@ var tests = new (string Name, Action Run)[]
     ("Duplicate first attempts project once", DuplicateAttempt),
     ("Voided event disappears from projection", VoidedCompletion),
     ("Incomplete run remains active", IncompleteRun),
-    ("Displayed timeout is persisted by the run clock", DisplayedTimeoutIsPersisted)
+    ("Displayed timeout is persisted by the run clock", DisplayedTimeoutIsPersisted),
+    ("Early finalization completes a partial run", EarlyFinalizationCompletesPartialRun)
 };
 
 var failures = 0;
@@ -128,6 +129,32 @@ static void DisplayedTimeoutIsPersisted()
             Status = RunStatus.Paused,
             RemainingSeconds = 1
         }));
+}
+
+static void EarlyFinalizationCompletesPartialRun()
+{
+    var season = BaselineSeason();
+    var finalized = new DeviceEvent(
+        "finalize-1",
+        "run",
+        "controller",
+        "boot",
+        2,
+        EventTypes.RunFinalized,
+        75_000,
+        DateTimeOffset.UnixEpoch.AddMilliseconds(75_000),
+        JsonDefaults.Serialize(new { reason = "test" }),
+        "operator");
+    var snapshot = Project(
+        season,
+        [
+            Event(1, EventTypes.GameCompleted, season.Games[0].Id, 250, 50_000),
+            finalized
+        ]);
+
+    Equal(RunStatus.Completed, snapshot.Status);
+    Equal(225, snapshot.RemainingSeconds);
+    Equal(1, snapshot.CompletionCount);
 }
 
 static RunSnapshot Project(SeasonDefinition season, IReadOnlyList<DeviceEvent> events) =>
