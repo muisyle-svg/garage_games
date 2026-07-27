@@ -40,7 +40,9 @@ builder.Services.AddHostedService<RunClockHostedService>();
 builder.Services.AddHostedService<GoogleSyncHostedService>();
 builder.Services.AddHttpClient("google-sheet", client =>
 {
-    client.Timeout = TimeSpan.FromSeconds(15);
+    // Apps Script web apps can spend several seconds waking up or waiting on
+    // Sheets. Sync is asynchronous, so a longer timeout never delays a button.
+    client.Timeout = TimeSpan.FromSeconds(60);
 });
 
 var app = builder.Build();

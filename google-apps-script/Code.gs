@@ -125,7 +125,9 @@ function constantTimeEquals_(left, right) {
 function syncBatch_(request) {
   const records = Array.isArray(request.records) ? request.records : [];
   const lock = LockService.getScriptLock();
-  lock.waitLock(15000);
+  // Do not hold a controller retry for the full HTTP timeout when another
+  // batch is still applying. The controller will retry the idempotent records.
+  lock.waitLock(5000);
   try {
     let applied = 0;
     records.forEach(record => {
