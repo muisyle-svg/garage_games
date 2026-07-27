@@ -281,6 +281,7 @@ bool discoverController() {
       const int read = udp.read(response, sizeof(response) - 1);
       if (read > 0 && strncmp(response, "GG_CONTROLLER_V1|", 17) == 0) {
         controllerIp = udp.remoteIP();
+        Serial.printf("[controller] Discovered %s\n", controllerIp.toString().c_str());
         udp.stop();
         return true;
       }
@@ -297,6 +298,8 @@ void connectController() {
   if (controllerIp == IPAddress()) discoverController();
   if (controllerIp == IPAddress()) return;
   const String path = String("/bridge?deviceId=") + masterId;
+  Serial.printf("[controller] Connecting to %s:%u%s\n",
+                controllerIp.toString().c_str(), kControllerPort, path.c_str());
   controllerConnected = webSocket.connect(controllerIp.toString(), kControllerPort, path);
 }
 
@@ -369,32 +372,56 @@ void updateDisplay() {
 
 void setup() {
   Serial.begin(115200);
+  delay(300);
+  Serial.println();
+  Serial.println("[boot] Garage Games master starting");
   pinMode(kButtonPin, INPUT_PULLUP);
   pinMode(kRedPin, OUTPUT);
   pinMode(kGreenPin, OUTPUT);
   pinMode(kBluePin, OUTPUT);
   display.setBrightness(7);
   display.clear();
+  Serial.println("[boot] RGB self-test: red, green, blue");
+  setLed(true, false, false);
+  delay(250);
+  setLed(false, true, false);
+  delay(250);
   setLed(false, false, true);
+  delay(250);
+  setLed(false, false, false);
 
   const uint64_t mac = ESP.getEfuseMac();
   snprintf(masterId, sizeof(masterId), "M-%04X%08X",
            static_cast<uint16_t>(mac >> 32u), static_cast<uint32_t>(mac));
   snprintf(bootId, sizeof(bootId), "%08lX", static_cast<unsigned long>(esp_random()));
+  Serial.printf("[boot] Device %s, firmware %s\n", masterId, GG_FIRMWARE_VERSION);
   outbox.begin();
 
   WiFiManager manager;
   manager.setConfigPortalTimeout(180);
-  if (!manager.autoConnect("GarageGames-Master-Setup")) {
+  if (digitalRead(kButtonPin) == LOW) {
+    Serial.println("[wifi] Master button held: clearing saved Wi-Fi");
     setLed(true, false, true);
+    manager.resetSettings();
+    delay(500);
+  }
+  Serial.println("[wifi] Connecting; setup network is GarageGames-Master-Setup");
+  if (!manager.autoConnect("GarageGames-Master-Setup")) {
+    Serial.println("[wifi] Setup timed out; restarting");
+    setLed(true, false, true);
+    delay(1000);
     ESP.restart();
   }
   WiFi.setSleep(false);
+  Serial.printf("[wifi] Connected to %s, IP %s, channel %d\n",
+                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.channel());
 
   if (esp_now_init() != ESP_OK) {
+    Serial.println("[esp-now] Initialization failed");
     setLed(true, false, true);
     return;
   }
+  Serial.println("[esp-now] Radio initialized");
   esp_now_register_recv_cb(radioReceiveThunk);
   esp_now_peer_info_t peer{};
   memcpy(peer.peer_addr, kBroadcastMac, sizeof(kBroadcastMac));
@@ -405,8 +432,14 @@ void setup() {
 
   webSocket.onMessage(handleControllerMessage);
   webSocket.onEvent([](WebsocketsEvent event, String) {
-    if (event == WebsocketsEvent::ConnectionOpened) controllerConnected = true;
-    if (event == WebsocketsEvent::ConnectionClosed) controllerConnected = false;
+    if (event == WebsocketsEvent::ConnectionOpened) {
+      controllerConnected = true;
+      Serial.println("[controller] Connected");
+    }
+    if (event == WebsocketsEvent::ConnectionClosed) {
+      controllerConnected = false;
+      Serial.println("[controller] Disconnected");
+    }
   });
   setLed(false, true, false);
 }
