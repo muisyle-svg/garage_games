@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "codex/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  controller:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore GarageGames.slnx
+      - run: dotnet build GarageGames.slnx --configuration Release --no-restore
+      - run: dotnet run --project tests/GarageGames.Tests/GarageGames.Tests.csproj --configuration Release
+      - run: dotnet publish src/GarageGames.Controller/GarageGames.Controller.csproj --configuration Release --runtime win-x64 --self-contained true
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install platformio
+      - working-directory: firmware
+        run: pio test -e native
+      - working-directory: firmware
+        run: |
+          pio run -e master
+          pio run -e station_standard
+          pio run -e station_prompt_demo
+
+  validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/validate-config.mjs
+      - run: node simulator/simulate.mjs
+      - name: Reject likely committed secrets
+        shell: bash
+        run: |
+          if grep -RIE --exclude-dir=.git --exclude='*.md' \
+            '(password|wifi_pass|api_key|secret)[[:space:]]*[:=][[:space:]]*["'\''][^"'\'']{8,}' .; then
+            echo "A likely credential was committed."
+            exit 1
+          fi
+

@@ -1,0 +1,28 @@
+# Build output
+**/bin/
+**/obj/
+.pio/
+.vs/
+.vscode/
+.tools/
+
+# Runtime data and secrets
+data/
+backups/
+exports/
+controller-settings.json
+*.db
+*.db-shm
+*.db-wal
+.env
+secrets.json
+
+# Spreadsheet build artifacts
+artifacts/
+release/
+tools/spreadsheet/node_modules/
+
+# OS/editor files
+Thumbs.db
+.DS_Store
+*.user

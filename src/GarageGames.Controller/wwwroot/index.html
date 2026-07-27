@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Garage Games Controller</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <span class="eyebrow">GARAGE GAMES 2026</span>
+      <h1>Event Controller</h1>
+    </div>
+    <nav>
+      <a href="#run">Run</a>
+      <a href="#queue">Queue</a>
+      <a href="#devices">Devices</a>
+      <a href="#results">Results</a>
+      <a href="/display.html" target="_blank">Open Display ↗</a>
+    </nav>
+    <div id="connectionBadge" class="badge bad">Master offline</div>
+  </header>
+
+  <main>
+    <section id="setupPanel" class="panel hidden">
+      <div class="section-title">
+        <div><span class="eyebrow">FIRST RUN</span><h2>Controller setup</h2></div>
+      </div>
+      <form id="setupForm" class="form-grid">
+        <label>Event name<input id="eventName" value="Garage Games 2026" required></label>
+        <label>Season<select id="seasonSelect"></select></label>
+        <label class="wide">Google Apps Script endpoint<input id="googleEndpoint" type="url" placeholder="Optional until Sheet script is deployed"></label>
+        <label class="wide">Sync secret<input id="googleSecret" type="password" placeholder="Stored locally; never committed"></label>
+        <button class="primary" type="submit">Save setup</button>
+      </form>
+    </section>
+
+    <section id="run" class="panel hero">
+      <div class="run-head">
+        <div>
+          <span class="eyebrow">CURRENT COMPETITOR</span>
+          <h2 id="currentCompetitor">No active run</h2>
+          <p id="onDeck">Add competitors to begin.</p>
+        </div>
+        <div id="timer" class="timer">5:00</div>
+      </div>
+      <div class="run-actions">
+        <button id="startButton" class="primary">Start next competitor</button>
+        <button id="pauseButton">Pause</button>
+        <button id="resumeButton">Resume</button>
+        <button id="undoButton">Undo last event</button>
+        <button id="abortButton" class="danger">Abort run</button>
+      </div>
+      <div id="scoreStrip" class="score-strip"></div>
+      <div id="games" class="game-grid"></div>
+    </section>
+
+    <section id="queue" class="panel split">
+      <div>
+        <div class="section-title"><div><span class="eyebrow">RUN ORDER</span><h2>Competitor queue</h2></div></div>
+        <form id="competitorForm" class="inline-form">
+          <input id="competitorName" placeholder="Competitor name" required>
+          <input id="competitorNotes" placeholder="Notes (optional)">
+          <button class="primary" type="submit">Add</button>
+        </form>
+        <ol id="queueList" class="queue-list"></ol>
+      </div>
+      <div>
+        <div class="section-title"><div><span class="eyebrow">CONTINGENCY</span><h2>Event safety</h2></div></div>
+        <div class="safety-list">
+          <button id="backupButton">Create database backup</button>
+          <a class="button" href="/api/export/leaderboard.xlsx">Export Excel</a>
+          <a class="button" href="/api/export/leaderboard.csv">Export CSV</a>
+        </div>
+        <p class="muted">Accepted events are stored locally before Google synchronization. A failed Google connection never blocks a run.</p>
+      </div>
+    </section>
+
+    <section id="devices" class="panel">
+      <div class="section-title">
+        <div><span class="eyebrow">ESP-NOW FLEET</span><h2>Station devices</h2></div>
+        <span id="deviceSummary" class="muted">No devices discovered</span>
+      </div>
+      <div id="deviceGrid" class="device-grid"></div>
+    </section>
+
+    <section id="results" class="panel">
+      <div class="section-title">
+        <div><span class="eyebrow">LIVE STANDINGS</span><h2>Leaderboard</h2></div>
+        <input id="participantSearch" placeholder="Search participant">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Rank</th><th>Competitor</th><th>Score</th><th>Time</th><th>Completed</th><th>Bonuses</th></tr></thead>
+          <tbody id="leaderboard"></tbody>
+        </table>
+      </div>
+      <div id="participantResults"></div>
+    </section>
+  </main>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
+

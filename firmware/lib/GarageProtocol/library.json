@@ -1,0 +1,9 @@
+{
+  "name": "GarageProtocol",
+  "version": "0.1.0",
+  "description": "Versioned Garage Games ESP-NOW protocol",
+  "build": {
+    "srcFilter": [ "+<*.cpp>" ]
+  }
+}
+

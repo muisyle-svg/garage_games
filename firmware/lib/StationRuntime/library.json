@@ -1,0 +1,9 @@
+{
+  "name": "StationRuntime",
+  "version": "0.1.0",
+  "description": "Shared non-blocking ESP-NOW station runtime",
+  "dependencies": {
+    "GarageProtocol": "*"
+  }
+}
+

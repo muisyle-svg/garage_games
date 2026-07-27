@@ -1,0 +1,28 @@
+{
+  "id": "2025",
+  "name": "Garage Games 2025 Baseline",
+  "timerSeconds": 300,
+  "requiredCompletions": 13,
+  "scoringPolicy": "2025-baseline",
+  "bonusPointsPerGame": 10,
+  "attemptBonusThreshold": 13,
+  "attemptBonusPoints": 25,
+  "timeBonusCompletionThreshold": 13,
+  "draft": false,
+  "games": [
+    { "id": "perfect-pour", "name": "Perfect Pour", "shortName": "pour", "order": 1, "weight": 37.9 },
+    { "id": "row-darts-redux", "name": "Row Darts Redux", "shortName": "row", "order": 2, "weight": 37.9 },
+    { "id": "monkey-business", "name": "Monkey Business", "shortName": "monkey", "order": 3, "weight": 14.6 },
+    { "id": "pdga-jam", "name": "PDGA Jam", "shortName": "disc", "order": 4, "weight": 28.6 },
+    { "id": "measure-up", "name": "Measure Up", "shortName": "measure", "order": 5, "weight": 56.4 },
+    { "id": "paddle-peril", "name": "Paddle Peril", "shortName": "paddle", "order": 6, "weight": 47.1 },
+    { "id": "a-few-good-pints", "name": "A Few Good Pints", "shortName": "tapper", "order": 7, "weight": 47.1 },
+    { "id": "spice-slide", "name": "Spice Slide", "shortName": "spice", "order": 8, "weight": 65.7 },
+    { "id": "hook-line-winner", "name": "Hook, Line, and Winner", "shortName": "hook", "order": 9, "weight": 75.0 },
+    { "id": "top-shelf-shot", "name": "Top Shelf Shot", "shortName": "top", "order": 10, "weight": 42.5 },
+    { "id": "bocce-the-moon", "name": "Bocce the Moon", "shortName": "bocce", "order": 11, "weight": 65.7 },
+    { "id": "uphole-battle", "name": "Uphole Battle", "shortName": "cornhole", "order": 12, "weight": 56.4 },
+    { "id": "hammer-head", "name": "Hammer Head", "shortName": "hammer", "order": 13, "weight": 10.0 }
+  ]
+}
+
