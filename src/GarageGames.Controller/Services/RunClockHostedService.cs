@@ -1,4 +1,5 @@
 using GarageGames.Core.Domain;
+using GarageGames.Core.State;
 
 namespace GarageGames.Controller.Services;
 
@@ -14,7 +15,7 @@ public sealed class RunClockHostedService(
             try
             {
                 var state = await runs.GetStateAsync(stoppingToken);
-                if (state.Run is { Status: RunStatus.Active or RunStatus.Bonus, RemainingSeconds: 0 })
+                if (RunLifecycle.RequiresPersistedTimeout(state.Run))
                 {
                     await runs.TimeoutAsync(stoppingToken);
                 }
@@ -29,4 +30,5 @@ public sealed class RunClockHostedService(
             }
         }
     }
+
 }

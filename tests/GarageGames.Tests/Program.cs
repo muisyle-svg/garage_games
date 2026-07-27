@@ -8,7 +8,8 @@ var tests = new (string Name, Action Run)[]
     ("2026 decay boundaries and minimum", TimeDecayBoundaries),
     ("Duplicate first attempts project once", DuplicateAttempt),
     ("Voided event disappears from projection", VoidedCompletion),
-    ("Incomplete run remains active", IncompleteRun)
+    ("Incomplete run remains active", IncompleteRun),
+    ("Displayed timeout is persisted by the run clock", DisplayedTimeoutIsPersisted)
 };
 
 var failures = 0;
@@ -111,6 +112,24 @@ static void IncompleteRun()
     Equal(RunStatus.Active, snapshot.Status);
 }
 
+static void DisplayedTimeoutIsPersisted()
+{
+    var season = BaselineSeason();
+    var snapshot = Project(
+        season,
+        [Event(1, EventTypes.AttemptStarted, season.Games[0].Id, 0, 300_000)]);
+
+    Equal(RunStatus.TimedOut, snapshot.Status);
+    Equal(true, RunLifecycle.RequiresPersistedTimeout(snapshot));
+    Equal(
+        false,
+        RunLifecycle.RequiresPersistedTimeout(snapshot with
+        {
+            Status = RunStatus.Paused,
+            RemainingSeconds = 1
+        }));
+}
+
 static RunSnapshot Project(SeasonDefinition season, IReadOnlyList<DeviceEvent> events) =>
     new RunProjector().Project(
         "run", "competitor", "Test Competitor", DateTimeOffset.UnixEpoch, season, events);
@@ -137,4 +156,3 @@ static void Equal<T>(T expected, T actual)
         throw new InvalidOperationException($"Expected {expected}, got {actual}.");
     }
 }
-

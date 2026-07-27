@@ -7,4 +7,3 @@
     <ProjectReference Include="..\..\src\GarageGames.Core\GarageGames.Core.csproj" />
   </ItemGroup>
 </Project>
-
