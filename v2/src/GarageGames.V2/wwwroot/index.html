@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#12221e">
   <title>Garage Games — Scorekeeper</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="mvp-scorekeeper.css">
 </head>
 <body class="operator-view">
   <header class="mvp-header">
@@ -58,9 +58,30 @@
         </div>
         <div class="summary-stat summary-clock"><span>Time remaining</span><strong id="run-countdown">05:00</strong></div>
         <div class="summary-stat"><span>Competitor</span><strong id="run-competitor">—</strong></div>
-        <div class="summary-stat"><span>Events complete</span><strong id="event-progress">0 / 13</strong></div>
+        <div class="summary-stat"><span>Events complete</span><strong id="event-progress">0 / 0</strong></div>
         <div class="summary-stat summary-total"><span>Total points</span><strong id="run-total">0</strong></div>
       </div>
+
+      <section class="on-deck-panel sheet-card" aria-labelledby="on-deck-heading">
+        <div class="card-heading">
+          <div><p class="mvp-kicker">Next up</p><h2 id="on-deck-heading">On deck</h2></div>
+          <span id="on-deck-count" class="small-note">0 queued</span>
+        </div>
+        <form id="on-deck-form" class="on-deck-form">
+          <label for="on-deck-competitor-select">Competitor
+            <select id="on-deck-competitor-select"><option value="">Select competitor…</option></select>
+          </label>
+          <label for="on-deck-category-select">Run type
+            <select id="on-deck-category-select">
+              <option value="official">Official</option>
+              <option value="playoff">Playoff</option>
+              <option value="exhibition">Exhibition</option>
+            </select>
+          </label>
+          <button id="add-to-queue-button" class="button button-primary" type="submit">Add to on deck</button>
+        </form>
+        <ol id="on-deck-list" class="on-deck-list"><li class="empty-state">Add a competitor to show who is next on the TV scoreboard.</li></ol>
+      </section>
 
       <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
 
@@ -85,7 +106,7 @@
           <div class="table-scroll">
             <table class="score-table">
               <thead><tr><th scope="col">Event</th><th scope="col">Start (s)</th><th scope="col">Stop (s)</th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
-              <tbody id="current-event-body"><tr><td colspan="6" class="empty-cell">Select a competitor to load the 13-event scorecard.</td></tr></tbody>
+              <tbody id="current-event-body"><tr><td colspan="6" class="empty-cell">The edition event scorecard will appear here.</td></tr></tbody>
               <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="scorecard-total">0</td><td></td></tr></tfoot>
             </table>
           </div>
@@ -124,6 +145,6 @@
   </main>
 
   <footer class="mvp-footer"><span>Garage Games</span><span>Local scorekeeper · changes save on this computer</span></footer>
-  <script src="app.js" defer></script>
+  <script src="mvp-scorekeeper.js" defer></script>
 </body>
 </html>

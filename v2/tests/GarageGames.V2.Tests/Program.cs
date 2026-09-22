@@ -122,6 +122,10 @@ static void MvpRosterAndVirtualPresses()
     Assert.Equal("Hammer Head", edition.Events[^1].Name);
 
     using var h = new TestHarness(edition, NewPath());
+    var operatorEvents = h.Service.GetOperatorSnapshot().Events;
+    Assert.Equal(edition.Events.Count, operatorEvents.Count);
+    Assert.True(operatorEvents.Select(e => e.Name).SequenceEqual(edition.Events.Select(e => e.Name)),
+        "The operator roster must follow the configured edition event names and order.");
     var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
     h.Service.StartMaster();
     h.Clock.Advance(TimeSpan.FromSeconds(2));

@@ -331,6 +331,7 @@ public sealed class OperatorSnapshot
     public int DurationLimitSeconds { get; set; }
     public bool SimulationMode { get; set; }
     public RunRecord? CurrentRun { get; set; }
+    public required List<EventSnapshot> Events { get; set; }
     public required List<CompetitorRecord> Competitors { get; set; }
     public required List<QueueItemRecord> Queue { get; set; }
     public required List<DeviceRecord> Devices { get; set; }

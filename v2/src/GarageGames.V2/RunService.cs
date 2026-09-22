@@ -125,6 +125,7 @@ public sealed class RunService
                 DurationLimitSeconds = _edition.DurationLimitSeconds,
                 SimulationMode = simulationMode,
                 CurrentRun = _current is null ? (_lastDisplayedRun is null ? null : Clone(_lastDisplayedRun)) : Clone(_current),
+                Events = _edition.ToSnapshot().Events,
                 Competitors = _data.Competitors.Select(Clone).ToList(),
                 Queue = _data.Queue.OrderBy(q => q.Position).Select(Clone).ToList(),
                 Devices = _data.Devices.Select(Clone).ToList(),

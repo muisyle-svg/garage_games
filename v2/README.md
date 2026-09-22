@@ -1,15 +1,17 @@
 # Garage Games v2
 
-This is the first runnable local v2 implementation. It is a separate .NET 10
-ASP.NET Core loopback application with an embedded SQLite store. The original
-Garage Games application, firmware, root solution, and existing data are not
+Garage Games v2 is a local .NET 10 ASP.NET Core application with an embedded
+SQLite store. Its MVP scorekeeper has 13 regular events, competitor selection,
+a five-minute run clock, pause/resume, virtual two-press event buttons, editable
+timestamps and manual event points, and a history that can be corrected later.
+Timed-out runs remain as incomplete history and do not prevent starting the next
+competitor. The original app, firmware, and existing historical data are not
 used or modified.
 
-The first executable increment is explicitly Simulation mode. It exercises the
-same validated message envelope and dispatcher used by the future transport:
-master start, standard event presses, keypad incorrect/success signals, magnetic
-arcade start/finish signals, pause/resume, timeout, queueing, corrections, and
-scoreboard updates. It does not claim physical hardware support.
+The virtual buttons are for testing. Physical hardware, the keypad and magnetic
+special events, bonus rounds, and event-specific scoring formulas are deferred.
+The app runs locally and has no Google Sheets or other network-service
+dependency; it does not yet claim physical hardware support.
 
 ## Launch
 
@@ -38,10 +40,10 @@ data path is `v2\.tools\localappdata\GarageGamesV2` in this repository. A
 direct command-line launch without those environment overrides uses the normal
 Windows `%LOCALAPPDATA%\GarageGamesV2` path instead.
 
-Use the operator's Simulation panel to toggle device availability, send virtual
-signals, and advance the simulation clock. The panel is only registered when the
-app is not started with `--hardware-mode`. This version has no physical firmware
-adapter, wireless transport, Google service, or network dependency.
+Use the on-screen event buttons to test a run. Press an event once to record its
+start and again to record its finish; different events may overlap. Event times
+are elapsed seconds from the run start. The operator can edit event times and
+points before or after recording a run. Points are manually entered and summed.
 
 ## Storage and recovery
 
@@ -54,9 +56,9 @@ the operator must resume explicitly. Unknown schema versions, missing required
 tables, failed integrity checks, or malformed persisted snapshots fail visibly;
 the app never resets the database.
 
-The **Create backup** operator action creates an explicit SQLite backup in the
-data directory's `backups` folder. **Export JSON** returns an operator export of
-the current state and audit ledger.
+The local `/api/backup` endpoint creates an explicit SQLite backup in the data
+directory's `backups` folder. `/api/export` returns an operator export of the
+current state and audit ledger.
 
 The server checkpoints an active run at least once per second. An unexpected
 stop can therefore lose at most the last checkpoint interval of active elapsed
