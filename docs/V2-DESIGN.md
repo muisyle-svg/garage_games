@@ -1,0 +1,100 @@
+# Garage Games v2: requirements and interview
+
+Status: requirements captured; first interview pending. This is a new version,
+informed by the earlier implementation, not an instruction to delete or replace it.
+
+## Confirmed requirements
+
+- Standalone Windows application providing operator controls and a spectator scoreboard.
+- All scoring, timing, competitor management, corrections, and history work locally.
+  No Google Sheets, Apps Script, Google polling, credentials, or hosted services
+  are required by v2. Reproduce the useful Sheet workflows within the application.
+- Spoke buttons communicate with the master exclusively through ESP-NOW.
+  The master starts the overall run and connects to the computer.
+- Every normal-event button has a persistent, explicit association with one event.
+  Discovery order must not determine which event receives a press or measurement.
+- Normal events record start and finish times. Special-event modules can report
+  their own measurements and scores.
+- An edition has a configurable event roster, likely 13 or 14 events this year.
+  Event count, names, order, button assignment, and scoring must not be hard-coded
+  to one year's roster.
+- Operators can add competitors and select/change the current competitor.
+- Operators can recall any competitor's current or historical run, view its event
+  times and scores, and make manual adjustments before or after the run finishes.
+- The scoreboard shows a points leaderboard, the on-deck competitor, and the
+  current run's completed and remaining events.
+- Speed Button should supply reusable radio/game behavior and eventually be an
+  integrated bonus mode. Its final bonus rules remain explicitly deferred.
+- One special event will reuse magnetic arcade sensor code.
+
+## Source review
+
+- `src/GarageGames.Controller/Services/RunService.cs`: corrections go through
+  `AppendToCurrentAsync`; there is no historical-run correction workflow.
+  Leaderboard currently lists each completed/timed-out run, rather than applying
+  a confirmed rule for multiple runs by the same person.
+- `src/GarageGames.Core/State/RunProjector.cs`: first attempt/completion readings
+  win; corrections support remaining-time values and a bonus flag. A missing start
+  is inferred from completion. These behaviors need explicit review for v2.
+- `config/seasons/2026.json`: existing 300-second, 13-event time-decay configuration
+  is marked draft. It is evidence of earlier work, not an approved v2 rule set.
+- `archive/legacy-scorekeeper/code.gs.txt`: first and second presses fill attempt
+  and completion cells using remaining overall time. Completion checks hard-code
+  13 events. The script references scoring cells; it does not contain all original
+  workbook formulas.
+- `firmware/lib/StationRuntime/`: reusable ideas include station identity, run IDs,
+  acknowledgements, retry handling, and game modules. Existing production master
+  communicates with the PC over network WebSocket, not USB serial.
+- `C:/Users/Projector/Documents/Speed Button/speed_button_master/` and
+  `speed_button_spoke/`: fixed-channel ESP-NOW, MAC-based discovery, queued receive
+  callbacks, run/cue identifiers, retransmission, and reaction-game state machines.
+  Its current expected-spoke capacity is 13. Integrate via a deliberate shared
+  protocol; the old Garage Games and Speed Button protocols are not interchangeable.
+- `C:/Users/Projector/Documents/Emerald`: saved Magnetic Arcade Sensors project
+  contains media assets in the inspected folder; sensor source has not been located.
+
+## Proposed foundations, subject to interview
+
+- Separate competitors, editions, runs, per-event attempts, and physical devices.
+  Persist run-specific roster, assignments, and scoring configuration so changing
+  next year's events does not reinterpret historical scores.
+- Provide an editable results grid with start, finish, duration, measurements,
+  calculated points, and manual overrides. Preserve original readings and an
+  adjustment history behind simple cell editing; allow corrections to be undone.
+- Recalculate the edited run and affected leaderboard after corrections. Editing
+  a past run must not switch or send control commands to the active physical run.
+- Bind incoming messages to device identity and run/session identity. Deduplicate
+  retries, retain measurement timestamps, and flag unknown/unassigned/late packets
+  rather than silently assigning them to the next competitor.
+- Give standard timing, sensor events, and bonus games separate modules using
+  common device discovery, transport, persistence, and UI contracts.
+- Use a separate v2 data location during development. Historical import, if wanted,
+  should be explicit and preserve original databases and files.
+
+## Interview decisions still needed
+
+1. Walkthrough: countdown duration, event order, press semantics, abandonment,
+   retries, overlapping attempts, timeout, pause, and master-button end behavior.
+2. Scoring: per-event points and time penalties, partial credit, attempt/time
+   awards, tie-breaks, and which rules should remain configurable.
+3. Hardware/display: USB or wireless master-to-PC, controller board revisions,
+   laptop plus second display, and preferred standalone window behavior.
+4. Competitors/history: number of runs, leaderboard selection (best/latest/etc.),
+   on-deck ordering, and what changing a competitor mid-run should mean.
+5. Editing: remaining-time versus elapsed-time inputs, direct duration/point edits,
+   precision, and expected interaction when an operator edits during incoming presses.
+6. Special events: sensor source location and the measurements it produces.
+   Final Speed Button bonus gameplay may be decided later.
+
+## Build sequence after interview
+
+1. New local app with configurable roster, competitors, persistent run history,
+   editable current/past results, and independent scoreboard window/view.
+2. Device simulator and tests for corrections, history isolation, changing event
+   counts, duplicate/late messages, and interrupted runs.
+3. Master-to-PC link and normal-event ESP-NOW firmware, followed by real-button tests.
+4. Magnetic event adapter and Speed Button bonus integration as rules are confirmed.
+
+Acceptance requires a real physical button to update its assigned event, a completed
+run to remain editable after restart, and scoreboard changes to reflect corrections.
+Simulated input alone does not establish hardware readiness.
