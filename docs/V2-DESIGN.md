@@ -27,6 +27,25 @@ informed by the earlier implementation, not an instruction to delete or replace 
   integrated bonus mode. Its final bonus rules remain explicitly deferred.
 - One special event will reuse magnetic arcade sensor code.
 
+## Confirmed run categories and lifecycle
+
+- Each competitor gets one official/main run per edition. Only the current
+  accepted official run contributes to the official leaderboard.
+- A restart creates a replacement attempt linked to the same competitor and
+  edition. The prior attempt is retained and marked restarted/superseded; it
+  is never permanently deleted and does not remain the counted official result.
+- Playoff and exhibition runs are first-class records with an explicit run
+  category. They remain visible in history and can be shown on the scoreboard
+  with their category label, but they do not contribute to the official
+  leaderboard or official points.
+- Manual correction may change any run or result parameter needed by the
+  operator, including competitor, category, event state, timestamps, duration,
+  measurements, points, bonus results, and run metadata. Every correction is
+  recorded in an audit trail so the prior value can be reviewed or restored.
+- Replacing or correcting a run must update the scoreboard and official
+  standings immediately, while preserving the original device messages and
+  prior run versions for recovery.
+
 ## Confirmed run flow
 
 - The scorekeeper selects the player in the app before the player presses the
@@ -90,8 +109,9 @@ informed by the earlier implementation, not an instruction to delete or replace 
 ## Proposed foundations, subject to interview
 
 - Separate competitors, editions, runs, per-event attempts, and physical devices.
-  Persist run-specific roster, assignments, and scoring configuration so changing
-  next year's events does not reinterpret historical scores.
+  Persist run-specific roster, assignments, scoring configuration, run category,
+  and attempt lineage so changing next year's events does not reinterpret
+  historical scores.
 - Provide an editable results grid with start, finish, duration, measurements,
   calculated points, and manual overrides. Preserve original readings and an
   adjustment history behind simple cell editing; allow corrections to be undone.
@@ -113,10 +133,12 @@ informed by the earlier implementation, not an instruction to delete or replace 
    editions need event-specific formulas or weights beyond the initial rule above.
 3. Hardware/display: USB or wireless master-to-PC, controller board revisions,
    laptop plus second display, and preferred standalone window behavior.
-4. Competitors/history: number of runs, leaderboard selection (best/latest/etc.),
-   on-deck ordering, and what changing a competitor mid-run should mean.
-5. Editing: remaining-time versus elapsed-time inputs, direct duration/point edits,
-   precision, and expected interaction when an operator edits during incoming presses.
+4. Competitors/history: on-deck ordering, and what changing a competitor
+   mid-run should mean. Official, playoff, exhibition, and superseded attempts
+   are otherwise defined above.
+5. Editing: precision, and expected interaction when an operator edits during
+   incoming presses. The editable scope is intentionally broad; the remaining
+   question is the safest operator workflow.
 6. Special events: sensor source location and the measurements it produces.
    Final Speed Button bonus gameplay may be decided later.
 
