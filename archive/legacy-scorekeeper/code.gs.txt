@@ -1,0 +1,453 @@
+/******************************************************
+ *  SCOREKEEPER AUTOMATION SCRIPT
+ *  --------------------------------
+ *  This Google Apps Script controls and logs timing
+ *  and scoring for an event using a Google Sheet.
+ *  It can be triggered either:
+ *    - by pressing buttons within the Sheet, or
+ *    - by an external device (like an ESP32)
+ *      making a web request to this script.
+ ******************************************************/
+
+/***** CONFIGURATION SECTION *****/
+var SHEET_NAME = "Scorekeeper";  // Name of the sheet the script operates on
+var TIMER_CELL = "A42";          // The cell that stores the timer duration in seconds
+
+
+/***** HELPER FUNCTIONS (for accessing the sheet and safe UI calls) *****/
+
+/**
+ * Always retrieves the "Scorekeeper" sheet safely.
+ * Using a fixed name is more reliable than getActiveSheet(),
+ * especially when this code is called remotely (without a user interface).
+ */
+function getSheet() {
+  return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+}
+
+/**
+ * Checks if a user interface (UI) is available.
+ * - When the code runs from the sheet (by a user), the UI exists.
+ * - When called by an external device or trigger, it doesn’t.
+ * This prevents crashes from trying to open dialogs or alerts when none exist.
+ */
+function isUiAvailable() {
+  try {
+    SpreadsheetApp.getUi(); // If this line fails, UI isn’t available
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * A safe “alert” function.
+ * If the script has a UI (e.g. a person is using the sheet), show a popup.
+ * Otherwise, record the message quietly in a cell and in the logs.
+ */
+function uiAlert(msg) {
+  if (isUiAvailable()) {
+    SpreadsheetApp.getUi().alert(msg);
+  } else {
+    // If there's no UI, quietly record the message
+    try {
+      var sheet = getSheet();
+      if (sheet) sheet.getRange("A50").setValue(String(msg)); // write to A50 for debugging
+    } catch (e) {}
+    Logger.log("[ALERT suppressed] " + msg);
+  }
+}
+
+
+/***** BASIC UTILITY FUNCTIONS *****/
+
+/**
+ * Called when a new timer run starts.
+ * Records the start time (the current date and time) into cell A45.
+ */
+function startTimer() {
+  var sheet = getSheet();
+  sheet.getRange("A45").setValue(new Date());
+  return { ok: true, startedAt: new Date() };
+}
+
+/**
+ * Called when a timer ends.
+ * Currently does nothing except confirm the stop.
+ * (Originally used to close the sidebar UI.)
+ */
+function stopTimer() {
+  return { ok: true };
+}
+
+/**
+ * Converts a time in seconds to a readable mm:ss format.
+ * Example: 90 seconds → "1:30"
+ */
+function formatTime(seconds) {
+  var minutes = Math.floor(seconds / 60);
+  var remainingSeconds = Math.floor(seconds - minutes * 60);
+  return minutes + ":" + (remainingSeconds < 10 ? "0" + remainingSeconds : remainingSeconds);
+}
+
+/**
+ * Reads the total timer duration (in seconds) from cell A42.
+ */
+function getTimerDuration() {
+  var sheet = getSheet();
+  return sheet.getRange(TIMER_CELL).getValue();
+}
+
+/**
+ * Writes the current timestamp into cell A45.
+ * Used to mark the start time of a run.
+ */
+function recordCurrentTime() {
+  var sheet = getSheet();
+  sheet.getRange("A45").setValue(new Date());
+}
+
+/**
+ * Clears key cells on the Scorekeeper sheet
+ * so it’s ready for the next competitor or run.
+ */
+function clearScorekeeperCells() {
+  var sheet = getSheet();
+  sheet.getRange("A45").clear();
+  sheet.getRange("A47").clear();
+  sheet.getRange("A48").clear();
+  sheet.getRange("B45").clear();
+  sheet.getRange("J5:K21").clear(); // clear event data
+  sheet.getRange("M5:M21").setValue(0); // uncheck boxes
+}
+
+
+/***** MAIN EVENT LOGIC *****/
+
+// This used to open the sidebar timer, which is now gone. This is attached to the START button so still needed
+// and merely clears the cells and puts the start time in the cell for later reference when events
+// check how long they have been running.
+function openSidebar() {
+  clearScorekeeperCells();
+  recordCurrentTime();
+}
+
+
+/**
+ * Calculates how much time remains for the current event
+ * and logs that time into the appropriate row of the sheet.
+ *
+ * This function is called whenever a station button (or external trigger)
+ * is pressed to record a time.
+ */
+function getTimeRemaining(outputRow) {
+  var sheet = getSheet();
+
+  // Check if all events have already been completed
+  var completed = sheet.getRange("K30").getValue();
+  if (completed === 13) {
+    uiAlert("Run Already Completed");
+    return { ok: false, reason: "already_completed" };
+  }
+
+  // Verify that the start time (A45) is valid
+  var startTime = sheet.getRange("A45").getValue();
+  if (!(startTime instanceof Date)) {
+    uiAlert("Please ensure A45 has a valid time.");
+    return { ok: false, reason: "invalid_start" };
+  }
+
+  // Calculate how much time has passed since the start
+  var now = new Date();
+  var elapsed = (now - startTime) / 1000;  // convert milliseconds → seconds
+  var duration = sheet.getRange("A42").getValue(); // total allowed duration in seconds
+
+  // If too much time has passed, notify and stop
+  if (elapsed > duration) {
+    uiAlert("Time Expired.");
+    return { ok: false, reason: "time_expired" };
+  }
+
+  // Compute how much time is left
+  var remainingTime = Math.floor(duration - elapsed);
+
+  // Each station logs its time in columns J and K for its specific row.
+  // The first empty cell (J first, then K) gets filled with the time remaining.
+  var primaryCell = sheet.getRange("J" + outputRow).getValue();
+  var secondaryCell = sheet.getRange("K" + outputRow).getValue();
+
+  if (primaryCell === "") {
+    sheet.getRange("J" + outputRow).setValue(remainingTime);
+  } else if (secondaryCell === "") {
+    sheet.getRange("K" + outputRow).setValue(remainingTime);
+  }
+
+  return { ok: true, row: outputRow, remaining: remainingTime };
+}
+
+
+/***** EVENT FUNCTIONS (for each competition station) *****/
+/**
+ * Each of these functions corresponds to a physical button
+ * or event station (e.g., pour, row, monkey, etc.).
+ * They all call getTimeRemaining() with the correct row number
+ * and then check if the competition is finished.
+ */
+function pour()     { var r = getTimeRemaining(5);  checkFinish(); return r; }
+function row()      { var r = getTimeRemaining(6);  checkFinish(); return r; }
+function monkey()   { var r = getTimeRemaining(7);  checkFinish(); return r; }
+function disc()     { var r = getTimeRemaining(8);  checkFinish(); return r; }
+function measure()  { var r = getTimeRemaining(9);  checkFinish(); return r; }
+function paddle()   { var r = getTimeRemaining(10); checkFinish(); return r; }
+function tapper()   { var r = getTimeRemaining(11); checkFinish(); return r; }
+function spice()    { var r = getTimeRemaining(12); checkFinish(); return r; }
+function hook()     { var r = getTimeRemaining(13); checkFinish(); return r; }
+function top()      { var r = getTimeRemaining(14); checkFinish(); return r; }
+function bocce()    { var r = getTimeRemaining(15); checkFinish(); return r; }
+function cornhole() { var r = getTimeRemaining(16); checkFinish(); return r; }
+function hammer()   { var r = getTimeRemaining(17); checkFinish(); return r; }
+function unused1()  { var r = getTimeRemaining(18); checkFinish(); return r; }
+function unused2()  { var r = getTimeRemaining(19); checkFinish(); return r; }
+function unused3()  { var r = getTimeRemaining(20); checkFinish(); return r; }
+
+
+/***** FINISH LOGIC *****/
+
+/**
+ * Checks how many events have been completed (K30).
+ * If all required stations are finished, it triggers finish().
+ */
+function checkFinish() {
+  var sheet = getSheet();
+  var finishValue = sheet.getRange("K30").getValue();
+  if (finishValue == 13) {   // originally 16, but adjusted here
+    finish();
+  }
+}
+
+/**
+ * Called when all events in a run are complete.
+ * - Calculates how much time was left when finishing.
+ * - Records that remaining time in the sheet.
+ * - Copies results to the “Stats” sheet for record keeping.
+ */
+function finish() {
+  var sheet = getSheet();
+  var existing = sheet.getRange("B45").getValue();
+
+  // If already finished once, don’t overwrite
+  if (existing !== "") return { ok: true, msg: "Finish already recorded" };
+
+  // Figure out how much time was left
+  var now = new Date();
+  var startTime = sheet.getRange("A45").getValue();
+  var duration = sheet.getRange("A42").getValue();
+  var elapsed = (now - new Date(startTime)) / 1000;
+  var remaining = Math.floor(duration - elapsed);
+  if (remaining <= 0) remaining = 0;
+
+  // Record finish time in B45
+  sheet.getRange("B45").setValue(remaining);
+
+  // Copy all data over to Stats sheet
+  copyDataToStats();
+
+  uiAlert('Run Completed');
+  return { ok: true, finish_remaining: remaining };
+}
+
+/***** PAUSE / RESTART (headless-safe, no sidebar) *****/
+
+/**
+ * PAUSE:
+ * - Captures the current timestamp into A47 (the moment you paused).
+ * - Computes how much time is left in the run and stores it in A48.
+ *   • Remaining = A42 (total allowed seconds) - (now - A45 start) in seconds
+ * - Does NOT change A42 (so you still have the original duration recorded).
+ * - Returns a small status object for ESP32/web callers.
+ */
+function pause() {
+  var sheet = getSheet();
+
+  // Guard: we need a valid start time in A45 to compute elapsed time
+  var startTime = sheet.getRange("A45").getValue();
+  if (!(startTime instanceof Date)) {
+    uiAlert("Cannot pause: start time (A45) is empty or invalid.");
+    return { ok: false, reason: "invalid_start_time" };
+  }
+
+  var now = new Date();
+  sheet.getRange("A47").setValue(now); // record when we paused
+
+  // How long has the run been going?
+  var elapsed = (now - new Date(startTime)) / 1000; // seconds
+  var total = Number(sheet.getRange("A42").getValue()); // allowed seconds
+  if (isNaN(total) || total <= 0) {
+    uiAlert("Cannot pause: total duration (A42) is empty or invalid.");
+    return { ok: false, reason: "invalid_total_duration" };
+  }
+
+  // Remaining time cannot go below zero
+  var remaining = Math.max(total - elapsed, 0);
+  sheet.getRange("A48").setValue(remaining); // stash remaining seconds
+
+  // (No UI to close; we’re headless-safe)
+  return { ok: true, remaining: Math.floor(remaining) };
+}
+
+/**
+ * RESTART:
+ * - Reads remaining seconds from A48 (set by pause()).
+ * - Writes that value to A42 (so future checks use the new shorter window).
+ * - Sets A45 to now (new "start" for the resumed period).
+ * - Clears A47 (pause timestamp) since we’re no longer paused.
+ * - Returns a small status object for ESP32/web callers.
+ */
+function restart() {
+  var sheet = getSheet();
+
+  // We expect pause() to have saved remaining seconds into A48
+  var remaining = Number(sheet.getRange("A48").getValue());
+  if (isNaN(remaining) || remaining <= 0) {
+    uiAlert("Cannot restart: remaining time (A48) is empty or not positive.");
+    return { ok: false, reason: "invalid_remaining" };
+  }
+
+  // Set the timer for the resumed period:
+  //   • A42 becomes the new total (remaining) for the resumed run
+  //   • A45 becomes the new "start time"
+  sheet.getRange("A42").setValue(remaining);
+  sheet.getRange("A45").setValue(new Date());
+
+  // Clear the pause timestamp (optional tidy-up)
+  sheet.getRange("A47").clear();
+
+  return { ok: true, restarted_with: Math.floor(remaining) };
+}
+
+
+
+/***** DATA LOGGING: COPY RESULTS TO “STATS” SHEET *****/
+
+/**
+ * After a run finishes, this copies all timing and scoring data
+ * from the Scorekeeper sheet into a cumulative “Stats” sheet.
+ *
+ * It creates a new row for each completed run, with a unique record ID.
+ */
+function copyDataToStats() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var scorekeeperSheet = getSheet();
+  var statsSheet = ss.getSheetByName("Stats");
+
+  // Determine where the next empty row is
+  var lastRowA = statsSheet.getRange("A:A").getValues().filter(String).length;
+  var lastRowB = statsSheet.getRange("B:B").getValues().filter(String).length;
+  var lastRow = Math.max(lastRowA, lastRowB);
+  var newRow = lastRow + 1;
+
+  // Auto-increment the record ID
+  var previousRecordId = statsSheet.getRange(lastRow, 1).getValue();
+  var recordId = (!isNaN(previousRecordId) && lastRow > 1) ? previousRecordId + 1 : 1;
+
+  // Pull relevant data from the Scorekeeper sheet
+  var attData   = scorekeeperSheet.getRange("J5:J21").getValues().flat(); // Attempt times
+  var compData  = scorekeeperSheet.getRange("K5:K21").getValues().flat(); // Completion times
+  var diffData  = scorekeeperSheet.getRange("P5:P21").getValues().flat(); // Differences
+  var bonusData = scorekeeperSheet.getRange("N5:N21").getValues().flat(); // Bonus points
+
+  // Other information about the competitor and totals
+  var name        = scorekeeperSheet.getRange("J2").getValue();
+  var totAtt      = scorekeeperSheet.getRange("J30").getValue();
+  var totalComp   = scorekeeperSheet.getRange("K30").getValue();
+  var eventScore  = scorekeeperSheet.getRange("M27").getValue();
+  var bonusScore  = scorekeeperSheet.getRange("N27").getValue();
+  var attBonus    = scorekeeperSheet.getRange("M30").getValue();
+  var finishTime  = scorekeeperSheet.getRange("N30").getValue();
+  var totScore    = scorekeeperSheet.getRange("K27").getValue();
+  var totBonus    = scorekeeperSheet.getRange("M24").getValue();
+
+  // Combine everything into one long array to insert into the Stats sheet
+  var newRowData = [recordId, name]
+    .concat(attData, compData, diffData, bonusData)
+    .concat([totAtt, totalComp, eventScore, bonusScore, attBonus, finishTime, totScore, totScore, totBonus]);
+
+  // Write that data to the next available row
+  statsSheet.getRange(newRow, 1, 1, newRowData.length).setValues([newRowData]);
+
+  // Apply formulas to certain columns (CJ–CZ) to mark completion
+  var columnLetters = ['BB','BC','BD','BE','BF','BG','BH','BI','BJ','BK','BL','BM','BN','BO','BP','BQ','BR'];
+  var targetColumns = ['CJ','CK','CL','CM','CN','CO','CP','CQ','CR','CS','CT','CU','CV','CW','CX','CY','CZ'];
+
+  for (var i = 0; i < columnLetters.length; i++) {
+    var formula = '=IF(' + columnLetters[i] + newRow + '>0,"Y",IF(' + columnLetters[i] + newRow + '=0,""))';
+    statsSheet.getRange(targetColumns[i] + newRow).setFormula(formula);
+  }
+
+  uiAlert('Run Recorded');
+  return { ok: true, row: newRow, recordId: recordId };
+}
+
+
+/***** AUTOMATIC WARNING ON SHEET EDIT *****/
+
+/**
+ * When someone edits the sheet manually (for example, changes the name in J2),
+ * this function automatically runs.
+ * It warns the user to double-check that the score was recorded.
+ */
+function onEdit(e) {
+  try {
+    var sheet = e.source.getActiveSheet();
+    if (sheet.getName() === SHEET_NAME && e.range.getA1Notation() === 'J2') {
+      if (e.oldValue != e.value) {
+        uiAlert('Did you remember to record the score? (Full runs automatically record the score) If not, CHANGE THE NAME BACK and RECORD.');
+      }
+    }
+  } catch (err) {
+    Logger.log("onEdit suppressed: " + err);
+  }
+}
+
+
+/***** WEB APP ENDPOINT (for ESP32 or other external triggers) *****/
+/**
+ * This allows external devices to control the script remotely.
+ * For example, an ESP32 can send a web request like:
+ *   POST /exec?action=pour
+ *
+ * The script then runs the corresponding function
+ * (pour, row, finish, etc.) and returns a small JSON response.
+ */
+
+
+function doGet(e){ return doPost(e); }
+
+function doPost(e) {
+  try {
+    var p = e && e.parameter ? e.parameter : {};
+    var action = (p.action || "").toString();
+
+    // Lightweight write entry point: action=put&tab=Scorekeeper&cell=J5&value=123
+    if (action === "put") {
+      var tab = (p.tab || "Scorekeeper").toString();
+      var cell = (p.cell || "").toString();        // e.g. "J5" or "K5"
+      var value = Number(p.value);                  // numeric seconds
+
+      if (!cell) throw new Error("Missing cell param");
+      var sh = SpreadsheetApp.getActive().getSheetByName(tab);
+      if (!sh) throw new Error("Sheet not found: " + tab);
+
+      sh.getRange(cell).setValue(value);
+      return ContentService.createTextOutput(JSON.stringify({ok:true, cell: cell, value: value}))
+                           .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // Fallback: your other actions (pour/row/etc.) if you still use them
+    return ContentService.createTextOutput(JSON.stringify({ok:false, error:"Unknown action"}))
+                         .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ok:false, error:String(err)}))
+                         .setMimeType(ContentService.MimeType.JSON);
+  }
+}

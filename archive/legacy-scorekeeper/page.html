@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Timer Sidebar</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: Arial, sans-serif;
+        }
+
+        #timerDisplay {
+            font-size: 72px;  /* Making the timer bigger */
+        }
+
+        .expired {
+            animation: flashingText 1s infinite;
+            color: red;
+        }
+
+        @keyframes flashingText {
+            0% {color: red;}
+            50% {color: black;}
+            100% {color: red;}
+        }
+    </style>
+</head>
+<body>
+    
+<div id="timerDisplay"></div>
+
+<audio id="fourMinutes" preload="auto" src="https://drive.google.com/uc?export=download&id=1NaACNDyQLtF0mc7pJ-0w4YD2t7gCOha2"></audio>
+<audio id="threeMinutes" preload="auto" src="https://drive.google.com/uc?export=download&id=1eOg8oFbOI8y2Aaobb7PhLivtCC3SZFsC"></audio>
+<audio id="twoMinutes" preload="auto" src="https://drive.google.com/uc?export=download&id=11mV_sG7o0KlK2nxiDlYelwyRg3ucMR7L"></audio>
+<audio id="oneMinute" preload="auto" src="https://drive.google.com/uc?export=download&id=1k1DyC2B7TFAQ3YTl0zb25Mw26r69uAcZ"></audio>
+<audio id="hurry" preload="auto" src="https://drive.google.com/uc?export=download&id=1JuL_8UGGn_Yvm_gTAGeCfF7wMJpX9Ls0"></audio>
+<audio id="buzzer" preload="auto" src="https://drive.google.com/uc?export=download&id=1JIa-xqtKOQiBniT7S7-ezYB1pOxYplnB"></audio>
+
+<script>
+var timeRemaining;  // declare it globally
+var timerInterval;  // declare globally, just like timeRemaining
+
+function loadTimerDurationAndStart() {
+  google.script.run.withSuccessHandler(function(duration) {
+    if (duration && !isNaN(duration)) {
+      timeRemaining = parseInt(duration, 10); 
+      document.getElementById("timerDisplay").innerHTML = formatTime(timeRemaining);
+
+      google.script.run.startTimer(); // Start the timer
+      
+      // Preload audio files to ensure they can play
+      preloadAudioFiles();
+
+      // This will start the countdown ONLY after the display is updated.
+      setTimeout(startCountdown, 100);
+    } else {
+      console.error("Invalid timer duration.");
+    }
+  }).getTimerDuration();
+}
+
+window.onload = loadTimerDurationAndStart; 
+
+function formatTime(seconds) {
+    var minutes = Math.floor(seconds / 60);
+    var remainingSeconds = Math.floor(seconds - (minutes * 60));
+    return minutes + ":" + (remainingSeconds < 10 ? "0" + remainingSeconds : remainingSeconds);
+}
+
+function preloadAudioFiles() {
+    var audioFiles = document.querySelectorAll('audio');
+    audioFiles.forEach(function(audio) {
+        audio.play().then(() => {
+            audio.pause();  // Immediately pause the audio once it's ready
+        }).catch(function(error) {
+            console.error('Audio playback error:', error);
+        });
+    });
+}
+
+function startCountdown() {
+    clearInterval(timerInterval);
+    timerInterval = setInterval(function(){
+        if(timeRemaining <= 0) {
+            document.getElementById("timerDisplay").innerHTML = "Time is Up!";
+            document.getElementById("timerDisplay").classList.add("expired");
+            
+            var buzzer = document.getElementById("buzzer");
+            buzzer.play();
+
+            buzzer.onended = function() {
+                clearInterval(timerInterval);
+                google.script.host.close();
+            };
+
+            google.script.run.stopTimer();
+            clearInterval(timerInterval);
+        } else if(timeRemaining === 240) {  // 4:00
+            document.getElementById("fourMinutes").play();
+        } else if(timeRemaining === 180) {  // 3:00
+            document.getElementById("threeMinutes").play();
+        } else if(timeRemaining === 120) {  // 2:00
+            document.getElementById("twoMinutes").play();
+        } else if(timeRemaining === 60) {  // 1:00
+            document.getElementById("oneMinute").play();
+        } else if(timeRemaining === 30) {  // 0:30
+            document.getElementById("hurry").play();
+        }
+        timeRemaining--;
+        document.getElementById("timerDisplay").innerHTML = formatTime(timeRemaining);
+    }, 1000);
+}
+
+
+</script>
+</body>
+</html>
