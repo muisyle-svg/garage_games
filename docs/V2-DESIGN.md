@@ -49,6 +49,18 @@ informed by the earlier implementation, not an instruction to delete or replace 
 - Historical/current manual corrections remain an operator capability; disabling
   gameplay input at timeout does not prevent subsequent results editing.
 
+## Confirmed initial scoring rule
+
+- Build v2 initially with the existing draft time-decay rule for normal events:
+  100 points for a completed event, minus 5 points for every full 5 seconds of
+  that event's duration, with a minimum of 50 points for any completed event.
+- An unfinished event scores 0 points.
+- Keep the rule configurable at the edition/event level so it can be revised
+  later without changing already-recorded runs. Store the applied rule snapshot
+  with each run.
+- Bonus scoring is deferred. It must be represented as a separate module and
+  separate result record so later bonus rules do not alter normal-event scoring.
+
 ## Source review
 
 - `src/GarageGames.Controller/Services/RunService.cs`: corrections go through
@@ -97,8 +109,8 @@ informed by the earlier implementation, not an instruction to delete or replace 
 
 1. Remaining run edge cases: whether a started event can be reset/retried, presses
    after completion, pause/recovery behavior, and master-button behavior mid-run.
-2. Scoring: per-event points and time penalties, partial credit, attempt/time
-   awards, tie-breaks, and which rules should remain configurable.
+2. Remaining scoring decisions: partial credit, tie-breaks, and whether future
+   editions need event-specific formulas or weights beyond the initial rule above.
 3. Hardware/display: USB or wireless master-to-PC, controller board revisions,
    laptop plus second display, and preferred standalone window behavior.
 4. Competitors/history: number of runs, leaderboard selection (best/latest/etc.),
