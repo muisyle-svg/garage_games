@@ -1,6 +1,6 @@
 # Garage Games v2: requirements and interview
 
-Status: requirements captured; first interview pending. This is a new version,
+Status: interview in progress; normal run flow confirmed. This is a new version,
 informed by the earlier implementation, not an instruction to delete or replace it.
 
 ## Confirmed requirements
@@ -26,6 +26,28 @@ informed by the earlier implementation, not an instruction to delete or replace 
 - Speed Button should supply reusable radio/game behavior and eventually be an
   integrated bonus mode. Its final bonus rules remain explicitly deferred.
 - One special event will reuse magnetic arcade sensor code.
+
+## Confirmed run flow
+
+- The scorekeeper selects the player in the app before the player presses the
+  physical master button to start. Selection itself does not start the clock.
+- The master starts a single five-minute (300-second) run. Remaining time appears
+  on the master display; showing it on the spectator scoreboard remains optional.
+- All normal events become available at run start. Special events may have their
+  own availability conditions, to be defined individually.
+- First press of a normal event's button starts its timer; second press completes
+  it. Different events may be active simultaneously: starting another event does
+  not pause or finish the first. Each duration spans that event's start to finish.
+- Completed normal events lose points as their duration increases. The exact
+  formula is still an interview decision.
+- Completing every event before time expires transitions the run into bonus mode.
+  The bonus uses only the remaining portion of the original five minutes; there
+  is no new or extended bonus timer. Detailed bonus gameplay remains deferred.
+- At the original five-minute deadline, gameplay input is disabled, including
+  bonus scoring. The implementation must distinguish normal-event and bonus-mode
+  button input while retaining each normal event's device assignment.
+- Historical/current manual corrections remain an operator capability; disabling
+  gameplay input at timeout does not prevent subsequent results editing.
 
 ## Source review
 
@@ -73,8 +95,8 @@ informed by the earlier implementation, not an instruction to delete or replace 
 
 ## Interview decisions still needed
 
-1. Walkthrough: countdown duration, event order, press semantics, abandonment,
-   retries, overlapping attempts, timeout, pause, and master-button end behavior.
+1. Remaining run edge cases: whether a started event can be reset/retried, presses
+   after completion, pause/recovery behavior, and master-button behavior mid-run.
 2. Scoring: per-event points and time penalties, partial credit, attempt/time
    awards, tie-breaks, and which rules should remain configurable.
 3. Hardware/display: USB or wireless master-to-PC, controller board revisions,
