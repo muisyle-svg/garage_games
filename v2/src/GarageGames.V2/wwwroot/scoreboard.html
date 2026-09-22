@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101826">
+  <title>Garage Games — Scoreboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="scoreboard-view">
+  <main class="scoreboard-shell">
+    <header class="scoreboard-header">
+      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true">GG</span><div><p class="eyebrow">Garage Games</p><h1 id="scoreboard-edition">Scoreboard</h1></div></div>
+      <div class="scoreboard-header-meta"><span id="scoreboard-mode" class="mode-badge">Connecting</span><span id="scoreboard-connection" class="connection-status is-stale"><span class="status-dot"></span><span>Connecting</span></span><span id="scoreboard-sync" class="sync-label">No sync yet</span></div>
+    </header>
+    <div id="scoreboard-stale" class="scoreboard-stale is-hidden" role="status"><strong>Connection lost.</strong> The display is holding its last known state; timer is stale.</div>
+    <section class="scoreboard-stage">
+      <div class="scoreboard-run-head"><div><p class="eyebrow">Now competing</p><h2 id="scoreboard-competitor">No active run</h2><div class="scoreboard-category-row"><span id="scoreboard-category" class="category-pill">—</span><span id="scoreboard-phase" class="phase-chip">Waiting</span></div></div><div class="scoreboard-clock-wrap"><span class="label">Time remaining</span><strong id="scoreboard-countdown" class="scoreboard-clock">05:00</strong><span id="scoreboard-run-status" class="scoreboard-run-status">Awaiting master start</span></div><div class="scoreboard-total"><span class="label">Awarded total</span><strong id="scoreboard-points">0</strong><span class="scoreboard-total-note">points</span></div></div>
+      <div class="scoreboard-progress"><div class="progress-label"><span>Event progress</span><strong id="scoreboard-event-progress">0 / 13 complete</strong></div><div class="progress-track"><span id="scoreboard-progress-fill" class="progress-fill" style="width:0%"></span></div></div>
+      <div class="scoreboard-grid-layout">
+        <section class="scoreboard-events"><div class="scoreboard-section-heading"><div><p class="eyebrow">Live roster</p><h3>Events</h3></div><span class="muted">Updates from operator desk</span></div><div id="scoreboard-events" class="tv-event-grid"><div class="tv-empty">Events will appear when a run is armed.</div></div></section>
+        <aside class="scoreboard-side"><section class="tv-panel"><div class="scoreboard-section-heading"><div><p class="eyebrow">Next up</p><h3>On deck</h3></div></div><strong id="scoreboard-on-deck" class="on-deck-name">—</strong></section><section class="tv-panel leaderboard-panel"><div class="scoreboard-section-heading"><div><p class="eyebrow">Official standings</p><h3>Leaderboard</h3></div><span class="shared-rank-note">shared ranks on ties</span></div><div id="scoreboard-leaderboard" class="tv-leaderboard"><div class="tv-empty">No official results yet.</div></div></section></aside>
+      </div>
+    </section>
+  </main>
+  <footer class="scoreboard-footer"><span>Garage Games</span><span id="scoreboard-footer-edition">Local scoreboard</span><span id="scoreboard-footer-category">Official standings</span></footer>
+  <script src="app.js" defer></script>
+</body>
+</html>

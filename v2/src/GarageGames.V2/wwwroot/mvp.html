@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#132b35">
+  <title>Garage Games — Scorekeeper</title>
+  <link rel="stylesheet" href="mvp.css">
+  <script src="mvp.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Garage Games scorekeeper home"><span class="brand-mark">GG</span><span><small>Garage Games</small><strong>Scorekeeper</strong></span></a>
+    <div class="header-actions"><span id="connection" class="connection"><i></i>Connecting…</span><a href="/scoreboard" target="_blank" rel="noopener">Open TV scoreboard ↗</a><a href="/advanced">Advanced tools</a></div>
+  </header>
+
+  <main class="page-shell">
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+    <section class="control-panel">
+      <div class="competitor-controls">
+        <label class="select-wrap">Competitor<select id="competitor-select"><option value="">Loading…</option></select></label>
+        <label class="select-wrap category-wrap">Run type<select id="category-select"><option value="official">Official</option><option value="playoff">Playoff</option><option value="exhibition">Exhibition</option></select></label>
+        <form id="add-competitor-form" class="add-competitor"><label class="sr-only" for="new-competitor">New competitor name</label><input id="new-competitor" maxlength="120" placeholder="Add a competitor…" required><button type="submit" class="button button-light">Add</button></form>
+      </div>
+      <div class="timer-controls">
+        <div class="timer-copy"><span class="overline">5-minute run</span><strong id="countdown" class="countdown">05:00</strong><span id="run-state" class="run-state">Choose a competitor to begin</span></div>
+        <div class="run-buttons"><button id="start-button" class="button button-start" type="button" disabled>Start run</button><button id="pause-button" class="button button-pause" type="button" disabled>Pause</button><button id="record-button" class="button button-record" type="button" disabled>Record</button></div>
+      </div>
+    </section>
+
+    <section class="run-heading"><div><p class="overline">Current scorecard</p><h1 id="scorecard-title">No competitor selected</h1><p id="scorecard-subtitle" class="muted">Press a virtual event button once to start it, then again to stop it.</p></div><div class="total-card"><span>Total points</span><strong id="total-points">0</strong></div></section>
+
+    <div class="work-area">
+      <section class="panel course-panel" aria-labelledby="course-title">
+        <div class="panel-heading"><div><p class="overline">Virtual course</p><h2 id="course-title">Tap to record an event</h2></div><span class="live-key"><i></i> Local simulation</span></div>
+        <div class="course-board"><div class="course-ribbon">GARAGE GAMES · 2026</div><div id="event-buttons" class="event-buttons"><p class="muted">Loading event roster…</p></div><div class="course-foot"><span>1st press · start</span><span>2nd press · finish</span><span>Runs can overlap</span></div></div>
+        <div id="button-help" class="button-help">Virtual buttons become available when the run is started.</div>
+      </section>
+
+      <section class="panel scorecard-panel" aria-labelledby="table-title">
+        <div class="panel-heading"><div><p class="overline">Timing &amp; scoring</p><h2 id="table-title">Editable scorecard</h2></div><button id="save-edits" class="button button-save" type="button" disabled>Save corrections</button></div>
+        <div class="table-scroll"><table class="score-table"><thead><tr><th>Event</th><th>Start<br><small>sec left</small></th><th>Finish<br><small>sec left</small></th><th>Duration</th><th>Points</th><th>Status</th></tr></thead><tbody id="score-rows"><tr><td class="empty-row" colspan="6">Select or add a competitor to load a scorecard.</td></tr></tbody></table></div>
+        <div class="scorecard-footer"><label class="bonus-field">Run bonus points<input id="bonus-points" type="number" min="0" step="1" value="0" disabled></label><div class="scorecard-note"><span id="edit-state">Points are manual for this MVP; totals are a simple sum.</span><strong>Event total <b id="event-total">0</b></strong></div></div>
+      </section>
+    </div>
+
+    <div class="lower-area">
+      <section class="panel history-panel"><div class="panel-heading"><div><p class="overline">Saved runs</p><h2>History</h2></div><span id="history-count" class="muted">0 runs</span></div><div id="history-list" class="history-list"><p class="muted">Completed and timed-out runs are saved automatically.</p></div></section>
+      <section class="panel leaderboard-panel"><div class="panel-heading"><div><p class="overline">Standings</p><h2>Leaderboard</h2></div></div><div id="leaderboard" class="leaderboard-list"><p class="muted">No official runs yet.</p></div></section>
+    </div>
+    <footer>Garage Games · Local scorekeeper · <span id="edition-name">Connecting…</span></footer>
+  </main>
+</body>
+</html>

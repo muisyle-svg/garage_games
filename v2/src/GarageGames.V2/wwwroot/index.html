@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#12221e">
+  <title>Garage Games — Scorekeeper</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="operator-view">
+  <header class="mvp-header">
+    <a class="mvp-brand" href="/" aria-label="Garage Games scorekeeper home">
+      <span class="mvp-mark" aria-hidden="true">GG</span>
+      <span><span class="mvp-kicker">Garage Games</span><strong>Scorekeeper</strong></span>
+    </a>
+    <div class="header-status">
+      <span id="edition-name" class="edition-name">Loading edition…</span>
+      <span id="connection-status" class="connection-pill is-offline"><i></i><span>Connecting</span></span>
+      <span id="last-updated" class="last-updated">—</span>
+      <button id="refresh-button" class="button button-quiet" type="button">Refresh</button>
+      <a class="button button-dark" href="/scoreboard" target="_blank" rel="noopener">Open TV scoreboard</a>
+    </div>
+  </header>
+
+  <main class="mvp-main">
+    <div id="alert-region" class="alert-region" aria-live="polite"></div>
+
+    <section class="run-panel" aria-labelledby="run-heading">
+      <div class="run-panel-top">
+        <div>
+          <p class="mvp-kicker">Scorekeeper desk</p>
+          <h1 id="run-heading">Current run</h1>
+          <p id="run-caption" class="muted">Choose a competitor, then start the five-minute clock.</p>
+        </div>
+        <div class="run-controls">
+          <button id="start-run-button" class="button button-primary" type="button" disabled>Start 5-minute run</button>
+          <button id="pause-run-button" class="button button-secondary" type="button" disabled>Pause</button>
+          <button id="record-run-button" class="button button-record" type="button" disabled>Record result</button>
+        </div>
+      </div>
+
+      <div class="run-summary">
+        <div class="competitor-control">
+          <label for="competitor-select">Competitor</label>
+          <div class="competitor-select-row">
+            <select id="competitor-select"><option value="">Select competitor…</option></select>
+            <select id="run-category" aria-label="Run type">
+              <option value="official">Official</option>
+              <option value="playoff">Playoff</option>
+              <option value="exhibition">Exhibition</option>
+            </select>
+          </div>
+          <form id="add-competitor-form" class="add-competitor-form">
+            <label class="sr-only" for="new-competitor-name">Add competitor</label>
+            <input id="new-competitor-name" type="text" maxlength="120" autocomplete="off" placeholder="Add a competitor…" required>
+            <button class="button button-quiet" type="submit">Add</button>
+          </form>
+        </div>
+        <div class="summary-stat summary-clock"><span>Time remaining</span><strong id="run-countdown">05:00</strong></div>
+        <div class="summary-stat"><span>Competitor</span><strong id="run-competitor">—</strong></div>
+        <div class="summary-stat"><span>Events complete</span><strong id="event-progress">0 / 13</strong></div>
+        <div class="summary-stat summary-total"><span>Total points</span><strong id="run-total">0</strong></div>
+      </div>
+
+      <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
+
+      <div class="scorekeeper-layout">
+        <section class="sheet-card virtual-card" aria-labelledby="virtual-heading">
+          <div class="card-heading">
+            <div><p class="mvp-kicker">Course map</p><h2 id="virtual-heading">Virtual event buttons</h2></div>
+            <span class="small-note">Press once to start · again to stop</span>
+          </div>
+          <div id="virtual-event-buttons" class="virtual-event-grid">
+            <p class="empty-state">Start a run to enable the virtual buttons.</p>
+          </div>
+          <p id="virtual-note" class="small-note virtual-note">Virtual buttons are ready for local testing.</p>
+        </section>
+
+        <section class="sheet-card scorecard-card" aria-labelledby="scorecard-heading">
+          <div class="card-heading">
+            <div><p class="mvp-kicker">Run scorecard</p><h2 id="scorecard-heading">Times & points</h2></div>
+            <span id="scorecard-save-state" class="save-state">No unsaved edits</span>
+          </div>
+          <p class="table-help">Time stamps are elapsed seconds from the run start. Leave a stamp or points field blank to clear it.</p>
+          <div class="table-scroll">
+            <table class="score-table">
+              <thead><tr><th scope="col">Event</th><th scope="col">Start (s)</th><th scope="col">Stop (s)</th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
+              <tbody id="current-event-body"><tr><td colspan="6" class="empty-cell">Select a competitor to load the 13-event scorecard.</td></tr></tbody>
+              <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="scorecard-total">0</td><td></td></tr></tfoot>
+            </table>
+          </div>
+          <div class="scorecard-footer">
+            <span class="small-note">Manual points are added for the total; timing does not change points automatically.</span>
+            <button id="save-current-edits" class="button button-secondary" type="button" disabled>Save scorecard edits</button>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="history-panel sheet-card" aria-labelledby="history-heading">
+      <div class="card-heading history-heading">
+        <div><p class="mvp-kicker">Saved results</p><h2 id="history-heading">Run history</h2></div>
+        <span id="history-count" class="small-note">0 runs</span>
+      </div>
+      <div class="history-layout">
+        <div id="history-list" class="history-list"><p class="empty-state">Saved runs will appear here.</p></div>
+        <section id="history-editor" class="history-editor" aria-labelledby="history-editor-title">
+          <div class="history-editor-heading"><h3 id="history-editor-title">Select a saved run</h3><span id="history-editor-status" class="status-tag">—</span></div>
+          <p id="history-editor-meta" class="small-note">Choose a history entry to review or correct its event times and points.</p>
+          <div class="table-scroll history-table-wrap">
+            <table class="score-table">
+              <thead><tr><th scope="col">Event</th><th scope="col">Start (s)</th><th scope="col">Stop (s)</th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
+              <tbody id="history-event-body"><tr><td colspan="6" class="empty-cell">No run selected.</td></tr></tbody>
+              <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="history-total">0</td><td></td></tr></tfoot>
+            </table>
+          </div>
+          <div class="scorecard-footer">
+            <span id="history-save-state" class="small-note">History edits are saved explicitly.</span>
+            <button id="save-history-edits" class="button button-secondary" type="button" disabled>Save history edits</button>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <footer class="mvp-footer"><span>Garage Games</span><span>Local scorekeeper · changes save on this computer</span></footer>
+  <script src="app.js" defer></script>
+</body>
+</html>

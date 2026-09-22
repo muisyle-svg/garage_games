@@ -1,0 +1,27 @@
+{
+  "editionId": "2026",
+  "name": "Garage Games 2026",
+  "durationLimitSeconds": 300,
+  "scoring": {
+    "manualEventPoints": true,
+    "basePoints": 100,
+    "decayPoints": 5,
+    "decayEverySeconds": 5,
+    "minimumPoints": 50
+  },
+  "events": [
+    { "eventId": "event-01", "name": "Perfect Pour", "deviceId": "station-01", "type": "standard" },
+    { "eventId": "event-02", "name": "Row Darts Redux", "deviceId": "station-02", "type": "standard" },
+    { "eventId": "event-03", "name": "Monkey Business", "deviceId": "station-03", "type": "standard" },
+    { "eventId": "event-04", "name": "PGA Jam", "deviceId": "station-04", "type": "standard" },
+    { "eventId": "event-05", "name": "Measure Up", "deviceId": "station-05", "type": "standard" },
+    { "eventId": "event-06", "name": "Paddle Peril", "deviceId": "station-06", "type": "standard" },
+    { "eventId": "event-07", "name": "A Few Good Pints", "deviceId": "station-07", "type": "standard" },
+    { "eventId": "event-08", "name": "Spice Slide", "deviceId": "station-08", "type": "standard" },
+    { "eventId": "event-09", "name": "Hook, Line, and Winner", "deviceId": "station-09", "type": "standard" },
+    { "eventId": "event-10", "name": "Top Shelf Shot", "deviceId": "station-10", "type": "standard" },
+    { "eventId": "event-11", "name": "Bocce the Moon", "deviceId": "station-11", "type": "standard" },
+    { "eventId": "event-12", "name": "Uphole Battle", "deviceId": "station-12", "type": "standard" },
+    { "eventId": "event-13", "name": "Hammer Head", "deviceId": "station-13", "type": "standard" }
+  ]
+}

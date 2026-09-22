@@ -1,0 +1,167 @@
+using GarageGames.V2;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = AppContext.BaseDirectory,
+    WebRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot")
+});
+var simulationMode = !args.Contains("--hardware-mode", StringComparer.OrdinalIgnoreCase);
+var dataPath = GetOption(args, "--data-path") ?? Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GarageGamesV2");
+var editionPath = GetOption(args, "--edition-config") ?? Path.Combine(AppContext.BaseDirectory, "config", "edition-2026.json");
+if (!File.Exists(editionPath))
+{
+    editionPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "config", "edition-2026.json"));
+}
+
+var edition = EditionDefinition.FromJson(editionPath);
+var store = new RunStore(dataPath);
+var clock = new SimulationClock();
+var service = new RunService(store, edition, clock);
+var urls = GetOption(args, "--urls") ?? "http://127.0.0.1:5187";
+ValidateLoopbackUrls(urls);
+
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    options.SerializerOptions.PropertyNameCaseInsensitive = true;
+    options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+});
+builder.Services.AddSingleton(store);
+builder.Services.AddSingleton<IMonotonicClock>(clock);
+builder.Services.AddSingleton(service);
+builder.Services.AddHostedService<RunCheckpointHostedService>();
+builder.WebHost.UseUrls(urls);
+
+var app = builder.Build();
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        var exception = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
+        context.Response.ContentType = "application/json";
+        context.Response.StatusCode = exception switch
+        {
+            CommandException => StatusCodes.Status409Conflict,
+            InvalidDataException => StatusCodes.Status500InternalServerError,
+            _ => StatusCodes.Status500InternalServerError
+        };
+        var message = exception switch
+        {
+            CommandException command => command.Message,
+            InvalidDataException => "Persisted v2 data is invalid; the application did not reset it.",
+            _ => "Garage Games v2 encountered an unexpected error."
+        };
+        await context.Response.WriteAsJsonAsync(new { error = message });
+    });
+});
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
+app.MapGet("/api/health", () => Results.Ok(new { status = "ok", simulationMode }));
+app.MapGet("/api/operator", (RunService runs) => Results.Ok(runs.GetOperatorSnapshot(simulationMode)));
+app.MapGet("/api/scoreboard", (RunService runs) => Results.Ok(runs.GetScoreboard(simulationMode)));
+app.MapGet("/api/export", (RunService runs) => Results.Json(runs.GetOperatorSnapshot(simulationMode), JsonDefaults.Options));
+app.MapGet("/scoreboard", () => Results.File(Path.Combine(AppContext.BaseDirectory, "wwwroot", "scoreboard.html"), "text/html"));
+app.MapGet("/advanced", () => Results.File(Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html"), "text/html"));
+
+app.MapPost("/api/competitors", (AddCompetitorRequest request, RunService runs) =>
+    Results.Ok(runs.AddCompetitor(request.Name)));
+app.MapPost("/api/queue", (AddQueueRequest request, RunService runs) =>
+    Results.Ok(runs.AddToQueue(request.CompetitorId, request.Category, request.ReplaceExistingOfficial, request.Reason)));
+app.MapDelete("/api/queue/{queueId}", (string queueId, RunService runs) =>
+{
+    runs.RemoveFromQueue(queueId);
+    return Results.NoContent();
+});
+app.MapPost("/api/queue/reorder", (ReorderQueueRequest request, RunService runs) =>
+{
+    runs.ReorderQueue(request.QueueIds);
+    return Results.Ok(runs.GetOperatorSnapshot(simulationMode));
+});
+app.MapPost("/api/queue/{queueId}/arm", (string queueId, ArmRequest request, RunService runs) =>
+    Results.Ok(runs.Arm(queueId, request.ManualOfflineOverride)));
+
+app.MapPost("/api/run/start", (RunService runs) =>
+    simulationMode ? Results.Ok(runs.StartMaster()) : Results.Problem("Physical master transport is not implemented in this build; virtual start is disabled in hardware mode.", statusCode: StatusCodes.Status501NotImplemented));
+app.MapPost("/api/run/arm", (StartCompetitorRunRequest request, RunService runs) =>
+    Results.Ok(runs.ArmCompetitor(request.CompetitorId, request.Category)));
+app.MapPost("/api/run/pause", (RunService runs) => Results.Ok(runs.Pause()));
+app.MapPost("/api/run/resume", (RunService runs) => Results.Ok(runs.Resume()));
+app.MapPost("/api/run/finish", (RunService runs) => Results.Ok(runs.Finish()));
+app.MapPost("/api/run/abort", (ActionReasonRequest request, RunService runs) => Results.Ok(runs.Abort(request.Reason)));
+app.MapPut("/api/run/edit", (EditRunRequest request, RunService runs) =>
+    Results.Ok(runs.EditCurrentRun(request)));
+app.MapPost("/api/run/undo", (UndoRequest request, RunService runs) =>
+    Results.Ok(runs.UndoCurrentEdit(request.EditId, request.ExpectedRevision, request.Reason)));
+app.MapPost("/api/runs/{runId}/restart", (string runId, ActionReasonRequest request, RunService runs) =>
+    Results.Ok(runs.Restart(runId, request.Reason)));
+app.MapPut("/api/runs/{runId}/edit", (string runId, EditRunRequest request, RunService runs) =>
+    Results.Ok(runs.EditHistoricalRun(runId, request)));
+app.MapPost("/api/runs/{runId}/events/{eventId}/press", (string runId, string eventId, RunService runs) =>
+    simulationMode ? Results.Ok(runs.PressEvent(runId, eventId)) : Results.NotFound());
+app.MapPost("/api/runs/{runId}/undo", (string runId, UndoRequest request, RunService runs) =>
+    Results.Ok(runs.IsCurrentRun(runId)
+        ? runs.UndoCurrentEdit(request.EditId, request.ExpectedRevision, request.Reason)
+        : runs.UndoHistoricalEdit(runId, request.EditId, request.ExpectedRevision, request.Reason)));
+
+app.MapPost("/api/devices/preflight", (RunService runs) => Results.Ok(runs.Preflight()));
+app.MapPost("/api/devices/{deviceId}/availability", (string deviceId, AvailabilityRequest request, RunService runs) =>
+{
+    if (!simulationMode)
+    {
+        return Results.Problem("Simulated device availability is disabled in hardware mode.", statusCode: StatusCodes.Status501NotImplemented);
+    }
+    runs.SetDeviceAvailability(deviceId, request.Availability, request.Error);
+    return Results.Ok(runs.GetOperatorSnapshot(simulationMode).Devices.Single(d => d.DeviceId == deviceId));
+});
+
+app.MapPost("/api/backup", (RunStore data) => Results.Ok(new { path = data.CreateBackup() }));
+
+app.MapPost("/api/simulator/input", (InputEnvelope envelope, RunService runs) =>
+{
+    if (!simulationMode)
+    {
+        return Results.NotFound();
+    }
+    return Results.Ok(runs.Receive(envelope));
+});
+app.MapPost("/api/simulator/advance-clock", (AdvanceClockRequest request) =>
+{
+    if (!simulationMode)
+    {
+        return Results.NotFound();
+    }
+    if (request.Milliseconds < 0)
+    {
+        throw new CommandException("Simulation clock cannot move backwards.");
+    }
+    clock.Advance(TimeSpan.FromMilliseconds(request.Milliseconds));
+    return Results.Ok(new { advancedMilliseconds = request.Milliseconds });
+});
+
+app.Run();
+
+static string? GetOption(string[] arguments, string name)
+{
+    var index = Array.FindIndex(arguments, argument => string.Equals(argument, name, StringComparison.OrdinalIgnoreCase));
+    return index >= 0 && index + 1 < arguments.Length ? arguments[index + 1] : null;
+}
+
+static void ValidateLoopbackUrls(string urls)
+{
+    foreach (var rawUrl in urls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        if (!Uri.TryCreate(rawUrl, UriKind.Absolute, out var uri) ||
+            (uri.Host is not "127.0.0.1" and not "localhost" and not "[::1]" and not "::1"))
+        {
+            throw new InvalidOperationException("Garage Games v2 is loopback-only. Use an http://127.0.0.1:<port> URL.");
+        }
+    }
+}
+
+public partial class Program { }
