@@ -82,7 +82,7 @@ try {
             Show-StartupFailure "The Garage Games V2 project was not found at: $project" $outputLog $errorLog
             exit 1
         }
-        $arguments = '"' + $dotnet + '" run --configuration Release --no-build --no-restore --project "' + $project + '" -- --data-path "' + $dataPath + '" --urls "' + $url.TrimEnd('/') + '"'
+        $arguments = '"' + $dotnet + '" run --configuration Release --no-restore --project "' + $project + '" -- --data-path "' + $dataPath + '" --urls "' + $url.TrimEnd('/') + '"'
         $process = Start-LocalHiddenProcess $arguments $repoRoot $outputLog $errorLog
     }
 } catch {
