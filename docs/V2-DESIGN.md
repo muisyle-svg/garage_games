@@ -27,6 +27,44 @@ informed by the earlier implementation, not an instruction to delete or replace 
   integrated bonus mode. Its final bonus rules remain explicitly deferred.
 - One special event will reuse magnetic arcade sensor code.
 
+## Confirmed operator, display, and device behavior
+
+- The operator uses a Windows computer and monitor for the control application.
+  It must show run state, per-event status and scores, competitor controls,
+  device health, and a raw incoming-data view for troubleshooting.
+- The application opens a separate scoreboard window that can be moved to a
+  secondary monitor or TV. The spectator view shows the leaderboard, on-deck
+  competitor, current run category, and completed/remaining events without
+  exposing operator controls or raw data.
+- Before a run starts, the operator can run a device preflight. It checks that
+  every assigned ESP32 is known, connected to the expected master, and
+  responding. Each device's result is visible before the master accepts the
+  run start.
+- Device LEDs are driven by explicit state from the shared protocol. The v2
+  states must support at least ready, event available, event active, event
+  completed, bonus, offline/error, and run-finished indications. Exact colors
+  and patterns remain hardware configuration rather than scoring logic.
+- The master-to-PC connection is transport-agnostic. Implement reliable USB
+  as the first path unless a wireless path passes an equivalent reliability
+  test; the controller must not depend on Google services or internet access.
+
+## Confirmed special-event shapes
+
+- A prompt-and-keypad event starts when its assigned button is pressed. A text
+  prompt is shown on the button's LCD, the master, or the scoreboard, and a
+  keypad connected to that event's ESP32 accepts the response. The ESP32
+  validates a successful response and sends an event-complete message through
+  the master. The prompt, response/result, and timestamps are retained as raw
+  event data.
+- A magnetic arcade event starts from the arcade ESP32 when all emeralds are
+  detected in position. A completion signal from the arcade application is
+  delivered to the connected ESP32 and then relayed through the master. The
+  app must correlate both signals to the same run and event rather than
+  treating either signal as an unscoped button press.
+- Standard events use the common start/finish protocol and application scoring;
+  special modules may provide their own start conditions, completion signals,
+  measurements, and validation while using the same run identity and history.
+
 ## Confirmed run categories and lifecycle
 
 - Each competitor gets one official/main run per edition. Only the current
@@ -57,8 +95,8 @@ informed by the earlier implementation, not an instruction to delete or replace 
 - First press of a normal event's button starts its timer; second press completes
   it. Different events may be active simultaneously: starting another event does
   not pause or finish the first. Each duration spans that event's start to finish.
-- Completed normal events lose points as their duration increases. The exact
-  formula is still an interview decision.
+- Completed normal events lose points as their duration increases, using the
+  configurable initial rule recorded below unless an edition overrides it.
 - Completing every event before time expires transitions the run into bonus mode.
   The bonus uses only the remaining portion of the original five minutes; there
   is no new or extended bonus timer. Detailed bonus gameplay remains deferred.
@@ -122,6 +160,10 @@ informed by the earlier implementation, not an instruction to delete or replace 
   rather than silently assigning them to the next competitor.
 - Give standard timing, sensor events, and bonus games separate modules using
   common device discovery, transport, persistence, and UI contracts.
+- Make the operator and scoreboard views separate clients of the same local
+  run state so a TV can be restarted or disconnected without interrupting a
+  run. Expose a raw-message/event inspector without making raw protocol data
+  part of the spectator display.
 - Use a separate v2 data location during development. Historical import, if wanted,
   should be explicit and preserve original databases and files.
 
@@ -131,15 +173,17 @@ informed by the earlier implementation, not an instruction to delete or replace 
    after completion, pause/recovery behavior, and master-button behavior mid-run.
 2. Remaining scoring decisions: partial credit, tie-breaks, and whether future
    editions need event-specific formulas or weights beyond the initial rule above.
-3. Hardware/display: USB or wireless master-to-PC, controller board revisions,
-   laptop plus second display, and preferred standalone window behavior.
+3. Hardware/display: validate the USB master-to-PC path first, then evaluate
+   wireless only if it meets the same reliability requirement. Confirm board
+   revisions, LED patterns, and the exact TV resolution/layout.
 4. Competitors/history: on-deck ordering, and what changing a competitor
    mid-run should mean. Official, playoff, exhibition, and superseded attempts
    are otherwise defined above.
 5. Editing: precision, and expected interaction when an operator edits during
    incoming presses. The editable scope is intentionally broad; the remaining
    question is the safest operator workflow.
-6. Special events: sensor source location and the measurements it produces.
+6. Special events: locate the magnetic sensor source, finalize keypad prompt
+   and validation rules, and define the arcade application's completion signal.
    Final Speed Button bonus gameplay may be decided later.
 
 ## Build sequence after interview
