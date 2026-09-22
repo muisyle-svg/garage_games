@@ -1,6 +1,7 @@
 # Garage Games v2: requirements and interview
 
-Status: interview in progress; normal run flow confirmed. This is a new version,
+Status: core interview complete; first app and virtual-button implementation underway.
+This is a new version,
 informed by the earlier implementation, not an instruction to delete or replace it.
 
 ## Confirmed requirements
@@ -40,6 +41,12 @@ informed by the earlier implementation, not an instruction to delete or replace 
   every assigned ESP32 is known, connected to the expected master, and
   responding. Each device's result is visible before the master accepts the
   run start.
+- The operator can explicitly mark a failed device for manual scoring. Its event
+  stays in the roster and completion requirements; the override is recorded.
+- Provide virtual buttons and simulated device availability in the app for
+  testing before physical hardware is ready. Label simulated operation clearly.
+  Full button firmware sketches are a later deliverable, not an acceptance
+  condition for the first virtual-button app.
 - Device LEDs are driven by explicit state from the shared protocol. The v2
   states must support at least ready, event available, event active, event
   completed, bonus, offline/error, and run-finished indications. Exact colors
@@ -89,7 +96,13 @@ informed by the earlier implementation, not an instruction to delete or replace 
 - The scorekeeper selects the player in the app before the player presses the
   physical master button to start. Selection itself does not start the clock.
 - The master starts a single five-minute (300-second) run. Remaining time appears
-  on the master display; showing it on the spectator scoreboard remains optional.
+  on the master display and spectator scoreboard, along with live points.
+- The operator can pause and resume a run. Initial implementation decision:
+  pause freezes the overall clock and active event timers, and gameplay input
+  is ignored while paused. Resume continues the previous normal/bonus phase.
+- Provide an ordered, reorderable on-deck competitor queue. Initial workflow:
+  completing a run updates availability of the next entry, but selecting/arming
+  the next competitor remains an explicit operator action.
 - All normal events become available at run start. Special events may have their
   own availability conditions, to be defined individually.
 - First press of a normal event's button starts its timer; second press completes
@@ -169,16 +182,18 @@ informed by the earlier implementation, not an instruction to delete or replace 
 
 ## Interview decisions still needed
 
-1. Remaining run edge cases: whether a started event can be reset/retried, presses
-   after completion, pause/recovery behavior, and master-button behavior mid-run.
+1. Remaining run edge cases: physical master-button behavior mid-run and exact
+   hardware recovery behavior. Initial software defaults: only the operator can
+   reset results; presses after event completion are ignored; an interrupted
+   app recovers its unfinished run paused for operator review.
 2. Remaining scoring decisions: partial credit, tie-breaks, and whether future
    editions need event-specific formulas or weights beyond the initial rule above.
 3. Hardware/display: validate the USB master-to-PC path first, then evaluate
    wireless only if it meets the same reliability requirement. Confirm board
    revisions, LED patterns, and the exact TV resolution/layout.
-4. Competitors/history: on-deck ordering, and what changing a competitor
-   mid-run should mean. Official, playoff, exhibition, and superseded attempts
-   are otherwise defined above.
+4. Competitors/history: the queue is reorderable. Correcting a run's competitor
+   is distinct from selecting the next competitor; neither silently starts a
+   new physical session. Official/playoff/exhibition categories are defined above.
 5. Editing: precision, and expected interaction when an operator edits during
    incoming presses. The editable scope is intentionally broad; the remaining
    question is the safest operator workflow.
@@ -195,6 +210,9 @@ informed by the earlier implementation, not an instruction to delete or replace 
 3. Master-to-PC link and normal-event ESP-NOW firmware, followed by real-button tests.
 4. Magnetic event adapter and Speed Button bonus integration as rules are confirmed.
 
-Acceptance requires a real physical button to update its assigned event, a completed
-run to remain editable after restart, and scoreboard changes to reflect corrections.
+The first app milestone requires a simulated run through the operator and TV views,
+local persistence across app restart, editable current/past results with audit
+history, and scoreboard changes reflecting corrections. Production hardware
+acceptance additionally requires real buttons to update their assigned events,
+device preflight and timing/LED behavior, and verified full firmware sketches.
 Simulated input alone does not establish hardware readiness.
