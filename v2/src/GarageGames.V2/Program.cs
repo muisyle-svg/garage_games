@@ -93,6 +93,7 @@ app.MapPost("/api/run/arm", (StartCompetitorRunRequest request, RunService runs)
 app.MapPost("/api/run/pause", (RunService runs) => Results.Ok(runs.Pause()));
 app.MapPost("/api/run/resume", (RunService runs) => Results.Ok(runs.Resume()));
 app.MapPost("/api/run/finish", (RunService runs) => Results.Ok(runs.Finish()));
+app.MapPost("/api/run/record", (RunService runs) => Results.Ok(runs.Record()));
 app.MapPost("/api/run/abort", (ActionReasonRequest request, RunService runs) => Results.Ok(runs.Abort(request.Reason)));
 app.MapPut("/api/run/edit", (EditRunRequest request, RunService runs) =>
     Results.Ok(runs.EditCurrentRun(request)));
@@ -102,6 +103,8 @@ app.MapPost("/api/runs/{runId}/restart", (string runId, ActionReasonRequest requ
     Results.Ok(runs.Restart(runId, request.Reason)));
 app.MapPut("/api/runs/{runId}/edit", (string runId, EditRunRequest request, RunService runs) =>
     Results.Ok(runs.EditHistoricalRun(runId, request)));
+app.MapPost("/api/runs/{runId}/record", (string runId, RunService runs) =>
+    Results.Ok(runs.RecordHistoricalRun(runId)));
 app.MapPost("/api/runs/{runId}/events/{eventId}/press", (string runId, string eventId, RunService runs) =>
     simulationMode ? Results.Ok(runs.PressEvent(runId, eventId)) : Results.NotFound());
 app.MapPost("/api/runs/{runId}/undo", (string runId, UndoRequest request, RunService runs) =>

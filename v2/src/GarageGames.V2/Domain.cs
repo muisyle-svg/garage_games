@@ -15,6 +15,7 @@ public enum RunStatus
     Armed,
     Active,
     Paused,
+    Finished,
     Completed,
     TimedOut,
     Aborted,
@@ -261,6 +262,7 @@ public sealed class RunRecord
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? FinishedAt { get; set; }
+    public DateTimeOffset? RecordedAt { get; set; }
     public string? SupersedesRunId { get; set; }
     public string? SupersededByRunId { get; set; }
     public string? PausedFromPhase { get; set; }
@@ -276,12 +278,13 @@ public sealed class RunRecord
     public int BonusPoints => BonusPointsOverride ?? 0;
     [JsonIgnore]
     public int TotalPoints => Events.Sum(e => e.Score) + BonusPoints;
+    public bool IsRecorded => RecordedAt is not null || Status == RunStatus.Completed;
     [JsonIgnore]
     public int CompletedEventCount => Events.Count(e => e.Status == EventStatus.Completed);
     [JsonIgnore]
     public bool AllEventsCompleted => Events.Count > 0 && Events.All(e => e.Status == EventStatus.Completed);
     [JsonIgnore]
-    public bool IsCountedOfficial => Category == RunCategory.Official && SupersededByRunId is null &&
+    public bool IsCountedOfficial => IsRecorded && Category == RunCategory.Official && SupersededByRunId is null &&
         Status is not RunStatus.Aborted and not RunStatus.Superseded;
 }
 

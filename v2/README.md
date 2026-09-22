@@ -42,8 +42,12 @@ Windows `%LOCALAPPDATA%\GarageGamesV2` path instead.
 
 Use the on-screen event buttons to test a run. Press an event once to record its
 start and again to record its finish; different events may overlap. Event times
-are elapsed seconds from the run start. The operator can edit event times and
-points before or after recording a run. Points are manually entered and summed.
+are displayed as seconds remaining from the run limit, making earlier event
+timestamps larger, while the app persists elapsed milliseconds. Completing all
+regular events freezes the timer and leaves the run marked finished but
+unrecorded until **Record result**. The operator can also finish a partial run
+and choose whether to record it. Event times and points remain editable before
+or after recording; points are manually entered and summed.
 
 ## Storage and recovery
 
@@ -74,6 +78,7 @@ $env:NUGET_PACKAGES = (Resolve-Path .tools).Path + '\nuget-packages'
 & .tools/dotnet/dotnet.exe restore v2/GarageGames.V2.slnx --configfile NuGet.Config
 & .tools/dotnet/dotnet.exe build v2/GarageGames.V2.slnx -c Release --no-restore
 & .tools/dotnet/dotnet.exe run --project v2/tests/GarageGames.V2.Tests/GarageGames.V2.Tests.csproj -c Release --no-build --no-restore
+node --test v2/tests/GarageGames.V2.Tests/frontend-time.test.cjs
 ```
 
 For a self-contained Windows build, run:

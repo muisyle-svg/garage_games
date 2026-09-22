@@ -25,6 +25,13 @@
   <main class="mvp-main">
     <div id="alert-region" class="alert-region" aria-live="polite"></div>
 
+    <div class="operator-tabs" role="tablist" aria-label="Scorekeeper sections">
+      <button id="tab-scorekeeping" class="operator-tab is-selected" type="button" role="tab" aria-selected="true" aria-controls="panel-scorekeeping" tabindex="0">Scorekeeping</button>
+      <button id="tab-on-deck" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-on-deck" tabindex="-1">On deck</button>
+      <button id="tab-history" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1">Run history</button>
+    </div>
+
+    <section id="panel-scorekeeping" class="tab-panel" role="tabpanel" aria-labelledby="tab-scorekeeping" tabindex="0">
     <section class="run-panel" aria-labelledby="run-heading">
       <div class="run-panel-top">
         <div>
@@ -35,6 +42,7 @@
         <div class="run-controls">
           <button id="start-run-button" class="button button-primary" type="button" disabled>Start 5-minute run</button>
           <button id="pause-run-button" class="button button-secondary" type="button" disabled>Pause</button>
+          <button id="finish-run-button" class="button button-secondary" type="button" disabled>Finish run</button>
           <button id="record-run-button" class="button button-record" type="button" disabled>Record result</button>
         </div>
       </div>
@@ -62,6 +70,43 @@
         <div class="summary-stat summary-total"><span>Total points</span><strong id="run-total">0</strong></div>
       </div>
 
+      <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
+
+      <div class="scorekeeper-layout">
+        <section class="sheet-card virtual-card" aria-labelledby="virtual-heading">
+          <div class="card-heading">
+            <div><p class="mvp-kicker">Course map</p><h2 id="virtual-heading">Virtual event buttons</h2></div>
+            <span class="small-note">Press once to start · again to stop</span>
+          </div>
+          <div id="virtual-event-buttons" class="virtual-event-grid">
+            <p class="empty-state">Start a run to enable the virtual buttons.</p>
+          </div>
+          <p id="virtual-note" class="small-note virtual-note">Virtual buttons are ready for local testing.</p>
+        </section>
+
+        <section class="sheet-card scorecard-card" aria-labelledby="scorecard-heading">
+          <div class="card-heading">
+            <div><p class="mvp-kicker">Run scorecard</p><h2 id="scorecard-heading">Times & points</h2></div>
+            <span id="scorecard-save-state" class="save-state">No unsaved edits</span>
+          </div>
+          <p class="table-help">Times count down from the run limit, so earlier events have larger timestamps. Leave a stamp or points field blank to clear it.</p>
+          <div class="table-scroll">
+            <table class="score-table">
+              <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>seconds remaining</small></th><th scope="col">Stop<br><small>seconds remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
+              <tbody id="current-event-body"><tr><td colspan="6" class="empty-cell">The edition event scorecard will appear here.</td></tr></tbody>
+              <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="scorecard-total">0</td><td></td></tr></tfoot>
+            </table>
+          </div>
+          <div class="scorecard-footer">
+            <span class="small-note">Manual points are added for the total; timing does not change points automatically.</span>
+            <button id="save-current-edits" class="button button-secondary" type="button" disabled>Save scorecard edits</button>
+          </div>
+        </section>
+      </div>
+    </section>
+    </section>
+
+    <section id="panel-on-deck" class="tab-panel" role="tabpanel" aria-labelledby="tab-on-deck" tabindex="0" hidden>
       <section class="on-deck-panel sheet-card" aria-labelledby="on-deck-heading">
         <div class="card-heading">
           <div><p class="mvp-kicker">Next up</p><h2 id="on-deck-heading">On deck</h2></div>
@@ -82,42 +127,9 @@
         </form>
         <ol id="on-deck-list" class="on-deck-list"><li class="empty-state">Add a competitor to show who is next on the TV scoreboard.</li></ol>
       </section>
-
-      <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
-
-      <div class="scorekeeper-layout">
-        <section class="sheet-card virtual-card" aria-labelledby="virtual-heading">
-          <div class="card-heading">
-            <div><p class="mvp-kicker">Course map</p><h2 id="virtual-heading">Virtual event buttons</h2></div>
-            <span class="small-note">Press once to start · again to stop</span>
-          </div>
-          <div id="virtual-event-buttons" class="virtual-event-grid">
-            <p class="empty-state">Start a run to enable the virtual buttons.</p>
-          </div>
-          <p id="virtual-note" class="small-note virtual-note">Virtual buttons are ready for local testing.</p>
-        </section>
-
-        <section class="sheet-card scorecard-card" aria-labelledby="scorecard-heading">
-          <div class="card-heading">
-            <div><p class="mvp-kicker">Run scorecard</p><h2 id="scorecard-heading">Times & points</h2></div>
-            <span id="scorecard-save-state" class="save-state">No unsaved edits</span>
-          </div>
-          <p class="table-help">Time stamps are elapsed seconds from the run start. Leave a stamp or points field blank to clear it.</p>
-          <div class="table-scroll">
-            <table class="score-table">
-              <thead><tr><th scope="col">Event</th><th scope="col">Start (s)</th><th scope="col">Stop (s)</th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
-              <tbody id="current-event-body"><tr><td colspan="6" class="empty-cell">The edition event scorecard will appear here.</td></tr></tbody>
-              <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="scorecard-total">0</td><td></td></tr></tfoot>
-            </table>
-          </div>
-          <div class="scorecard-footer">
-            <span class="small-note">Manual points are added for the total; timing does not change points automatically.</span>
-            <button id="save-current-edits" class="button button-secondary" type="button" disabled>Save scorecard edits</button>
-          </div>
-        </section>
-      </div>
     </section>
 
+    <section id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" tabindex="0" hidden>
     <section class="history-panel sheet-card" aria-labelledby="history-heading">
       <div class="card-heading history-heading">
         <div><p class="mvp-kicker">Saved results</p><h2 id="history-heading">Run history</h2></div>
@@ -130,21 +142,24 @@
           <p id="history-editor-meta" class="small-note">Choose a history entry to review or correct its event times and points.</p>
           <div class="table-scroll history-table-wrap">
             <table class="score-table">
-              <thead><tr><th scope="col">Event</th><th scope="col">Start (s)</th><th scope="col">Stop (s)</th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
+              <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>seconds remaining</small></th><th scope="col">Stop<br><small>seconds remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
               <tbody id="history-event-body"><tr><td colspan="6" class="empty-cell">No run selected.</td></tr></tbody>
               <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="history-total">0</td><td></td></tr></tfoot>
             </table>
           </div>
           <div class="scorecard-footer">
             <span id="history-save-state" class="small-note">History edits are saved explicitly.</span>
+            <button id="record-history-run" class="button button-record" type="button" disabled>Record result</button>
             <button id="save-history-edits" class="button button-secondary" type="button" disabled>Save history edits</button>
           </div>
         </section>
       </div>
     </section>
+    </section>
   </main>
 
   <footer class="mvp-footer"><span>Garage Games</span><span>Local scorekeeper · changes save on this computer</span></footer>
+  <script src="mvp-scorekeeper-time.js" defer></script>
   <script src="mvp-scorekeeper.js" defer></script>
 </body>
 </html>

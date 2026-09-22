@@ -8,7 +8,9 @@ var tests = new (string Name, Action Run)[]
     ("timeout autosaves and releases next competitor", MvpTimeoutAndNextRun),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
     ("MVP timing fields clear and manual points total", MvpEditableScorecard),
-    ("recording the same run twice is idempotent", FinishIsIdempotent),
+    ("regular events automatically finish and freeze the clock until recorded", MvpAutoFinishAndRecord),
+    ("completing a current scorecard correction automatically finishes", MvpCorrectionAutoFinish),
+    ("finishing and recording are distinct and recording releases the next run", FinishIsIdempotent),
     ("duplicate and per-event stale input", DuplicateAndStale),
     ("keypad and arcade completion rules", SpecialCompletion),
     ("manual preflight override retains roster and rejects offline packets", ManualOverride),
@@ -173,6 +175,9 @@ static void MvpEditableScorecard()
     Assert.Equal(EventStatus.Active, clearFinish.Events.Single(e => e.EventId == "event-01").Status);
 
     var finished = h.Service.Finish();
+    Assert.Equal(RunStatus.Finished, finished.Status);
+    Assert.Equal(null, finished.RecordedAt);
+    finished = h.Service.Record();
     var historical = h.Service.EditHistoricalRun(finished.Id, new EditRunRequest
     {
         ExpectedRevision = finished.Revision,
@@ -196,10 +201,81 @@ static void FinishIsIdempotent()
     using var h = new TestHarness(MakeMvpEdition(), NewPath());
     var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
     h.Service.StartMaster();
-    var recorded = h.Service.Finish();
-    var secondRecord = h.Service.Finish();
+    var finished = h.Service.Finish();
+    Assert.Equal(RunStatus.Finished, finished.Status);
+    Assert.Equal(null, finished.RecordedAt);
+    Assert.Equal(RunStatus.Finished, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+    Assert.Throws<CommandException>(() => h.Service.ArmCompetitor(h.AddCompetitor("Blocked until recorded").Id, RunCategory.Official));
+    var recorded = h.Service.Record();
+    var secondRecord = h.Service.Record();
+    Assert.Equal(run.Id, recorded.Id);
     Assert.Equal(recorded.Id, secondRecord.Id);
+    Assert.Equal(RunStatus.Completed, recorded.Status);
+    Assert.True(recorded.RecordedAt is not null);
     Assert.Equal(1, h.Service.GetOperatorSnapshot().History.Count(r => r.Id == run.Id));
+    var next = h.AddCompetitor("Next after recording");
+    Assert.Equal(RunStatus.Armed, h.Service.ArmCompetitor(next.Id, RunCategory.Official).Status);
+}
+
+static void MvpAutoFinishAndRecord()
+{
+    using var h = new TestHarness(MakeMvpEdition(durationSeconds: 90), NewPath());
+    var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
+    h.Service.StartMaster();
+    for (var index = 0; index < run.Events.Count; index++)
+    {
+        h.Service.PressEvent(run.Id, run.Events[index].EventId);
+        h.Clock.Advance(TimeSpan.FromSeconds(1));
+        var stopped = h.Service.PressEvent(run.Id, run.Events[index].EventId);
+        if (index == run.Events.Count - 1)
+        {
+            Assert.Equal(RunStatus.Finished, stopped.Run!.Status);
+        }
+        h.Clock.Advance(TimeSpan.FromSeconds(1));
+    }
+
+    var finished = h.Service.GetOperatorSnapshot().CurrentRun!;
+    Assert.Equal(RunStatus.Finished, finished.Status);
+    Assert.Equal(null, finished.RecordedAt);
+    Assert.True(finished.AllEventsCompleted);
+    var frozenAt = finished.ActiveElapsedMs;
+    h.Clock.Advance(TimeSpan.FromSeconds(20));
+    var stillFinished = h.Service.GetOperatorSnapshot().CurrentRun!;
+    Assert.Equal(RunStatus.Finished, stillFinished.Status);
+    Assert.Equal(frozenAt, stillFinished.ActiveElapsedMs);
+    Assert.Equal(null, stillFinished.RecordedAt);
+
+    var recorded = h.Service.Record();
+    Assert.Equal(RunStatus.Completed, recorded.Status);
+    Assert.True(recorded.RecordedAt is not null);
+    Assert.Equal(RunStatus.Completed, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+}
+
+static void MvpCorrectionAutoFinish()
+{
+    using var h = new TestHarness(MakeMvpEdition(durationSeconds: 90), NewPath());
+    h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
+    h.Service.StartMaster();
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    var live = h.Service.GetOperatorSnapshot().CurrentRun!;
+    var corrected = h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = live.Revision,
+        Reason = "Enter final completed scorecard",
+        Events = live.Events.Select(e => new EventEditRequest
+        {
+            EventId = e.EventId,
+            StartElapsedMs = 1_000,
+            FinishElapsedMs = 2_000,
+            ScoreOverride = 1
+        }).ToList()
+    });
+    Assert.Equal(RunStatus.Finished, corrected.Status);
+    Assert.Equal(null, corrected.RecordedAt);
+    Assert.True(corrected.AllEventsCompleted);
+    h.Clock.Advance(TimeSpan.FromSeconds(10));
+    Assert.Equal(5_000L, h.Service.GetOperatorSnapshot().CurrentRun!.ActiveElapsedMs);
+    Assert.Equal(RunStatus.Completed, h.Service.Record().Status);
 }
 
 static void DuplicateAndStale()
@@ -298,15 +374,18 @@ static void RestartAndOfficialRule()
     using var h = NewHarness();
     var first = h.ArmAndStart();
     var finished = h.Service.Finish();
-    Assert.Equal(RunStatus.Completed, finished.Status);
+    Assert.Equal(RunStatus.Finished, finished.Status);
+    h.Service.Record();
     var restartQueue = h.Service.Restart(first.Id);
     var replacement = h.Service.Arm(restartQueue.Id);
     Assert.Equal(first.Id, replacement.SupersedesRunId);
     var history = h.Service.GetOperatorSnapshot().History;
     Assert.Equal(RunStatus.Superseded, history.Single(r => r.Id == first.Id).Status);
-    Assert.Equal(1, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+    Assert.Equal(0, h.Service.GetOperatorSnapshot().Leaderboard.Count);
 
     h.Service.Finish();
+    h.Service.Record();
+    Assert.Equal(1, h.Service.GetOperatorSnapshot().Leaderboard.Count);
     var secondOfficial = h.Service.AddToQueue(h.CompetitorId, RunCategory.Official);
     Assert.Throws<CommandException>(() => h.Service.Arm(secondOfficial.Id));
 }
@@ -316,6 +395,7 @@ static void CategoryAndTieRank()
     using var h = NewHarness();
     var exhibition = h.ArmAndStart(RunCategory.Exhibition);
     h.Service.Finish();
+    h.Service.Record();
     Assert.DoesNotContain(h.Service.GetScoreboard().Leaderboard, row => row.CompetitorName == h.CompetitorName);
     Assert.Equal(RunCategory.Exhibition, h.Service.GetScoreboard().CurrentRun!.Category);
 
@@ -325,9 +405,11 @@ static void CategoryAndTieRank()
     h.Service.Arm(officialOne.Id);
     h.Service.StartMaster();
     h.Service.Finish();
+    h.Service.Record();
     h.Service.Arm(officialTwo.Id);
     h.Service.StartMaster();
     h.Service.Finish();
+    h.Service.Record();
     var leaderboard = h.Service.GetScoreboard().Leaderboard;
     Assert.Equal(2, leaderboard.Count);
     Assert.True(leaderboard.All(row => row.Rank == 1));
@@ -367,6 +449,7 @@ static void EditsAndIsolation()
     Assert.Equal(MessageDisposition.Accepted, h.Send(first, "station-01", "event-press", "history-start").Disposition);
     Assert.Equal(MessageDisposition.Accepted, h.Send(first, "station-01", "event-press", "history-finish").Disposition);
     var historical = h.Service.Finish();
+    h.Service.Record();
     var second = h.AddCompetitor("Live competitor");
     var liveQueue = h.Service.AddToQueue(second.Id, RunCategory.Playoff);
     h.Service.Arm(liveQueue.Id);

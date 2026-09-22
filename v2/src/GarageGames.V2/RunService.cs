@@ -70,7 +70,7 @@ public sealed class RunService
         _store.EnsureDevices(edition);
         _data = _store.Load();
 
-        var unfinished = _data.Runs.Where(r => r.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused).ToList();
+        var unfinished = _data.Runs.Where(r => r.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused or RunStatus.Finished).ToList();
         if (unfinished.Count > 1)
         {
             throw new InvalidDataException("The database contains more than one unfinished run; manual recovery is required.");
@@ -397,7 +397,7 @@ public sealed class RunService
         lock (_gate)
         {
             RefreshActiveClock();
-            if (_current is not null && _current.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused)
+            if (_current is not null && _current.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused or RunStatus.Finished)
             {
                 throw new CommandException("Finish, pause, or abort the current run before arming another.");
             }
@@ -541,23 +541,26 @@ public sealed class RunService
     {
         lock (_gate)
         {
-            if (_current is null && _lastDisplayedRun is { Status: RunStatus.Completed or RunStatus.TimedOut })
+            RefreshActiveClock();
+            if (_current is null && _lastDisplayedRun is { Status: RunStatus.Completed or RunStatus.TimedOut or RunStatus.Finished })
             {
                 return Clone(_lastDisplayedRun);
             }
             var run = RequireCurrent();
-            RefreshActiveClock();
+            if (run.Status == RunStatus.Finished)
+            {
+                return Clone(run);
+            }
             if (run.Status is not RunStatus.Active and not RunStatus.Paused and not RunStatus.Armed)
             {
                 throw new CommandException("The current session cannot be finished in its current state.");
             }
 
             RecomputeScores(run);
-            run.Status = RunStatus.Completed;
+            MarkFinishedUnrecorded(run);
             run.FinishedAt = _clock.UtcNow;
             run.Revision++;
             _lastDisplayedRun = Clone(run);
-            UpdateDeviceLeds();
             try
             {
                 _store.SaveRuns([run]);
@@ -567,7 +570,98 @@ public sealed class RunService
                 ReloadInMemoryAfterPersistenceFailure();
                 throw;
             }
+            UpdateDeviceLeds();
+            return Clone(run);
+        }
+    }
+
+    public RunRecord Record()
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            if (_current is null)
+            {
+                if (_lastDisplayedRun is { Status: RunStatus.TimedOut } timedOut)
+                {
+                    return RecordHistoricalRun(timedOut.Id);
+                }
+                if (_lastDisplayedRun is { Status: RunStatus.Completed } completed)
+                {
+                    return Clone(completed);
+                }
+                throw new CommandException("There is no run ready to record.");
+            }
+
+            if (_current.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused)
+            {
+                Finish();
+            }
+            var run = RequireCurrent();
+            if (run.Status != RunStatus.Finished)
+            {
+                throw new CommandException("Finish the run before recording it.");
+            }
+
+            run.Status = RunStatus.Completed;
+            run.RecordedAt = _clock.UtcNow;
+            run.FinishedAt ??= _clock.UtcNow;
+            run.Revision++;
+            try
+            {
+                _store.SaveRuns([run]);
+            }
+            catch
+            {
+                ReloadInMemoryAfterPersistenceFailure();
+                throw;
+            }
+            _lastDisplayedRun = Clone(run);
             _current = null;
+            UpdateDeviceLeds();
+            return Clone(run);
+        }
+    }
+
+    public RunRecord RecordHistoricalRun(string runId)
+    {
+        lock (_gate)
+        {
+            if (_current?.Id == runId)
+            {
+                return Record();
+            }
+
+            var run = _data.Runs.SingleOrDefault(r => r.Id == runId)
+                ?? throw new CommandException("Run was not found.");
+            if (run.IsRecorded)
+            {
+                return Clone(run);
+            }
+            if (run.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused or RunStatus.Finished)
+            {
+                throw new CommandException("Record the current run from the scorekeeping tab.");
+            }
+
+            run.RecordedAt = _clock.UtcNow;
+            if (run.Status == RunStatus.Finished)
+            {
+                run.Status = RunStatus.Completed;
+            }
+            run.Revision++;
+            try
+            {
+                _store.SaveRuns([run]);
+            }
+            catch
+            {
+                ReloadInMemoryAfterPersistenceFailure();
+                throw;
+            }
+            if (_lastDisplayedRun?.Id == run.Id)
+            {
+                _lastDisplayedRun = Clone(run);
+            }
             return Clone(run);
         }
     }
@@ -761,7 +855,12 @@ public sealed class RunService
             device.LastSeenAt = _clock.UtcNow;
             device.LastError = null;
             run.LastAcceptedInputElapsedMs = Math.Max(run.LastAcceptedInputElapsedMs, envelope.ElapsedMilliseconds);
-            if (run.AllEventsCompleted && run.Phase != RunPhase.Bonus)
+            if (run.AllEventsCompleted && run.Events.All(e => e.Type == EventKind.Standard))
+            {
+                MarkFinishedUnrecorded(run);
+                reason = "All events completed; run finished and is awaiting recording.";
+            }
+            else if (run.AllEventsCompleted && run.Phase != RunPhase.Bonus)
             {
                 run.Phase = RunPhase.Bonus;
                 run.BonusStartedElapsedMs = run.ActiveElapsedMs;
@@ -1319,9 +1418,9 @@ public sealed class RunService
 
     private void ValidateLiveCandidate(RunRecord candidate)
     {
-        if (candidate.Status is not RunStatus.Armed and not RunStatus.Active and not RunStatus.Paused)
+        if (candidate.Status is not RunStatus.Armed and not RunStatus.Active and not RunStatus.Paused and not RunStatus.Finished)
         {
-            throw new CommandException("A live correction may keep a run armed, active, or paused; use the run controls to finish or abort it.");
+            throw new CommandException("A live correction may keep a run armed, active, paused, or finished; use the run controls to record or abort it.");
         }
         if (candidate.ActiveElapsedMs < 0 || candidate.ActiveElapsedMs > candidate.Edition.DurationLimitSeconds * 1000L)
         {
@@ -1349,7 +1448,11 @@ public sealed class RunService
             result.Score = ScoreCalculator.Calculate(result, candidate.Edition.Scoring);
         }
 
-        if (candidate.AllEventsCompleted)
+        if (candidate.AllEventsCompleted && candidate.Events.All(e => e.Type == EventKind.Standard))
+        {
+            MarkFinishedUnrecorded(candidate);
+        }
+        else if (candidate.AllEventsCompleted)
         {
             candidate.Phase = RunPhase.Bonus;
             candidate.BonusStartedElapsedMs ??= candidate.ActiveElapsedMs;
@@ -1463,7 +1566,7 @@ public sealed class RunService
         _data.Messages.AddRange(fresh.Messages);
         _data.Edits.Clear();
         _data.Edits.AddRange(fresh.Edits);
-        _current = _data.Runs.SingleOrDefault(r => r.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused);
+        _current = _data.Runs.SingleOrDefault(r => r.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused or RunStatus.Finished);
         _lastDisplayedRun = _current ?? _data.Runs.OrderByDescending(r => r.CreatedAt).FirstOrDefault();
         _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
     }
@@ -1527,6 +1630,15 @@ public sealed class RunService
         }
     }
 
+    private void MarkFinishedUnrecorded(RunRecord run)
+    {
+        run.Status = RunStatus.Finished;
+        run.FinishedAt ??= _clock.UtcNow;
+        run.PausedFromPhase = null;
+        run.Phase = RunPhase.Normal;
+        run.BonusStartedElapsedMs = null;
+    }
+
     private void UpdateDeviceLeds()
     {
         foreach (var device in _data.Devices)
@@ -1537,7 +1649,7 @@ public sealed class RunService
                 continue;
             }
 
-            if (_current is null || _current.Status is RunStatus.Completed or RunStatus.TimedOut or RunStatus.Aborted or RunStatus.Superseded)
+            if (_current is null || _current.Status is RunStatus.Finished or RunStatus.Completed or RunStatus.TimedOut or RunStatus.Aborted or RunStatus.Superseded)
             {
                 device.Led = _current is null ? LedState.Ready : LedState.RunFinished;
                 continue;

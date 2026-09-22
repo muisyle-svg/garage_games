@@ -20,12 +20,15 @@
   };
 
   const $ = (id) => document.getElementById(id);
+  const scorekeeperTime = window.GarageGamesScorekeeperTime;
   const ui = {
     edition: $("edition-name"),
     connection: $("connection-status"),
     lastUpdated: $("last-updated"),
     refresh: $("refresh-button"),
     alert: $("alert-region"),
+    tabs: [$("tab-scorekeeping"), $("tab-on-deck"), $("tab-history")],
+    tabPanels: [$("panel-scorekeeping"), $("panel-on-deck"), $("panel-history")],
     caption: $("run-caption"),
     competitor: $("competitor-select"),
     category: $("run-category"),
@@ -39,6 +42,7 @@
     newCompetitor: $("new-competitor-name"),
     start: $("start-run-button"),
     pause: $("pause-run-button"),
+    finish: $("finish-run-button"),
     record: $("record-run-button"),
     countdown: $("run-countdown"),
     runCompetitor: $("run-competitor"),
@@ -59,11 +63,12 @@
     historyBody: $("history-event-body"),
     historyTotal: $("history-total"),
     historySave: $("save-history-edits"),
-    historySaveState: $("history-save-state")
+    historySaveState: $("history-save-state"),
+    historyRecord: $("record-history-run")
   };
 
   function isLiveLock(run) {
-    return Boolean(run && ["armed", "active", "paused"].includes(run.status));
+    return Boolean(run && ["armed", "active", "paused", "finished"].includes(run.status));
   }
 
   function make(tag, className, text) {
@@ -222,9 +227,8 @@
     return Number.isFinite(number) && number >= 0 ? number : null;
   }
 
-  function secondsToMilliseconds(value) {
-    const seconds = parsedSeconds(value);
-    return seconds === null ? null : Math.round(seconds * 1000);
+  function runDurationSeconds(run) {
+    return Number(run?.edition?.durationLimitSeconds || state.snapshot?.durationLimitSeconds || 300);
   }
 
   function formatSeconds(milliseconds) {
@@ -244,8 +248,11 @@
   function displayedValue(run, event, field) {
     const draft = state.drafts.get(run.id)?.get(event.eventId);
     if (draft?.touched.has(field)) return draft[field];
-    if (field === "start") return formatSeconds(event.startElapsedMs);
-    if (field === "finish") return formatSeconds(event.finishElapsedMs);
+    if (field === "start" || field === "finish") {
+      const elapsed = field === "start" ? event.startElapsedMs : event.finishElapsedMs;
+      const remaining = scorekeeperTime.remainingSecondsFromElapsedMs(elapsed, runDurationSeconds(run));
+      return remaining === null ? "" : formatSeconds(remaining * 1000);
+    }
     return String(event.scoreOverride ?? event.score ?? 0);
   }
 
@@ -260,8 +267,9 @@
     const finish = parsedSeconds(row.querySelector('[data-field="finish"]')?.value);
     const durationCell = row.querySelector(".duration-cell");
     const statusCell = row.querySelector(".event-status");
-    const startMs = start === null ? null : start * 1000;
-    const finishMs = finish === null ? null : finish * 1000;
+    const durationSeconds = runDurationSeconds(run);
+    const startMs = scorekeeperTime.elapsedMsFromRemainingSeconds(start, durationSeconds);
+    const finishMs = scorekeeperTime.elapsedMsFromRemainingSeconds(finish, durationSeconds);
     let duration = null;
     if (startMs !== null && finishMs !== null) duration = finishMs - startMs;
     else if (startMs !== null && run?.status === "active") duration = currentElapsedMs(run) - startMs;
@@ -299,9 +307,10 @@
     const input = make("input", "score-input");
     input.type = "number";
     input.min = "0";
+    input.max = String(runDurationSeconds(run));
     input.step = "0.001";
     input.inputMode = "decimal";
-    input.setAttribute("aria-label", `${event.name} ${field === "start" ? "start" : "stop"} time in elapsed seconds`);
+    input.setAttribute("aria-label", `${event.name} ${field === "start" ? "start" : "stop"} time in seconds remaining`);
     input.dataset.field = field;
     input.dataset.eventId = event.eventId;
     input.dataset.runId = run?.id || "";
@@ -420,10 +429,11 @@
       const competitor = competitorName(run.competitorId);
       const copy = {
         armed: "Run is armed and ready to start.",
-        active: "Run in progress. Event buttons record elapsed times.",
+        active: "Run in progress. Event timestamps count down from the run limit.",
         paused: "Run paused. Resume when the competitor is ready.",
-        completed: "Run recorded.",
-        timedOut: "Time expired. This incomplete run is available in history.",
+        finished: "All events complete. Timer stopped · finished, not recorded.",
+        completed: "Run finished · recorded.",
+        timedOut: run.isRecorded ? "Time expired · incomplete result recorded." : "Time expired · incomplete result not recorded.",
         aborted: "Run aborted.",
         superseded: "Run replaced by a newer result."
       }[run.status] || `Run status: ${titleCase(run.status)}.`;
@@ -437,7 +447,7 @@
     ui.virtualNote.textContent = !run
       ? "Start a run to enable the virtual event buttons."
       : run.status === "active"
-        ? "Press once to start an event and again to finish it."
+        ? "Times count down from the run limit. Press once to start an event and again to finish it."
         : run.status === "paused"
           ? "Resume the run before recording event presses."
           : run.status === "armed"
@@ -455,7 +465,10 @@
       button.setAttribute("aria-label", `${event.name}: ${event.status === "active" ? "finish event" : event.status === "completed" ? "complete" : "start event"}`);
       const name = make("strong", "", `${String(index + 1).padStart(2, "0")} · ${event.name}`);
       let hint = "Start";
-      if (event.status === "active") hint = `Stop · ${formatSeconds(event.startElapsedMs)}s`;
+      if (event.status === "active") {
+        const remainingMs = Math.max(0, runDurationSeconds(run) * 1000 - currentElapsedMs(run));
+        hint = `Stop · ${formatSeconds(remainingMs)}s left`;
+      }
       if (event.status === "completed") hint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
       const stateLabel = make("small", "", hint);
       button.append(name, stateLabel);
@@ -520,7 +533,7 @@
             make("span", "", `${categoryLabel(run.category)} · ${shortDate(run.createdAt)}`)
           );
           const points = make("strong", "history-points", String((run.events || []).reduce((sum, event) => sum + Number(event.score || 0), 0)));
-          const status = make("span", `history-status ${run.status}`, titleCase(run.status));
+          const status = make("span", `history-status ${run.status}`, run.isRecorded ? "Recorded" : "Not recorded");
           button.append(primary, points, status);
           button.addEventListener("click", () => {
             state.selectedHistoryId = run.id;
@@ -539,6 +552,7 @@
       ui.historyTitle.textContent = "Select a saved run";
       ui.historyStatus.textContent = "—";
       ui.historyMeta.textContent = "Choose a history entry to review or correct its event times and points.";
+      ui.historyRecord.disabled = true;
       if (state.historyTableKey !== "no-history") {
         renderScoreTable(null, ui.historyBody, "history", false);
         state.historyTableKey = "no-history";
@@ -547,7 +561,7 @@
     }
     const key = `${selected.id}:${selected.revision}:${selected.status}`;
     ui.historyTitle.textContent = `${competitorName(selected.competitorId)} · ${categoryLabel(selected.category)}`;
-    ui.historyStatus.textContent = titleCase(selected.status);
+    ui.historyStatus.textContent = `${titleCase(selected.status)} · ${selected.isRecorded ? "Recorded" : "Not recorded"}`;
     ui.historyStatus.className = `status-tag status-${selected.status}`;
     ui.historyMeta.textContent = `Started ${shortDate(selected.startedAt || selected.createdAt)} · Revision ${selected.revision}. Incomplete and timed-out runs can also be corrected here.`;
     if (key !== state.historyTableKey) {
@@ -558,6 +572,8 @@
     } else {
       updateTableTotal("history", selected);
     }
+    ui.historyRecord.disabled = state.busy || selected.isRecorded || isLiveLock(selected);
+    ui.historyRecord.textContent = selected.isRecorded ? "Already recorded" : "Record result";
   }
 
   function shortDate(value) {
@@ -577,7 +593,9 @@
     ui.start.textContent = run?.status === "armed" ? "Start armed run" : "Start 5-minute run";
     ui.pause.disabled = state.busy || !run || !["active", "paused"].includes(run.status);
     ui.pause.textContent = run?.status === "paused" ? "Resume" : "Pause";
-    ui.record.disabled = state.busy || !run || !["armed", "active", "paused"].includes(run.status);
+    ui.finish.disabled = state.busy || !run || !["armed", "active", "paused"].includes(run.status);
+    ui.record.disabled = state.busy || !run || run.isRecorded || !["armed", "active", "paused", "finished", "timedOut"].includes(run.status);
+    ui.record.textContent = run?.isRecorded ? "Already recorded" : "Record result";
     ui.refresh.disabled = state.busy;
     ui.queueCompetitor.disabled = state.busy;
     ui.queueCategory.disabled = state.busy;
@@ -616,6 +634,34 @@
       const activeRows = ui.currentBody.querySelectorAll("tr");
       activeRows.forEach((row) => rowTiming(row, run));
     }
+  }
+
+  function activateTab(index, moveFocus = false) {
+    state.activeTab = index;
+    ui.tabs.forEach((tab, tabIndex) => {
+      const selected = tabIndex === index;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      tab.classList.toggle("is-selected", selected);
+      ui.tabPanels[tabIndex].hidden = !selected;
+    });
+    if (moveFocus) ui.tabs[index].focus();
+  }
+
+  async function recordCurrentRun() {
+    const run = state.snapshot?.currentRun;
+    if (!run) throw new Error("There is no run to record.");
+    if (run.status === "timedOut") {
+      await request(`/api/runs/${encodeURIComponent(run.id)}/record`, { method: "POST" });
+      return;
+    }
+    await request("/api/run/record", { method: "POST" });
+  }
+
+  async function recordHistoricalRun() {
+    const run = (state.snapshot?.history || []).find((item) => item.id === state.selectedHistoryId);
+    if (!run) throw new Error("Select a saved run to record.");
+    await request(`/api/runs/${encodeURIComponent(run.id)}/record`, { method: "POST" });
   }
 
   async function performAction(action, successMessage) {
@@ -714,7 +760,7 @@
             if (value === "") {
               edit[field === "start" ? "clearStartElapsedMs" : "clearFinishElapsedMs"] = true;
             } else {
-              const milliseconds = secondsToMilliseconds(value);
+              const milliseconds = scorekeeperTime.elapsedMsFromRemainingSeconds(parsedSeconds(value), runDurationSeconds(run));
               if (milliseconds === null) throw new Error("Event times must be zero or more seconds.");
               edit[field === "start" ? "startElapsedMs" : "finishElapsedMs"] = milliseconds;
             }
@@ -760,16 +806,34 @@
   }
 
   function bindActions() {
+    ui.tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => activateTab(index));
+      tab.addEventListener("keydown", (event) => {
+        let next = null;
+        if (event.key === "ArrowRight") next = (index + 1) % ui.tabs.length;
+        else if (event.key === "ArrowLeft") next = (index + ui.tabs.length - 1) % ui.tabs.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = ui.tabs.length - 1;
+        if (next === null) return;
+        event.preventDefault();
+        activateTab(next, true);
+      });
+    });
     ui.refresh.addEventListener("click", () => loadSnapshot(false));
     ui.start.addEventListener("click", () => performAction(startRun, "Run started."));
     ui.pause.addEventListener("click", () => {
       const path = state.snapshot?.currentRun?.status === "paused" ? "/api/run/resume" : "/api/run/pause";
       performAction(() => request(path, { method: "POST" }), path.endsWith("resume") ? "Run resumed." : "Run paused.");
     });
-    ui.record.addEventListener("click", () => performAction(
+    ui.finish.addEventListener("click", () => performAction(
       () => request("/api/run/finish", { method: "POST" }),
+      "Run finished · not recorded yet."
+    ));
+    ui.record.addEventListener("click", () => performAction(
+      recordCurrentRun,
       "Run recorded."
     ));
+    ui.historyRecord.addEventListener("click", () => performAction(recordHistoricalRun, "Saved run recorded."));
     ui.currentSave.addEventListener("click", saveCurrentEdits);
     ui.historySave.addEventListener("click", saveHistoryEdits);
     ui.currentBody.addEventListener("input", onScoreInput);
