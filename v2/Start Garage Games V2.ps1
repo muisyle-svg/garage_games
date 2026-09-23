@@ -1,126 +1,301 @@
 $ErrorActionPreference = 'Stop'
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repoRoot = (Resolve-Path (Join-Path $scriptRoot '..')).Path
-$dotnet = Join-Path $repoRoot '.tools\dotnet\dotnet.exe'
-$dataPath = Join-Path $repoRoot '.tools\localappdata\GarageGamesV2'
-$published = Join-Path $scriptRoot 'publish\win-x64\GarageGames.V2.exe'
-$project = Join-Path $scriptRoot 'src\GarageGames.V2\GarageGames.V2.csproj'
-$url = 'http://127.0.0.1:5187/'
-$health = 'http://127.0.0.1:5187/api/health'
 
-function Show-StartupFailure([string]$Message, [string]$OutputLog, [string]$ErrorLog) {
-    Write-Host "`n$Message" -ForegroundColor Red
-    foreach ($log in @($OutputLog, $ErrorLog)) {
-        if (Test-Path -LiteralPath $log) {
-            $contents = Get-Content -LiteralPath $log -Raw
-            if (-not [string]::IsNullOrWhiteSpace($contents)) {
-                Write-Host "`n--- $log ---"
-                Write-Host $contents
-            }
-        }
-    }
-    Read-Host 'Press Enter to close this window'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$script:scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:repoRoot = (Resolve-Path (Join-Path $script:scriptRoot '..')).Path
+$script:toolRoot = Join-Path $script:repoRoot '.tools'
+$script:dotnet = Join-Path $script:toolRoot 'dotnet\dotnet.exe'
+$script:dataPath = Join-Path $script:toolRoot 'localappdata\GarageGamesV2'
+$script:published = Join-Path $script:scriptRoot 'publish\win-x64\GarageGames.V2.exe'
+$script:project = Join-Path $script:scriptRoot 'src\GarageGames.V2\GarageGames.V2.csproj'
+$script:url = 'http://127.0.0.1:5187/'
+$script:health = $script:url + 'api/health'
+$script:trayHealth = $script:url + 'api/internal/tray-health'
+$script:shutdownUrl = $script:url + 'api/internal/shutdown'
+$script:shutdownHeader = 'X-Garage-Games-Shutdown'
+$script:serverProcess = $null
+$script:shutdownToken = $null
+$script:ownsServer = $false
+$script:exitRequested = $false
+$script:notifyIcon = $null
+$script:contextMenu = $null
+$script:mutex = $null
+$script:ownsMutex = $false
+$script:outputLog = $null
+$script:errorLog = $null
+
+function Show-Notice([string]$Message, [string]$Title = 'Garage Games v2', [System.Windows.Forms.MessageBoxIcon]$Icon = [System.Windows.Forms.MessageBoxIcon]::Information) {
+    [void][System.Windows.Forms.MessageBox]::Show(
+        $Message,
+        $Title,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        $Icon
+    )
 }
 
-function Start-LocalHiddenProcess([string]$CommandLine, [string]$WorkingDirectory, [string]$OutputLog, [string]$ErrorLog) {
-    # Keep the server hidden, but capture its output locally for startup errors.
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = Join-Path $env:WINDIR 'System32\cmd.exe'
-    $localEnvironment = @(
-        'set "DOTNET_CLI_HOME=' + $env:DOTNET_CLI_HOME + '"'
-        'set "APPDATA=' + $env:APPDATA + '"'
-        'set "LOCALAPPDATA=' + $env:LOCALAPPDATA + '"'
-        'set "NUGET_PACKAGES=' + $env:NUGET_PACKAGES + '"'
-        'set "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1"'
-    ) -join ' && '
-    $startInfo.Arguments = '/d /c "' + $localEnvironment + ' && ' + $CommandLine + ' > "' + $OutputLog + '" 2> "' + $ErrorLog + '"'
-    $startInfo.WorkingDirectory = $WorkingDirectory
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-
-    $child = New-Object System.Diagnostics.Process
-    $child.StartInfo = $startInfo
-    if (-not $child.Start()) { throw "Could not start command: $CommandLine" }
-    $script:launcherStdoutTask = $child.StandardOutput.ReadToEndAsync()
-    $script:launcherStderrTask = $child.StandardError.ReadToEndAsync()
-    return $child
+function Show-StartupFailure([string]$Message) {
+    $details = $Message
+    if ($script:outputLog -or $script:errorLog) {
+        $details += "`n`nLocal startup logs:`n$($script:outputLog)`n$($script:errorLog)"
+    }
+    Show-Notice $details 'Garage Games v2 could not start' ([System.Windows.Forms.MessageBoxIcon]::Error)
 }
 
-$env:DOTNET_CLI_HOME = Join-Path $repoRoot '.tools'
-$env:APPDATA = Join-Path $repoRoot '.tools\appdata'
-$env:LOCALAPPDATA = Join-Path $repoRoot '.tools\localappdata'
-$env:NUGET_PACKAGES = Join-Path $repoRoot '.tools\nuget-packages'
-
-# Reuse an already-running local server instead of starting a second copy.
-try {
-    $response = Invoke-WebRequest -UseBasicParsing -Uri $health -TimeoutSec 1
-    if ($response.StatusCode -eq 200) {
-        Start-Process $url
-        exit 0
+function Test-ServerHealthy([switch]$Owned) {
+    $parameters = @{
+        UseBasicParsing = $true
+        Uri = $(if ($Owned) { $script:trayHealth } else { $script:health })
+        TimeoutSec = 2
     }
-} catch { }
-
-$logDirectory = Join-Path $repoRoot '.tools\logs'
-New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
-$logStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$outputLog = Join-Path $logDirectory "garage-games-v2-$logStamp.out.log"
-$errorLog = Join-Path $logDirectory "garage-games-v2-$logStamp.err.log"
-
-try {
-    if (Test-Path -LiteralPath $published) {
-        # Quote each path so spaces in "Garage Games" remain within one argument.
-        $arguments = '"' + $published + '" --data-path "' + $dataPath + '" --urls "' + $url.TrimEnd('/') + '"'
-        $process = Start-LocalHiddenProcess $arguments $scriptRoot $outputLog $errorLog
-    } else {
-        if (-not (Test-Path -LiteralPath $dotnet)) {
-            Show-StartupFailure "The bundled .NET runtime was not found at: $dotnet" $outputLog $errorLog
-            exit 1
-        }
-        if (-not (Test-Path -LiteralPath $project)) {
-            Show-StartupFailure "The Garage Games V2 project was not found at: $project" $outputLog $errorLog
-            exit 1
-        }
-        $arguments = '"' + $dotnet + '" run --configuration Release --no-restore --project "' + $project + '" -- --data-path "' + $dataPath + '" --urls "' + $url.TrimEnd('/') + '"'
-        $process = Start-LocalHiddenProcess $arguments $repoRoot $outputLog $errorLog
+    if ($Owned) {
+        $parameters.Headers = @{ $script:shutdownHeader = $script:shutdownToken }
     }
-} catch {
-    Show-StartupFailure "Windows could not start Garage Games v2: $($_.Exception.Message)" $outputLog $errorLog
-    exit 1
-}
-
-$ready = $false
-for ($attempt = 0; $attempt -lt 40; $attempt++) {
-    Start-Sleep -Milliseconds 250
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $health -TimeoutSec 1
-        if ($response.StatusCode -eq 200) {
-            $ready = $true
-            break
+        $response = Invoke-WebRequest @parameters
+        return ($response.StatusCode -eq 200)
+    } catch {
+        return $false
+    }
+}
+
+function Get-InstanceMutexName {
+    $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    return "Local\GarageGamesV2Tray-$userSid"
+}
+
+function New-ShutdownToken {
+    $bytes = New-Object byte[] 32
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $random.GetBytes($bytes)
+        return [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $random.Dispose()
+        [Array]::Clear($bytes, 0, $bytes.Length)
+    }
+}
+
+function Quote-ProcessArgument([string]$Value) {
+    # Windows paths cannot contain a double quote, and none of these arguments end in a slash.
+    return '"' + $Value + '"'
+}
+
+function Start-OwnedServer {
+    $environment = @{
+        DOTNET_CLI_HOME = $script:toolRoot
+        APPDATA = (Join-Path $script:toolRoot 'appdata')
+        LOCALAPPDATA = (Join-Path $script:toolRoot 'localappdata')
+        NUGET_PACKAGES = (Join-Path $script:toolRoot 'nuget-packages')
+        DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
+        GARAGE_GAMES_V2_SHUTDOWN_TOKEN = $script:shutdownToken
+    }
+    $previousEnvironment = @{}
+
+    foreach ($name in $environment.Keys) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, $environment[$name], 'Process')
+    }
+
+    try {
+        if (Test-Path -LiteralPath $script:published) {
+            $filePath = $script:published
+            $workingDirectory = $script:scriptRoot
+            $arguments = '--data-path ' + (Quote-ProcessArgument $script:dataPath) + ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))
+        } else {
+            if (-not (Test-Path -LiteralPath $script:dotnet)) {
+                throw "The bundled .NET runtime was not found at: $($script:dotnet)"
+            }
+            if (-not (Test-Path -LiteralPath $script:project)) {
+                throw "The Garage Games v2 project was not found at: $($script:project)"
+            }
+            $filePath = $script:dotnet
+            $workingDirectory = $script:repoRoot
+            $arguments = 'run --configuration Release --no-restore --project ' + (Quote-ProcessArgument $script:project) + ' -- --data-path ' + (Quote-ProcessArgument $script:dataPath) + ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))
+        }
+
+        return Start-Process `
+            -FilePath $filePath `
+            -ArgumentList $arguments `
+            -WorkingDirectory $workingDirectory `
+            -WindowStyle Hidden `
+            -PassThru `
+            -RedirectStandardOutput $script:outputLog `
+            -RedirectStandardError $script:errorLog
+    } finally {
+        foreach ($name in $environment.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+        }
+    }
+}
+
+function Open-GarageGames {
+    if (-not (Test-ServerHealthy -Owned:$script:ownsServer)) {
+        if ($script:ownsServer -and $script:serverProcess -and -not $script:serverProcess.HasExited) {
+            Show-Notice "Garage Games is still starting or is not responding yet. You can try Open again shortly.`n`nStartup logs are in:`n$($script:outputLog)`n$($script:errorLog)"
+        } else {
+            Show-Notice "Garage Games is not responding. If it stopped unexpectedly, start it again with the Start Garage Games V2 shortcut.`n`nStartup logs are in:`n$($script:outputLog)`n$($script:errorLog)" 'Garage Games v2 is unavailable' ([System.Windows.Forms.MessageBoxIcon]::Warning)
+        }
+        return
+    }
+    Start-Process -FilePath $script:url
+}
+
+function Request-OwnedServerExit {
+    if (-not $script:ownsServer -or $null -eq $script:serverProcess) {
+        return $true
+    }
+
+    if ($script:serverProcess.HasExited) {
+        return $true
+    }
+
+    try {
+        $headers = @{ $script:shutdownHeader = $script:shutdownToken }
+        Invoke-WebRequest -UseBasicParsing -Method Post -Uri $script:shutdownUrl -Headers $headers -TimeoutSec 5 | Out-Null
+    } catch {
+        # The app may close the HTTP connection as the graceful stop completes; verify its process below.
+    }
+
+    try {
+        if ($script:serverProcess.WaitForExit(25000) -or $script:serverProcess.HasExited) {
+            return $true
         }
     } catch {
-        if ($process.HasExited) { break }
+        if ($script:serverProcess.HasExited) {
+            return $true
+        }
+    }
+
+    Add-Type -AssemblyName System.Windows.Forms
+    Show-Notice "Windows did not confirm a graceful stop. To protect the local score database, Garage Games was not force-stopped and the tray will remain open so you can retry Exit.`n`nIf it keeps failing, keep using the app or contact support before ending its process." 'Garage Games is still running' ([System.Windows.Forms.MessageBoxIcon]::Warning)
+    return $false
+}
+
+function Request-TrayExit {
+    if (Request-OwnedServerExit) {
+        $script:exitRequested = $true
     }
 }
 
-if ($ready) {
-    Start-Process $url
-} else {
-    $details = "Garage Games v2 did not become ready on $url."
-    if ($process.HasExited) {
-        $details += " The launcher process exited with code $($process.ExitCode)."
+function New-TrayIcon {
+    $menu = New-Object System.Windows.Forms.ContextMenuStrip
+    $openItem = New-Object System.Windows.Forms.ToolStripMenuItem('Open Garage Games')
+    $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem
+    if ($script:ownsServer) {
+        $exitItem.Text = 'Exit and stop this session'
     } else {
-        $details += " The launcher process (PID $($process.Id)) is still running."
+        $exitItem.Text = 'Exit (leave existing server running)'
     }
-    Show-StartupFailure $details $outputLog $errorLog
-    if ($process.HasExited) {
-        foreach ($task in @($script:launcherStdoutTask, $script:launcherStderrTask)) {
-            if ($null -ne $task -and $task.IsCompleted -and -not [string]::IsNullOrWhiteSpace($task.Result)) {
-                Write-Host $task.Result
-            }
+
+    $openItem.Add_Click({ Open-GarageGames }.GetNewClosure())
+    $exitItem.Add_Click({ Request-TrayExit }.GetNewClosure())
+    [void]$menu.Items.Add($openItem)
+    [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    [void]$menu.Items.Add($exitItem)
+
+    $icon = New-Object System.Windows.Forms.NotifyIcon
+    $icon.Icon = [System.Drawing.SystemIcons]::Application
+    $icon.Text = if ($script:ownsServer) { 'Garage Games v2 (this tray session owns the server)' } else { 'Garage Games v2 (using an existing server)' }
+    $icon.ContextMenuStrip = $menu
+    $icon.Visible = $true
+    $icon.Add_MouseDoubleClick({ Open-GarageGames }.GetNewClosure())
+
+    $script:contextMenu = $menu
+    $script:notifyIcon = $icon
+}
+
+try {
+    foreach ($directory in @(
+        $script:toolRoot,
+        (Join-Path $script:toolRoot 'appdata'),
+        (Join-Path $script:toolRoot 'localappdata'),
+        (Join-Path $script:toolRoot 'nuget-packages'),
+        (Join-Path $script:toolRoot 'logs')
+    )) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    }
+
+    $mutexName = Get-InstanceMutexName
+    $script:mutex = [System.Threading.Mutex]::new($false, $mutexName)
+    try {
+        $script:ownsMutex = $script:mutex.WaitOne(0)
+    } catch [System.Threading.AbandonedMutexException] {
+        $script:ownsMutex = $true
+    }
+
+    if (-not $script:ownsMutex) {
+        $ready = $false
+        for ($attempt = 0; $attempt -lt 40; $attempt++) {
+            if (Test-ServerHealthy) { $ready = $true; break }
+            Start-Sleep -Milliseconds 250
         }
+        if ($ready) {
+            Start-Process -FilePath $script:url
+        } else {
+            Show-Notice 'Another Garage Games tray instance is already running. No second server or tray instance was started.' 'Garage Games v2 is already open' ([System.Windows.Forms.MessageBoxIcon]::Information)
+        }
+        return
     }
-    if ($process.HasExited) { exit $process.ExitCode }
-    exit 1
+
+    $logStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $script:outputLog = Join-Path (Join-Path $script:toolRoot 'logs') "garage-games-v2-$logStamp-$PID.out.log"
+    $script:errorLog = Join-Path (Join-Path $script:toolRoot 'logs') "garage-games-v2-$logStamp-$PID.err.log"
+
+    if (Test-ServerHealthy) {
+        # A server not started by this tray session is deliberately never stopped by its Exit command.
+        $script:ownsServer = $false
+    } else {
+        $script:shutdownToken = New-ShutdownToken
+        $script:serverProcess = Start-OwnedServer
+        $script:ownsServer = $true
+    }
+
+    New-TrayIcon
+
+    if ($script:ownsServer) {
+        $ready = $false
+        for ($attempt = 0; $attempt -lt 40; $attempt++) {
+            if ($script:serverProcess.HasExited) { break }
+            if (Test-ServerHealthy -Owned) { $ready = $true; break }
+            Start-Sleep -Milliseconds 250
+        }
+        if ($ready) {
+            Start-Process -FilePath $script:url
+        } else {
+            $message = if ($script:serverProcess.HasExited) {
+                "Garage Games v2 exited during startup. Review the local logs for details."
+            } else {
+                "Garage Games v2 is taking longer than expected to start. The tray remains available; choose Open to retry when it is ready."
+            }
+            Show-StartupFailure $message
+        }
+    } else {
+        Start-Process -FilePath $script:url
+    }
+
+    while (-not $script:exitRequested) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 200
+    }
+} catch {
+    Show-StartupFailure "Windows could not start Garage Games v2: $($_.Exception.Message)"
+} finally {
+    if ($script:notifyIcon) {
+        $script:notifyIcon.Visible = $false
+        $script:notifyIcon.Dispose()
+    }
+    if ($script:contextMenu) {
+        $script:contextMenu.Dispose()
+    }
+    if ($script:ownsMutex -and $script:mutex) {
+        try { $script:mutex.ReleaseMutex() } catch { }
+    }
+    if ($script:mutex) {
+        $script:mutex.Dispose()
+    }
+    if ($script:serverProcess) {
+        $script:serverProcess.Dispose()
+    }
 }

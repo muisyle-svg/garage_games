@@ -81,10 +81,10 @@ public enum MessageDisposition
 public sealed class ScoringRule
 {
     public bool ManualEventPoints { get; set; }
-    public int BasePoints { get; set; } = 100;
+    public int BasePoints { get; set; } = 50;
     public int DecayPoints { get; set; } = 5;
     public int DecayEverySeconds { get; set; } = 5;
-    public int MinimumPoints { get; set; } = 50;
+    public int MinimumPoints { get; set; } = 25;
 
     public ScoringRule Clone() => new()
     {
@@ -333,6 +333,8 @@ public sealed class OperatorSnapshot
     public required string EditionName { get; set; }
     public int DurationLimitSeconds { get; set; }
     public bool SimulationMode { get; set; }
+    public string SelectedCompetitorId { get; set; } = "";
+    public RunCategory? SelectedRunCategory { get; set; }
     public RunRecord? CurrentRun { get; set; }
     public required List<EventSnapshot> Events { get; set; }
     public required List<CompetitorRecord> Competitors { get; set; }

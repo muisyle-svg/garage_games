@@ -29,6 +29,7 @@
       <button id="tab-scorekeeping" class="operator-tab is-selected" type="button" role="tab" aria-selected="true" aria-controls="panel-scorekeeping" tabindex="0">Scorekeeping</button>
       <button id="tab-on-deck" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-on-deck" tabindex="-1">On deck</button>
       <button id="tab-history" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1">Run history</button>
+      <button id="tab-leaderboards" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-leaderboards" tabindex="-1">Leaderboards</button>
     </div>
 
     <section id="panel-scorekeeping" class="tab-panel" role="tabpanel" aria-labelledby="tab-scorekeeping" tabindex="0">
@@ -44,6 +45,7 @@
           <button id="pause-run-button" class="button button-secondary" type="button" disabled>Pause</button>
           <button id="finish-run-button" class="button button-secondary" type="button" disabled>Finish run</button>
           <button id="record-run-button" class="button button-record" type="button" disabled>Record result</button>
+          <button id="discard-run-button" class="button button-discard" type="button" hidden>Discard run</button>
         </div>
       </div>
 
@@ -58,11 +60,6 @@
               <option value="exhibition">Exhibition</option>
             </select>
           </div>
-          <form id="add-competitor-form" class="add-competitor-form">
-            <label class="sr-only" for="new-competitor-name">Add competitor</label>
-            <input id="new-competitor-name" type="text" maxlength="120" autocomplete="off" placeholder="Add a competitor…" required>
-            <button class="button button-quiet" type="submit">Add</button>
-          </form>
         </div>
         <div class="summary-stat summary-clock"><span>Time remaining</span><strong id="run-countdown">05:00</strong></div>
         <div class="summary-stat"><span>Competitor</span><strong id="run-competitor">—</strong></div>
@@ -89,7 +86,7 @@
             <div><p class="mvp-kicker">Run scorecard</p><h2 id="scorecard-heading">Times & points</h2></div>
             <span id="scorecard-save-state" class="save-state">No unsaved edits</span>
           </div>
-          <p class="table-help">Times count down from the run limit, so earlier events have larger timestamps. Leave a stamp or points field blank to clear it.</p>
+          <p class="table-help">Times count down from the run limit. Event points are calculated from duration (50 points, minus 5 every 5 seconds, minimum 25); blank points restore automatic scoring.</p>
           <div class="table-scroll">
             <table class="score-table">
               <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>seconds remaining</small></th><th scope="col">Stop<br><small>seconds remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
@@ -98,7 +95,10 @@
             </table>
           </div>
           <div class="scorecard-footer">
-            <span class="small-note">Manual points are added for the total; timing does not change points automatically.</span>
+            <label class="bonus-points-control" for="current-bonus-points">General run bonus
+              <input id="current-bonus-points" type="number" min="0" step="1" inputmode="numeric" placeholder="0" disabled>
+            </label>
+            <span class="small-note">Blank is zero. Separate from any timed bonus event.</span>
             <button id="save-current-edits" class="button button-secondary" type="button" disabled>Save scorecard edits</button>
           </div>
         </section>
@@ -125,6 +125,12 @@
           </label>
           <button id="add-to-queue-button" class="button button-primary" type="submit">Add to on deck</button>
         </form>
+        <form id="add-competitor-form" class="on-deck-add-form">
+          <label for="new-competitor-name">Add a new player
+            <input id="new-competitor-name" type="text" maxlength="120" autocomplete="off" placeholder="Player name" required>
+          </label>
+          <button class="button button-quiet" type="submit">Add player</button>
+        </form>
         <ol id="on-deck-list" class="on-deck-list"><li class="empty-state">Add a competitor to show who is next on the TV scoreboard.</li></ol>
       </section>
     </section>
@@ -148,6 +154,9 @@
             </table>
           </div>
           <div class="scorecard-footer">
+            <label class="bonus-points-control" for="history-bonus-points">General run bonus
+              <input id="history-bonus-points" type="number" min="0" step="1" inputmode="numeric" placeholder="0" disabled>
+            </label>
             <span id="history-save-state" class="small-note">History edits are saved explicitly.</span>
             <button id="record-history-run" class="button button-record" type="button" disabled>Record result</button>
             <button id="save-history-edits" class="button button-secondary" type="button" disabled>Save history edits</button>
@@ -156,10 +165,76 @@
       </div>
     </section>
     </section>
+
+    <section id="panel-leaderboards" class="tab-panel" role="tabpanel" aria-labelledby="tab-leaderboards" tabindex="0" hidden>
+      <div class="leaderboards-top-grid">
+        <section class="sheet-card leaderboard-card" aria-labelledby="overall-leaderboard-heading">
+          <div class="card-heading">
+            <div><p class="mvp-kicker">Current edition · official results</p><h2 id="overall-leaderboard-heading">Overall leaderboard</h2></div>
+            <span id="overall-leaderboard-count" class="small-note">0 players</span>
+          </div>
+          <p class="leaderboard-help">Ranked by the official total-points leaderboard. Playoff and exhibition runs are not counted.</p>
+          <div class="table-scroll leaderboard-table-scroll">
+            <table class="score-table leaderboard-table">
+              <thead><tr><th scope="col">Rank</th><th scope="col">Player</th><th scope="col">Points</th></tr></thead>
+              <tbody id="overall-leaderboard-body"><tr><td colspan="3" class="empty-cell">Official results will appear here.</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="sheet-card leaderboard-card player-leaderboard-card" aria-labelledby="player-leaderboard-heading">
+          <div class="card-heading">
+            <div><p class="mvp-kicker">Official event results</p><h2 id="player-leaderboard-heading">Player scorecard</h2></div>
+          </div>
+          <div class="leaderboard-player-select">
+            <label for="leaderboard-player-select">Display player</label>
+            <select id="leaderboard-player-select" aria-describedby="player-leaderboard-caption"><option value="">Select a player…</option></select>
+          </div>
+          <p id="player-leaderboard-caption" class="leaderboard-help" aria-live="polite">Select a player to review their event times and points.</p>
+          <div class="table-scroll player-results-scroll">
+            <table class="score-table leaderboard-table player-results-table">
+              <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>seconds remaining</small></th><th scope="col">Finish<br><small>seconds remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th></tr></thead>
+              <tbody id="player-leaderboard-body"><tr><td colspan="5" class="empty-cell">Select a player to see their scorecard.</td></tr></tbody>
+              <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="player-leaderboard-total">—</td></tr></tfoot>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <section class="sheet-card event-leaderboards-panel" aria-labelledby="event-leaderboards-heading">
+        <div class="card-heading">
+          <div><p class="mvp-kicker">Current edition · official results</p><h2 id="event-leaderboards-heading">Event leaderboards</h2></div>
+          <span class="small-note">Points ranked first · faster time breaks ties</span>
+        </div>
+        <div id="event-leaderboards-grid" class="event-leaderboards-grid">
+          <p class="empty-state">Event leaderboards will appear here.</p>
+        </div>
+      </section>
+    </section>
+
+    <details class="danger-tools">
+      <summary>Testing tools / Danger zone</summary>
+      <div class="danger-tools-content">
+        <div>
+          <p class="mvp-kicker">Testing only</p>
+          <h2>Clear this app’s database</h2>
+          <p class="danger-tools-warning">This removes all competitors, queue entries, runs and event results, messages, edits, selected-player state, and device status. The database schema and configured devices remain; devices return to their default ready state. An automatic timestamped backup is created first and kept in the database’s <code>backups</code> folder. If backup creation fails, nothing is cleared.</p>
+        </div>
+        <label for="clear-database-confirmation">Type <code>CLEAR ALL DATA</code> to enable clearing
+          <input id="clear-database-confirmation" type="text" autocomplete="off" spellcheck="false" aria-describedby="clear-database-help">
+        </label>
+        <p id="clear-database-help" class="small-note">You’ll also be asked to confirm in a separate dialog.</p>
+        <button id="clear-database-button" class="button button-discard" type="button" disabled>Back up and clear database</button>
+        <p id="clear-database-result" class="danger-tools-result" aria-live="polite"></p>
+      </div>
+    </details>
   </main>
 
   <footer class="mvp-footer"><span>Garage Games</span><span>Local scorekeeper · changes save on this computer</span></footer>
   <script src="mvp-scorekeeper-time.js" defer></script>
+  <script src="mvp-scorekeeper-run-actions.js" defer></script>
+  <script src="mvp-scorecard-order.js" defer></script>
+  <script src="mvp-leaderboards.js" defer></script>
   <script src="mvp-scorekeeper.js" defer></script>
 </body>
 </html>

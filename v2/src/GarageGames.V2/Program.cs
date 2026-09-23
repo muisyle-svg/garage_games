@@ -1,4 +1,7 @@
 using GarageGames.V2;
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -63,6 +66,46 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok", simulationMode }));
+var trayShutdownToken = Environment.GetEnvironmentVariable("GARAGE_GAMES_V2_SHUTDOWN_TOKEN");
+if (!string.IsNullOrWhiteSpace(trayShutdownToken))
+{
+    var expectedTrayToken = Encoding.UTF8.GetBytes(trayShutdownToken);
+
+    bool IsTrayControlAuthorized(HttpContext context)
+    {
+        var remoteAddress = context.Connection.RemoteIpAddress;
+        if (remoteAddress is null || !IPAddress.IsLoopback(remoteAddress))
+        {
+            return false;
+        }
+
+        var suppliedToken = Encoding.UTF8.GetBytes(context.Request.Headers["X-Garage-Games-Shutdown"].ToString());
+        return suppliedToken.Length == expectedTrayToken.Length &&
+            CryptographicOperations.FixedTimeEquals(suppliedToken, expectedTrayToken);
+    }
+
+    app.MapGet("/api/internal/tray-health", (HttpContext context) =>
+        IsTrayControlAuthorized(context)
+            ? Results.Ok(new { status = "ok" })
+            : Results.NotFound());
+
+    app.MapPost("/api/internal/shutdown", async (HttpContext context, IHostApplicationLifetime lifetime) =>
+    {
+        if (!IsTrayControlAuthorized(context))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        context.Response.StatusCode = StatusCodes.Status202Accepted;
+        context.Response.OnCompleted(() =>
+        {
+            lifetime.StopApplication();
+            return Task.CompletedTask;
+        });
+        await context.Response.WriteAsJsonAsync(new { status = "shuttingDown" });
+    });
+}
 app.MapGet("/api/operator", (RunService runs) => Results.Ok(runs.GetOperatorSnapshot(simulationMode)));
 app.MapGet("/api/scoreboard", (RunService runs) => Results.Ok(runs.GetScoreboard(simulationMode)));
 app.MapGet("/api/export", (RunService runs) => Results.Json(runs.GetOperatorSnapshot(simulationMode), JsonDefaults.Options));
@@ -124,6 +167,16 @@ app.MapPost("/api/devices/{deviceId}/availability", (string deviceId, Availabili
 });
 
 app.MapPost("/api/backup", (RunStore data) => Results.Ok(new { path = data.CreateBackup() }));
+app.MapPost("/api/testing/clear-database", (ClearDatabaseRequest request, HttpContext context, RunService runs) =>
+{
+    if (!IsLoopbackClearRequest(context))
+    {
+        return Results.NotFound();
+    }
+
+    var backupPath = runs.ClearAllData(request.ConfirmationPhrase);
+    return Results.Ok(new { backupPath });
+});
 
 app.MapPost("/api/simulator/input", (InputEnvelope envelope, RunService runs) =>
 {
@@ -166,5 +219,39 @@ static void ValidateLoopbackUrls(string urls)
         }
     }
 }
+
+static bool IsLoopbackClearRequest(HttpContext context)
+{
+    var remoteAddress = context.Connection.RemoteIpAddress;
+    var requestHost = context.Request.Host.Host;
+    if (remoteAddress is null || !IPAddress.IsLoopback(remoteAddress) || !IsLoopbackHost(requestHost))
+    {
+        return false;
+    }
+
+    var originHeader = context.Request.Headers.Origin.ToString();
+    if (string.IsNullOrEmpty(originHeader))
+    {
+        return true;
+    }
+
+    if (!Uri.TryCreate(originHeader, UriKind.Absolute, out var origin) || !IsLoopbackHost(origin.Host))
+    {
+        return false;
+    }
+
+    var requestPort = context.Request.Host.Port ?? DefaultPort(context.Request.Scheme);
+    var originPort = origin.IsDefaultPort ? DefaultPort(origin.Scheme) : origin.Port;
+    return string.Equals(origin.Scheme, context.Request.Scheme, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(origin.Host, requestHost, StringComparison.OrdinalIgnoreCase) &&
+        originPort == requestPort;
+}
+
+static bool IsLoopbackHost(string host) =>
+    string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+    IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address);
+
+static int DefaultPort(string scheme) =>
+    string.Equals(scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? 443 : 80;
 
 public partial class Program { }

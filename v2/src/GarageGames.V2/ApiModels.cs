@@ -9,3 +9,4 @@ public sealed record AvailabilityRequest(DeviceAvailability Availability, string
 public sealed record AdvanceClockRequest(long Milliseconds);
 public sealed record UndoRequest(long EditId, int ExpectedRevision, string Reason);
 public sealed record ActionReasonRequest(string? Reason = null);
+public sealed record ClearDatabaseRequest(string ConfirmationPhrase);

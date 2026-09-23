@@ -3,13 +3,24 @@
 
   const state = {
     snapshot: null,
+    connected: false,
     busy: false,
     drafts: new Map(),
+    bonusDrafts: new Map(),
     selectedHistoryId: null,
     selectedCompetitorAfterRefresh: null,
+    discardedRunNotice: null,
+    queueCompetitorAfterRefresh: null,
+    selectedLeaderboardCompetitorId: "",
+    leaderboardSelectionInitialized: false,
+    selectPromotedAfterRecord: false,
     competitorSignature: "",
+    leaderboardCompetitorSignature: "",
     historySignature: "",
     queueSignature: "",
+    overallLeaderboardKey: null,
+    playerLeaderboardKey: null,
+    eventLeaderboardsKey: null,
     currentTableKey: null,
     historyTableKey: null,
     virtualKey: null,
@@ -19,16 +30,20 @@
     alertTimer: null
   };
 
+  const clearDatabasePhrase = "CLEAR ALL DATA";
   const $ = (id) => document.getElementById(id);
   const scorekeeperTime = window.GarageGamesScorekeeperTime;
+  const runActions = window.GarageGamesRunActions;
+  const scorecardOrder = window.GarageGamesScorecardOrder;
+  const leaderboardTools = window.GarageGamesLeaderboards;
   const ui = {
     edition: $("edition-name"),
     connection: $("connection-status"),
     lastUpdated: $("last-updated"),
     refresh: $("refresh-button"),
     alert: $("alert-region"),
-    tabs: [$("tab-scorekeeping"), $("tab-on-deck"), $("tab-history")],
-    tabPanels: [$("panel-scorekeeping"), $("panel-on-deck"), $("panel-history")],
+    tabs: [$("tab-scorekeeping"), $("tab-on-deck"), $("tab-history"), $("tab-leaderboards")],
+    tabPanels: [$("panel-scorekeeping"), $("panel-on-deck"), $("panel-history"), $("panel-leaderboards")],
     caption: $("run-caption"),
     competitor: $("competitor-select"),
     category: $("run-category"),
@@ -44,6 +59,7 @@
     pause: $("pause-run-button"),
     finish: $("finish-run-button"),
     record: $("record-run-button"),
+    discard: $("discard-run-button"),
     countdown: $("run-countdown"),
     runCompetitor: $("run-competitor"),
     progress: $("event-progress"),
@@ -53,6 +69,7 @@
     virtualNote: $("virtual-note"),
     currentBody: $("current-event-body"),
     currentTotal: $("scorecard-total"),
+    currentBonus: $("current-bonus-points"),
     currentSave: $("save-current-edits"),
     currentSaveState: $("scorecard-save-state"),
     historyCount: $("history-count"),
@@ -62,9 +79,20 @@
     historyMeta: $("history-editor-meta"),
     historyBody: $("history-event-body"),
     historyTotal: $("history-total"),
+    historyBonus: $("history-bonus-points"),
     historySave: $("save-history-edits"),
     historySaveState: $("history-save-state"),
-    historyRecord: $("record-history-run")
+    historyRecord: $("record-history-run"),
+    leaderboardPlayerSelect: $("leaderboard-player-select"),
+    overallLeaderboardCount: $("overall-leaderboard-count"),
+    overallLeaderboardBody: $("overall-leaderboard-body"),
+    playerLeaderboardCaption: $("player-leaderboard-caption"),
+    playerLeaderboardBody: $("player-leaderboard-body"),
+    playerLeaderboardTotal: $("player-leaderboard-total"),
+    eventLeaderboardsGrid: $("event-leaderboards-grid"),
+    clearDatabaseConfirmation: $("clear-database-confirmation"),
+    clearDatabaseButton: $("clear-database-button"),
+    clearDatabaseResult: $("clear-database-result")
   };
 
   function isLiveLock(run) {
@@ -109,6 +137,7 @@
   }
 
   function setConnection(online) {
+    state.connected = online;
     ui.connection.classList.toggle("is-online", online);
     ui.connection.classList.toggle("is-offline", !online);
     const label = ui.connection.querySelector("span");
@@ -123,10 +152,6 @@
       state.timeoutRefreshRunId = null;
       setConnection(true);
       ui.lastUpdated.textContent = new Date(state.receivedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
-      if (!state.initializedSelection) {
-        if (isLiveLock(snapshot.currentRun)) ui.competitor.value = snapshot.currentRun.competitorId;
-        state.initializedSelection = true;
-      }
       render();
       return true;
     } catch (error) {
@@ -154,13 +179,30 @@
     const preferred = state.selectedCompetitorAfterRefresh;
     if (isLiveLock(state.snapshot?.currentRun)) {
       ui.competitor.value = state.snapshot.currentRun.competitorId;
+      ui.category.value = state.snapshot.currentRun.category;
+    } else if (state.selectPromotedAfterRecord) {
+      ui.competitor.value = state.snapshot.selectedCompetitorId || "";
+      ui.category.value = state.snapshot.selectedRunCategory || "official";
+      state.selectPromotedAfterRecord = false;
+      state.selectedCompetitorAfterRefresh = null;
     } else if (preferred && competitors.some((item) => item.id === preferred)) {
       ui.competitor.value = preferred;
       state.selectedCompetitorAfterRefresh = null;
+    } else if (!state.initializedSelection && competitors.some((item) => item.id === state.snapshot?.selectedCompetitorId)) {
+      ui.competitor.value = state.snapshot.selectedCompetitorId;
+      ui.category.value = state.snapshot.selectedRunCategory || "official";
     } else if (competitors.some((item) => item.id === previousValue)) {
       ui.competitor.value = previousValue;
+    } else {
+      ui.competitor.value = "";
     }
-    if (competitors.some((item) => item.id === previousQueueValue)) ui.queueCompetitor.value = previousQueueValue;
+    state.initializedSelection = true;
+    if (state.queueCompetitorAfterRefresh && competitors.some((item) => item.id === state.queueCompetitorAfterRefresh)) {
+      ui.queueCompetitor.value = state.queueCompetitorAfterRefresh;
+      state.queueCompetitorAfterRefresh = null;
+    } else if (competitors.some((item) => item.id === previousQueueValue)) {
+      ui.queueCompetitor.value = previousQueueValue;
+    }
   }
 
   function categoryLabel(category) {
@@ -219,6 +261,10 @@
   function hasDrafts(runId) {
     const rows = state.drafts.get(runId);
     return Boolean(rows && Array.from(rows.values()).some((draft) => draft.touched.size));
+  }
+
+  function hasBonusDraft(runId) {
+    return Boolean(state.bonusDrafts.get(runId)?.touched);
   }
 
   function parsedSeconds(value) {
@@ -291,9 +337,26 @@
     return Number(event.score || 0);
   }
 
+  function displayedBonus(run) {
+    if (!run) return 0;
+    const draft = state.bonusDrafts.get(run.id);
+    if (draft?.touched) {
+      const value = Number(draft.value);
+      return draft.value !== "" && Number.isFinite(value) && value >= 0 ? value : 0;
+    }
+    return Number(run.bonusPointsOverride || 0);
+  }
+
+  function bonusInputValue(run) {
+    if (!run) return "";
+    const draft = state.bonusDrafts.get(run.id);
+    if (draft?.touched) return draft.value;
+    return run.bonusPointsOverride == null ? "" : String(run.bonusPointsOverride);
+  }
+
   function tableTotal(run) {
     if (!run) return 0;
-    return runEvents(run).reduce((sum, event) => sum + displayedScore(run, event), 0);
+    return runEvents(run).reduce((sum, event) => sum + displayedScore(run, event), displayedBonus(run));
   }
 
   function updateTableTotal(kind, run) {
@@ -301,6 +364,18 @@
     if (kind === "current") ui.currentTotal.textContent = String(total);
     else ui.historyTotal.textContent = String(total);
     if (kind === "current") ui.runTotal.textContent = String(total);
+    if (kind === "history" && run) {
+      const historyRow = ui.historyList.querySelector(`[data-run-id="${CSS.escape(run.id)}"] .history-points`);
+      if (historyRow) historyRow.textContent = String(total);
+    }
+  }
+
+  function syncBonusInput(input, run, editable) {
+    if (!input) return;
+    const value = bonusInputValue(run);
+    if (input.value !== value) input.value = value;
+    input.dataset.runId = run?.id || "";
+    input.disabled = !run || !editable;
   }
 
   function buildTimeInput(run, event, field, editable) {
@@ -390,7 +465,7 @@
 
   function setSaveStates() {
     const current = state.snapshot?.currentRun;
-    const currentDirty = current && hasDrafts(current.id);
+    const currentDirty = current && (hasDrafts(current.id) || hasBonusDraft(current.id));
     const currentEditable = Boolean(current && isLiveLock(current));
     ui.currentSave.disabled = state.busy || !currentDirty || !currentEditable;
     ui.currentSaveState.textContent = currentDirty
@@ -398,7 +473,7 @@
       : "No unsaved edits";
 
     const selected = (state.snapshot?.history || []).find((run) => run.id === state.selectedHistoryId);
-    const historyDirty = selected && hasDrafts(selected.id);
+    const historyDirty = selected && (hasDrafts(selected.id) || hasBonusDraft(selected.id));
     const historyEditable = Boolean(selected && !isLiveLock(selected));
     ui.historySave.disabled = state.busy || !historyDirty || !historyEditable;
     ui.historySaveState.textContent = historyDirty
@@ -408,6 +483,7 @@
 
   function renderCurrent() {
     const run = state.snapshot?.currentRun || null;
+    syncBonusInput(ui.currentBonus, run, Boolean(run && isLiveLock(run)));
     const key = run ? `${run.id}:${run.revision}:${run.status}` : `no-run:${eventRosterSignature()}`;
     if (key !== state.currentTableKey) {
       const focus = captureFocus();
@@ -422,9 +498,11 @@
     ui.progress.textContent = `${complete} / ${events.length}`;
     ui.runCompetitor.textContent = run ? competitorName(run.competitorId) : "—";
     if (!run) {
-      ui.banner.textContent = "No run is active. Select a competitor to begin.";
-      ui.caption.textContent = "Choose a competitor, then start the five-minute clock.";
+      ui.banner.textContent = state.discardedRunNotice || "No run is active. Select a competitor to begin.";
+      ui.banner.classList.toggle("is-discarded", Boolean(state.discardedRunNotice));
+      ui.caption.textContent = state.discardedRunNotice ? "Discarded run · not recorded" : "Choose a competitor, then start the five-minute clock.";
     } else {
+      ui.banner.classList.remove("is-discarded");
       const label = categoryLabel(run.category);
       const competitor = competitorName(run.competitorId);
       const copy = {
@@ -434,7 +512,7 @@
         finished: "All events complete. Timer stopped · finished, not recorded.",
         completed: "Run finished · recorded.",
         timedOut: run.isRecorded ? "Time expired · incomplete result recorded." : "Time expired · incomplete result not recorded.",
-        aborted: "Run aborted.",
+        aborted: "Run discarded · retained in history · not recorded or counted toward results.",
         superseded: "Run replaced by a newer result."
       }[run.status] || `Run status: ${titleCase(run.status)}.`;
       ui.banner.textContent = `${copy} ${competitor} · ${label}`;
@@ -496,6 +574,32 @@
           make("strong", "", competitorName(item.competitorId)),
           make("small", "", categoryLabel(item.category))
         );
+        const actions = make("div", "on-deck-actions");
+        const move = (offset) => {
+          const queueIds = queue.map((queued) => queued.id);
+          const destination = index + offset;
+          [queueIds[index], queueIds[destination]] = [queueIds[destination], queueIds[index]];
+          const direction = offset < 0 ? "up" : "down";
+          return performAction(
+            () => request("/api/queue/reorder", {
+              method: "POST",
+              body: JSON.stringify({ queueIds })
+            }),
+            `${competitorName(item.competitorId)} moved ${direction} in on deck.`
+          );
+        };
+        const moveUp = make("button", "button button-quiet on-deck-move", "↑");
+        moveUp.type = "button";
+        moveUp.disabled = state.busy || index === 0;
+        moveUp.setAttribute("aria-label", `Move ${competitorName(item.competitorId)} (${categoryLabel(item.category)}) up in on-deck queue`);
+        moveUp.title = "Move up";
+        moveUp.addEventListener("click", () => move(-1));
+        const moveDown = make("button", "button button-quiet on-deck-move", "↓");
+        moveDown.type = "button";
+        moveDown.disabled = state.busy || index === queue.length - 1;
+        moveDown.setAttribute("aria-label", `Move ${competitorName(item.competitorId)} (${categoryLabel(item.category)}) down in on-deck queue`);
+        moveDown.title = "Move down";
+        moveDown.addEventListener("click", () => move(1));
         const remove = make("button", "button button-quiet on-deck-remove", "Remove");
         remove.type = "button";
         remove.disabled = state.busy;
@@ -504,11 +608,198 @@
           () => request(`/api/queue/${encodeURIComponent(item.id)}`, { method: "DELETE" }),
           `${competitorName(item.competitorId)} removed from on deck.`
         ));
-        row.append(position, details, remove);
+        actions.append(moveUp, moveDown, remove);
+        row.append(position, details, actions);
         ui.queueList.appendChild(row);
       });
     }
     state.queueSignature = signature;
+  }
+
+  function officialLeaderboardRuns() {
+    const historyById = new Map((state.snapshot?.history || []).map((run) => [run.id, run]));
+    return (state.snapshot?.leaderboard || [])
+      .filter((row) => row.category === "official" && row.runId)
+      .map((row) => ({ row, run: historyById.get(row.runId) }))
+      .filter(({ run }) => run && run.category === "official");
+  }
+
+  function appendEmptyTableRow(body, columns, message) {
+    const row = make("tr");
+    const cell = make("td", "empty-cell", message);
+    cell.colSpan = columns;
+    row.appendChild(cell);
+    body.replaceChildren(row);
+  }
+
+  function renderOverallLeaderboard(rows) {
+    ui.overallLeaderboardCount.textContent = `${rows.length} ${rows.length === 1 ? "result" : "results"}`;
+    if (!rows.length) {
+      appendEmptyTableRow(ui.overallLeaderboardBody, 3, "No counted official results for this edition yet.");
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    rows.forEach((item) => {
+      const row = make("tr");
+      row.append(
+        make("td", "leaderboard-rank", String(item.rank)),
+        make("td", "leaderboard-player", item.competitorName),
+        make("td", "leaderboard-points", String(item.points))
+      );
+      fragment.appendChild(row);
+    });
+    ui.overallLeaderboardBody.replaceChildren(fragment);
+  }
+
+  function renderLeaderboardPlayerOptions(officialRuns) {
+    const competitors = (state.snapshot?.competitors || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+    const signature = competitors.map((item) => `${item.id}:${item.name}`).join("|");
+    if (signature !== state.leaderboardCompetitorSignature) {
+      ui.leaderboardPlayerSelect.replaceChildren(new Option("Select a player…", ""));
+      competitors.forEach((competitor) => ui.leaderboardPlayerSelect.appendChild(new Option(competitor.name, competitor.id)));
+      state.leaderboardCompetitorSignature = signature;
+    }
+    const validCompetitors = new Set(competitors.map((item) => item.id));
+    if (!validCompetitors.has(state.selectedLeaderboardCompetitorId)) state.selectedLeaderboardCompetitorId = "";
+    if (!state.selectedLeaderboardCompetitorId && !state.leaderboardSelectionInitialized) {
+      state.selectedLeaderboardCompetitorId = officialRuns.find(({ run }) => validCompetitors.has(run.competitorId))?.run.competitorId || "";
+      state.leaderboardSelectionInitialized = true;
+    }
+    ui.leaderboardPlayerSelect.value = state.selectedLeaderboardCompetitorId;
+  }
+
+  function runEventTimestamp(run, elapsedMs) {
+    if (!Number.isFinite(elapsedMs)) return "—";
+    const durationSeconds = Number(run.edition?.durationLimitSeconds || state.snapshot?.durationLimitSeconds || 300);
+    const remaining = scorekeeperTime.remainingSecondsFromElapsedMs(elapsedMs, durationSeconds);
+    return remaining === null ? "—" : formatSeconds(remaining * 1000);
+  }
+
+  function renderSelectedPlayerLeaderboard(officialRuns) {
+    const selectedId = state.selectedLeaderboardCompetitorId;
+    if (!selectedId) {
+      ui.playerLeaderboardCaption.textContent = "Select a player to review their event times and points.";
+      ui.playerLeaderboardTotal.textContent = "—";
+      appendEmptyTableRow(ui.playerLeaderboardBody, 5, "Select a player to see their scorecard.");
+      return;
+    }
+    const selected = officialRuns.find(({ run }) => run.competitorId === selectedId);
+    if (!selected) {
+      ui.playerLeaderboardCaption.textContent = "No counted official result for this player in the current edition.";
+      ui.playerLeaderboardTotal.textContent = "—";
+      appendEmptyTableRow(ui.playerLeaderboardBody, 5, "This player has no counted official run to display.");
+      return;
+    }
+
+    const { row: overallRow, run } = selected;
+    ui.playerLeaderboardCaption.textContent = `Official result · ${overallRow.points} total points · ${shortDate(run.recordedAt || run.finishedAt || run.createdAt)}`;
+    ui.playerLeaderboardTotal.textContent = String(overallRow.points);
+    const eventResults = new Map((run.events || []).map((event) => [event.eventId, event]));
+    const configuredEvents = state.snapshot?.events || [];
+    if (!configuredEvents.length) {
+      appendEmptyTableRow(ui.playerLeaderboardBody, 5, "No events are configured for this edition.");
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    scorecardOrder.orderScorecardEvents(configuredEvents, eventResults).forEach(({ definition, result, configuredIndex }) => {
+      const start = result?.startElapsedMs;
+      const finish = result?.finishElapsedMs;
+      const duration = Number.isFinite(start) && Number.isFinite(finish) && finish >= start
+        ? formatDuration(finish - start)
+        : "—";
+      const hasPoints = result && (Number(result.score || 0) !== 0 || result.scoreOverride !== null && result.scoreOverride !== undefined || start !== null && start !== undefined || finish !== null && finish !== undefined);
+      const points = hasPoints ? String(Number(result.scoreOverride ?? result.score ?? 0)) : "—";
+      const rowNode = make("tr");
+      const name = make("td", "event-name-cell");
+      name.append(make("span", "event-index", String(configuredIndex + 1)), document.createTextNode(definition.name));
+      rowNode.append(
+        name,
+        make("td", "duration-cell", runEventTimestamp(run, start)),
+        make("td", "duration-cell", runEventTimestamp(run, finish)),
+        make("td", "duration-cell", duration),
+        make("td", "leaderboard-points", points)
+      );
+      fragment.appendChild(rowNode);
+    });
+    ui.playerLeaderboardBody.replaceChildren(fragment);
+  }
+
+  function renderEventLeaderboards(boards) {
+    if (!boards.length) {
+      ui.eventLeaderboardsGrid.replaceChildren(make("p", "empty-state", "No events are configured for this edition."));
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    boards.forEach((board, index) => {
+      const card = make("section", "sheet-card event-leaderboard-card");
+      const heading = make("div", "event-leaderboard-heading");
+      const headingId = `event-leaderboard-title-${index}`;
+      const title = make("h3", "", `${index + 1}. ${board.name}`);
+      title.id = headingId;
+      heading.setAttribute("aria-labelledby", headingId);
+      heading.appendChild(title);
+      heading.appendChild(make("span", "small-note", `${board.rows.length} ${board.rows.length === 1 ? "result" : "results"}`));
+      const tableScroll = make("div", "table-scroll event-leaderboard-table-scroll");
+      const table = make("table", "score-table leaderboard-table");
+      const thead = document.createElement("thead");
+      const headerRow = document.createElement("tr");
+      ["Rank", "Player", "Time", "Points"].forEach((label) => {
+        const cell = make("th", "", label);
+        cell.scope = "col";
+        headerRow.appendChild(cell);
+      });
+      thead.appendChild(headerRow);
+      const tbody = document.createElement("tbody");
+      if (!board.rows.length) {
+        appendEmptyTableRow(tbody, 4, "No completed official results for this event yet.");
+      } else {
+        board.rows.forEach((item) => {
+          const row = make("tr");
+          if (item.status === "dnf") row.classList.add("leaderboard-dnf-row");
+          const display = leaderboardTools.eventLeaderboardDisplayRow(item);
+          row.append(
+            make("td", "leaderboard-rank", display.rank),
+            make("td", "leaderboard-player", item.competitorName),
+            make("td", "duration-cell", display.durationMs === null ? "—" : formatDuration(display.durationMs)),
+            make("td", "leaderboard-points", display.points)
+          );
+          tbody.appendChild(row);
+        });
+      }
+      table.append(thead, tbody);
+      tableScroll.appendChild(table);
+      card.append(heading, tableScroll);
+      card.setAttribute("aria-labelledby", headingId);
+      fragment.appendChild(card);
+    });
+    ui.eventLeaderboardsGrid.replaceChildren(fragment);
+  }
+
+  function renderLeaderboards() {
+    const snapshot = state.snapshot;
+    if (!snapshot) return;
+    const officialRows = snapshot.leaderboard || [];
+    const officialRuns = officialLeaderboardRuns();
+    renderLeaderboardPlayerOptions(officialRuns);
+
+    const overallKey = JSON.stringify(officialRows);
+    if (overallKey !== state.overallLeaderboardKey) {
+      renderOverallLeaderboard(officialRows);
+      state.overallLeaderboardKey = overallKey;
+    }
+
+    const playerKey = `${state.selectedLeaderboardCompetitorId}:${JSON.stringify(officialRuns.map(({ row, run }) => [row.runId, row.points, run.revision, run.events]))}:${JSON.stringify(snapshot.events)}`;
+    if (playerKey !== state.playerLeaderboardKey) {
+      renderSelectedPlayerLeaderboard(officialRuns);
+      state.playerLeaderboardKey = playerKey;
+    }
+
+    const boards = leaderboardTools.buildEventLeaderboards(snapshot.events || [], officialRows, snapshot.history || []);
+    const eventKey = JSON.stringify(boards);
+    if (eventKey !== state.eventLeaderboardsKey) {
+      renderEventLeaderboards(boards);
+      state.eventLeaderboardsKey = eventKey;
+    }
   }
 
   function renderHistory() {
@@ -526,13 +817,14 @@
         history.forEach((run) => {
           const button = make("button", `history-row${run.id === state.selectedHistoryId ? " is-selected" : ""}`);
           button.type = "button";
+          button.dataset.runId = run.id;
           button.setAttribute("aria-pressed", String(run.id === state.selectedHistoryId));
           const primary = make("span", "history-primary");
           primary.append(
             make("strong", "", competitorName(run.competitorId)),
             make("span", "", `${categoryLabel(run.category)} · ${shortDate(run.createdAt)}`)
           );
-          const points = make("strong", "history-points", String((run.events || []).reduce((sum, event) => sum + Number(event.score || 0), 0)));
+          const points = make("strong", "history-points", String(tableTotal(run)));
           const status = make("span", `history-status ${run.status}`, run.isRecorded ? "Recorded" : "Not recorded");
           button.append(primary, points, status);
           button.addEventListener("click", () => {
@@ -549,6 +841,7 @@
     }
     const selected = history.find((run) => run.id === state.selectedHistoryId) || null;
     if (!selected) {
+      syncBonusInput(ui.historyBonus, null, false);
       ui.historyTitle.textContent = "Select a saved run";
       ui.historyStatus.textContent = "—";
       ui.historyMeta.textContent = "Choose a history entry to review or correct its event times and points.";
@@ -560,6 +853,7 @@
       return;
     }
     const key = `${selected.id}:${selected.revision}:${selected.status}`;
+    syncBonusInput(ui.historyBonus, selected, !isLiveLock(selected));
     ui.historyTitle.textContent = `${competitorName(selected.competitorId)} · ${categoryLabel(selected.category)}`;
     ui.historyStatus.textContent = `${titleCase(selected.status)} · ${selected.isRecorded ? "Recorded" : "Not recorded"}`;
     ui.historyStatus.className = `status-tag status-${selected.status}`;
@@ -596,6 +890,9 @@
     ui.finish.disabled = state.busy || !run || !["armed", "active", "paused"].includes(run.status);
     ui.record.disabled = state.busy || !run || run.isRecorded || !["armed", "active", "paused", "finished", "timedOut"].includes(run.status);
     ui.record.textContent = run?.isRecorded ? "Already recorded" : "Record result";
+    ui.discard.hidden = !runActions.isDiscardableRun(run);
+    ui.discard.disabled = state.busy || !state.connected;
+    ui.clearDatabaseButton.disabled = state.busy || !state.connected || ui.clearDatabaseConfirmation.value !== clearDatabasePhrase;
     ui.refresh.disabled = state.busy;
     ui.queueCompetitor.disabled = state.busy;
     ui.queueCategory.disabled = state.busy;
@@ -603,6 +900,7 @@
     renderQueue();
     renderCurrent();
     renderHistory();
+    renderLeaderboards();
     setSaveStates();
   }
 
@@ -653,15 +951,18 @@
     if (!run) throw new Error("There is no run to record.");
     if (run.status === "timedOut") {
       await request(`/api/runs/${encodeURIComponent(run.id)}/record`, { method: "POST" });
+      state.selectPromotedAfterRecord = true;
       return;
     }
     await request("/api/run/record", { method: "POST" });
+    state.selectPromotedAfterRecord = true;
   }
 
   async function recordHistoricalRun() {
     const run = (state.snapshot?.history || []).find((item) => item.id === state.selectedHistoryId);
     if (!run) throw new Error("Select a saved run to record.");
     await request(`/api/runs/${encodeURIComponent(run.id)}/record`, { method: "POST" });
+    state.selectPromotedAfterRecord = true;
   }
 
   async function performAction(action, successMessage) {
@@ -688,6 +989,7 @@
       competitorId = current.competitorId;
       category = current.category;
       await request("/api/run/start", { method: "POST" });
+      state.discardedRunNotice = null;
     } else {
       competitorId = ui.competitor.value;
       category = ui.category.value;
@@ -698,6 +1000,7 @@
       });
       await loadSnapshot(true);
       await request("/api/run/start", { method: "POST" });
+      state.discardedRunNotice = null;
     }
     await removeMatchingQueueEntryAfterStart(competitorId, category);
   }
@@ -747,8 +1050,21 @@
     setSaveStates();
   }
 
+  function onBonusInput(event) {
+    const input = event.target.closest("input[data-run-id]");
+    if (!input?.dataset.runId) return;
+    const runId = input.dataset.runId;
+    state.bonusDrafts.set(runId, { value: input.value, touched: true });
+    const run = state.snapshot?.currentRun?.id === runId
+      ? state.snapshot.currentRun
+      : state.snapshot?.history?.find((item) => item.id === runId);
+    if (run) updateTableTotal(input === ui.currentBonus ? "current" : "history", run);
+    setSaveStates();
+  }
+
   function createEditRequest(run) {
     const eventDrafts = state.drafts.get(run.id);
+    const bonusDraft = state.bonusDrafts.get(run.id);
     const events = [];
     if (eventDrafts) {
       for (const [eventId, draft] of eventDrafts.entries()) {
@@ -777,12 +1093,22 @@
         events.push(edit);
       }
     }
-    if (!events.length) throw new Error("There are no scorecard edits to save.");
-    return {
+    if (!events.length && !bonusDraft?.touched) throw new Error("There are no scorecard edits to save.");
+    const request = {
       expectedRevision: run.revision,
       reason: run.status && isLiveLock(run) ? "Operator corrected the current scorecard." : "Operator corrected a saved scorecard.",
       events
     };
+    if (bonusDraft?.touched) {
+      if (bonusDraft.value === "") {
+        request.clearBonusPointsOverride = true;
+      } else {
+        const points = Number(bonusDraft.value);
+        if (!Number.isInteger(points) || points < 0) throw new Error("General run bonus must be a whole number zero or greater, or blank for zero.");
+        request.bonusPointsOverride = points;
+      }
+    }
+    return request;
   }
 
   async function saveCurrentEdits() {
@@ -792,6 +1118,7 @@
       const body = createEditRequest(run);
       await request("/api/run/edit", { method: "PUT", body: JSON.stringify(body) });
       state.drafts.delete(run.id);
+      state.bonusDrafts.delete(run.id);
     }, "Current scorecard edits saved.");
   }
 
@@ -802,7 +1129,49 @@
       const body = createEditRequest(run);
       await request(`/api/runs/${encodeURIComponent(run.id)}/edit`, { method: "PUT", body: JSON.stringify(body) });
       state.drafts.delete(run.id);
+      state.bonusDrafts.delete(run.id);
     }, "Saved run corrections updated.");
+  }
+
+  async function clearDatabaseForTesting() {
+    if (state.busy) return;
+    if (ui.clearDatabaseConfirmation.value !== clearDatabasePhrase) {
+      showAlert(`Type ${clearDatabasePhrase} exactly before clearing the database.`);
+      return;
+    }
+    const confirmed = window.confirm(
+      "Clear ALL Garage Games data on this computer? A timestamped database backup will be created first and kept. Competitors, queued players, runs, event times and scores, messages, edits, selections, and device status will be cleared. This cannot be undone from the app."
+    );
+    if (!confirmed) return;
+
+    state.busy = true;
+    ui.clearDatabaseResult.textContent = "Creating a backup before clearing…";
+    updateControls();
+    try {
+      const result = await request("/api/testing/clear-database", {
+        method: "POST",
+        body: JSON.stringify({ confirmationPhrase: ui.clearDatabaseConfirmation.value })
+      });
+      state.drafts.clear();
+      state.bonusDrafts.clear();
+      state.selectedHistoryId = null;
+      state.selectedCompetitorAfterRefresh = null;
+      state.queueCompetitorAfterRefresh = null;
+      state.selectedLeaderboardCompetitorId = "";
+      state.discardedRunNotice = null;
+      state.selectPromotedAfterRecord = false;
+      ui.clearDatabaseConfirmation.value = "";
+      const backupPath = result?.backupPath || "Path was not returned by the server.";
+      ui.clearDatabaseResult.textContent = `Database cleared. The backup was retained at: ${backupPath}`;
+      await loadSnapshot(true);
+      showAlert(`Test database cleared. Backup retained at: ${backupPath}`, "success");
+    } catch (error) {
+      ui.clearDatabaseResult.textContent = "The database was not cleared. If backup creation failed, no data was removed.";
+      showAlert(error.message || "The database could not be cleared.");
+    } finally {
+      state.busy = false;
+      updateControls();
+    }
   }
 
   function bindActions() {
@@ -829,6 +1198,27 @@
       () => request("/api/run/finish", { method: "POST" }),
       "Run finished · not recorded yet."
     ));
+    ui.discard.addEventListener("click", () => {
+      const run = state.snapshot?.currentRun;
+      if (!runActions.isDiscardableRun(run)) return;
+      const competitor = competitorName(run.competitorId);
+      const confirmation = window.confirm(
+        `Discard ${competitor}'s current run? It will remain in run history as Aborted, but will not be recorded or counted as a result. ${competitor} will stay selected so you can start a fresh run.`
+      );
+      if (!confirmation) return;
+      const notice = `${competitor}'s run was discarded. It remains in run history as Aborted, but was not recorded or counted. ${competitor} is still selected; start a fresh run when ready.`;
+      const reason = `Operator discarded unrecorded run for ${competitor} from the scorekeeper.`;
+      performAction(async () => {
+        await request("/api/run/abort", {
+          method: "POST",
+          body: JSON.stringify({ reason })
+        });
+        state.selectedCompetitorAfterRefresh = run.competitorId;
+        state.discardedRunNotice = notice;
+        state.drafts.delete(run.id);
+        state.bonusDrafts.delete(run.id);
+      }, notice);
+    });
     ui.record.addEventListener("click", () => performAction(
       recordCurrentRun,
       "Run recorded."
@@ -838,6 +1228,8 @@
     ui.historySave.addEventListener("click", saveHistoryEdits);
     ui.currentBody.addEventListener("input", onScoreInput);
     ui.historyBody.addEventListener("input", onScoreInput);
+    ui.currentBonus.addEventListener("input", onBonusInput);
+    ui.historyBonus.addEventListener("input", onBonusInput);
     ui.addForm.addEventListener("submit", (event) => {
       event.preventDefault();
       const name = ui.newCompetitor.value.trim();
@@ -845,6 +1237,7 @@
       performAction(async () => {
         const competitor = await request("/api/competitors", { method: "POST", body: JSON.stringify({ name }) });
         state.selectedCompetitorAfterRefresh = competitor.id;
+        state.queueCompetitorAfterRefresh = competitor.id;
         ui.newCompetitor.value = "";
       }, "Competitor added.");
     });
@@ -863,6 +1256,13 @@
     });
     ui.competitor.addEventListener("change", updateControls);
     ui.queueCompetitor.addEventListener("change", updateControls);
+    ui.leaderboardPlayerSelect.addEventListener("change", () => {
+      state.selectedLeaderboardCompetitorId = ui.leaderboardPlayerSelect.value;
+      state.playerLeaderboardKey = null;
+      renderLeaderboards();
+    });
+    ui.clearDatabaseConfirmation.addEventListener("input", updateControls);
+    ui.clearDatabaseButton.addEventListener("click", clearDatabaseForTesting);
   }
 
   bindActions();

@@ -1,13 +1,17 @@
 using GarageGames.V2;
+using Microsoft.Data.Sqlite;
 using System.Text.Json;
 
 var tests = new (string Name, Action Run)[]
 {
-    ("score boundaries", ScoreBoundaries),
+    ("automatic event-score cutoffs", ScoreBoundaries),
     ("pause freezes time and timeout precedence", PauseAndTimeout),
     ("timeout autosaves and releases next competitor", MvpTimeoutAndNextRun),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
-    ("MVP timing fields clear and manual points total", MvpEditableScorecard),
+    ("MVP timing fields clear and manual score overrides add to total", MvpEditableScorecard),
+    ("completed event scores and general bonus persist through historical edits", AutomatedScoreAndBonusPersistence),
+    ("recording atomically promotes and persists the next on-deck competitor", RecordPromotesNextCompetitor),
+    ("reordering on-deck queue persists the requested order", QueueReorderPersists),
     ("regular events automatically finish and freeze the clock until recorded", MvpAutoFinishAndRecord),
     ("completing a current scorecard correction automatically finishes", MvpCorrectionAutoFinish),
     ("finishing and recording are distinct and recording releases the next run", FinishIsIdempotent),
@@ -18,6 +22,8 @@ var tests = new (string Name, Action Run)[]
     ("restart lineage and one official result", RestartAndOfficialRule),
     ("category exclusion and shared tie rank", CategoryAndTieRank),
     ("persistent recovery and exclusive data lock", RecoveryAndLock),
+    ("danger-zone clear backs up first and resets persisted and runtime state", ClearDatabaseSafety),
+    ("failed backup prevents database clearing", ClearDatabaseBackupFailurePreservesData),
     ("live edit isolation, history edit, undo, and stale undo", EditsAndIsolation),
     ("unknown database is rejected", UnknownDatabase)
 };
@@ -49,13 +55,11 @@ return 0;
 static void ScoreBoundaries()
 {
     var rule = new ScoringRule();
-    Assert.Equal(100, Score(0, rule));
-    Assert.Equal(100, Score(4_999, rule));
-    Assert.Equal(95, Score(5_000, rule));
-    Assert.Equal(95, Score(9_999, rule));
-    Assert.Equal(90, Score(10_000, rule));
-    Assert.Equal(50, Score(50_000, rule));
-    Assert.Equal(50, Score(55_000, rule));
+    Assert.Equal(50, Score(4_990, rule));
+    Assert.Equal(50, Score(4_999, rule));
+    Assert.Equal(45, Score(5_000, rule));
+    Assert.Equal(40, Score(10_000, rule));
+    Assert.Equal(25, Score(25_000, rule));
 
     static int Score(long duration, ScoringRule rule) => ScoreCalculator.Calculate(new EventRecord
     {
@@ -119,6 +123,9 @@ static void MvpRosterAndVirtualPresses()
     var editionPath = Path.Combine(Environment.CurrentDirectory, "v2", "config", "edition-2026.json");
     var edition = EditionDefinition.FromJson(editionPath);
     Assert.Equal(13, edition.Events.Count);
+    Assert.Equal(false, edition.Scoring.ManualEventPoints);
+    Assert.Equal(50, edition.Scoring.BasePoints);
+    Assert.Equal(25, edition.Scoring.MinimumPoints);
     Assert.True(edition.Events.All(e => e.Type == EventKind.Standard), "Every MVP event must use standard two-press behavior.");
     Assert.Equal("Perfect Pour", edition.Events[0].Name);
     Assert.Equal("Hammer Head", edition.Events[^1].Name);
@@ -139,7 +146,7 @@ static void MvpRosterAndVirtualPresses()
     var result = completed.Run!.Events.Single(e => e.EventId == "event-01");
     Assert.Equal(EventStatus.Completed, result.Status);
     Assert.Equal(3_000L, result.DurationMs);
-    Assert.Equal(0, result.Score);
+    Assert.Equal(50, result.Score);
     Assert.Equal(MessageDisposition.AlreadyCompleted, h.Service.PressEvent(run.Id, "event-01").Disposition);
 }
 
@@ -194,6 +201,160 @@ static void MvpEditableScorecard()
     Assert.Equal(null, historical.Events.Single(e => e.EventId == "event-01").FinishElapsedMs);
     Assert.Equal(EventStatus.Pending, historical.Events.Single(e => e.EventId == "event-01").Status);
     Assert.Equal(12, historical.TotalPoints);
+}
+
+static void AutomatedScoreAndBonusPersistence()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
+    h.Service.StartMaster();
+
+    h.Service.PressEvent(run.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromMilliseconds(4_990));
+    var completed = h.Service.PressEvent(run.Id, "event-01").Run!;
+    Assert.Equal(50, completed.Events.Single(e => e.EventId == "event-01").Score);
+
+    h.Clock.Advance(TimeSpan.FromMilliseconds(10));
+    var live = h.Service.GetOperatorSnapshot().CurrentRun!;
+    var overridden = h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = live.Revision,
+        Reason = "Set a manual event score and general bonus",
+        BonusPointsOverride = 7,
+        Events = [new EventEditRequest
+        {
+            EventId = "event-01",
+            FinishElapsedMs = 5_000,
+            ScoreOverride = 81
+        }]
+    });
+    Assert.Equal(81, overridden.Events.Single(e => e.EventId == "event-01").Score);
+
+    h.Clock.Advance(TimeSpan.FromSeconds(20));
+    live = h.Service.GetOperatorSnapshot().CurrentRun!;
+    var changedTime = h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = live.Revision,
+        Reason = "Correct the event finish timestamp",
+        Events = [new EventEditRequest { EventId = "event-01", FinishElapsedMs = 25_000 }]
+    });
+    Assert.Equal(81, changedTime.Events.Single(e => e.EventId == "event-01").Score);
+
+    h.Service.Finish();
+    var recorded = h.Service.Record();
+    var persisted = h.Store.Load().Runs.Single(r => r.Id == recorded.Id);
+    Assert.Equal(81, persisted.Events.Single(e => e.EventId == "event-01").Score);
+    Assert.Equal(81, persisted.Events.Single(e => e.EventId == "event-01").ScoreOverride);
+    Assert.Equal(7, persisted.BonusPointsOverride);
+    Assert.Equal(88, persisted.TotalPoints);
+    Assert.Equal(88, h.Service.GetOperatorSnapshot().Leaderboard.Single().Points);
+
+    var historical = h.Service.EditHistoricalRun(recorded.Id, new EditRunRequest
+    {
+        ExpectedRevision = recorded.Revision,
+        Reason = "Clear the manual score and correct the event time",
+        BonusPointsOverride = 9,
+        Events = [new EventEditRequest
+        {
+            EventId = "event-01",
+            FinishElapsedMs = 10_000,
+            ClearScoreOverride = true
+        }]
+    });
+    Assert.Equal(40, historical.Events.Single(e => e.EventId == "event-01").Score);
+    Assert.Equal(null, historical.Events.Single(e => e.EventId == "event-01").ScoreOverride);
+    Assert.Equal(9, historical.BonusPointsOverride);
+    Assert.Equal(49, historical.TotalPoints);
+
+    persisted = h.Store.Load().Runs.Single(r => r.Id == recorded.Id);
+    Assert.Equal(40, persisted.Events.Single(e => e.EventId == "event-01").Score);
+    Assert.Equal(9, persisted.BonusPointsOverride);
+    Assert.Equal(49, persisted.TotalPoints);
+    Assert.Equal(49, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == recorded.Id).TotalPoints);
+    Assert.Equal(49, h.Service.GetOperatorSnapshot().Leaderboard.Single().Points);
+
+    var withoutBonus = h.Service.EditHistoricalRun(recorded.Id, new EditRunRequest
+    {
+        ExpectedRevision = historical.Revision,
+        Reason = "Clear the general bonus",
+        ClearBonusPointsOverride = true
+    });
+    Assert.Equal(null, withoutBonus.BonusPointsOverride);
+    Assert.Equal(40, withoutBonus.TotalPoints);
+    Assert.Equal(null, h.Store.Load().Runs.Single(r => r.Id == recorded.Id).BonusPointsOverride);
+}
+
+static void RecordPromotesNextCompetitor()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    var nextCompetitor = h.AddCompetitor("Next competitor");
+    h.Service.AddToQueue(nextCompetitor.Id, RunCategory.Playoff);
+
+    var firstQueueItem = h.Service.GetOperatorSnapshot().Queue.First();
+    var firstRun = h.Service.Arm(firstQueueItem.Id);
+    h.Service.StartMaster();
+    h.Service.Finish();
+
+    using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={h.Store.DatabasePath}"))
+    {
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TRIGGER fail_selected_competitor_insert BEFORE INSERT ON meta
+            WHEN NEW.key = 'selected_competitor_id'
+            BEGIN SELECT RAISE(ABORT, 'injected selection-write failure'); END;
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    Assert.Throws<Microsoft.Data.Sqlite.SqliteException>(() => h.Service.Record());
+    var afterRollback = h.Service.GetOperatorSnapshot();
+    Assert.Equal(RunStatus.Finished, afterRollback.CurrentRun!.Status);
+    Assert.Equal(1, afterRollback.Queue.Count);
+    Assert.Equal("", afterRollback.SelectedCompetitorId);
+    Assert.Equal(1, h.Store.Load().Queue.Count);
+
+    using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={h.Store.DatabasePath}"))
+    {
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DROP TRIGGER fail_selected_competitor_insert";
+        command.ExecuteNonQuery();
+    }
+
+    var recorded = h.Service.Record();
+    var selected = h.Service.GetOperatorSnapshot();
+    Assert.Equal(RunStatus.Completed, recorded.Status);
+    Assert.Equal(nextCompetitor.Id, selected.SelectedCompetitorId);
+    Assert.Equal(RunCategory.Playoff, selected.SelectedRunCategory);
+    Assert.Equal(0, selected.Queue.Count);
+    Assert.True(!h.Service.IsCurrentRun(firstRun.Id), "Promotion must select the next competitor without starting their run.");
+
+    var persisted = h.Store.Load();
+    Assert.Equal(nextCompetitor.Id, persisted.SelectedCompetitorId);
+    Assert.Equal(RunCategory.Playoff, persisted.SelectedRunCategory);
+    Assert.Equal(0, persisted.Queue.Count);
+
+    h.Store.Dispose();
+    using var reopenedStore = new RunStore(h.Path);
+    var reopenedService = new RunService(reopenedStore, MakeMvpEdition(), new TestClock());
+    selected = reopenedService.GetOperatorSnapshot();
+    Assert.Equal(nextCompetitor.Id, selected.SelectedCompetitorId);
+    Assert.Equal(RunCategory.Playoff, selected.SelectedRunCategory);
+    Assert.True(!reopenedService.IsCurrentRun(firstRun.Id), "Reloading the selected competitor must not start a run.");
+
+    var nextRun = reopenedService.ArmCompetitor(nextCompetitor.Id, RunCategory.Playoff);
+    reopenedService.StartMaster();
+    reopenedService.Finish();
+    reopenedService.Record();
+    selected = reopenedService.GetOperatorSnapshot();
+    Assert.Equal("", selected.SelectedCompetitorId);
+    Assert.Equal(null, selected.SelectedRunCategory);
+    persisted = reopenedStore.Load();
+    Assert.Equal(null, persisted.SelectedCompetitorId);
+    Assert.Equal(null, persisted.SelectedRunCategory);
+    Assert.Equal(0, persisted.Queue.Count);
+    Assert.True(!reopenedService.IsCurrentRun(nextRun.Id), "An empty queue should leave no selected competitor or start a run.");
 }
 
 static void FinishIsIdempotent()
@@ -355,6 +516,24 @@ static void ManualOverride()
     Assert.Equal(77, edited.Events.Single(e => e.EventId == "event-01").Score);
 }
 
+static void QueueReorderPersists()
+{
+    using var h = NewHarness();
+    var secondCompetitor = h.AddCompetitor("Second competitor");
+    var thirdCompetitor = h.AddCompetitor("Third competitor");
+    h.Service.AddToQueue(secondCompetitor.Id, RunCategory.Playoff);
+    h.Service.AddToQueue(thirdCompetitor.Id, RunCategory.Exhibition);
+
+    var original = h.Service.GetOperatorSnapshot().Queue.OrderBy(item => item.Position).ToArray();
+    var requestedOrder = new[] { original[2].Id, original[0].Id, original[1].Id };
+    h.Service.ReorderQueue(requestedOrder);
+
+    var liveOrder = h.Service.GetOperatorSnapshot().Queue.OrderBy(item => item.Position).Select(item => item.Id);
+    Assert.True(liveOrder.SequenceEqual(requestedOrder), "The operator snapshot should reflect the requested queue order.");
+    var savedOrder = h.Store.Load().Queue.OrderBy(item => item.Position).Select(item => item.Id);
+    Assert.True(savedOrder.SequenceEqual(requestedOrder), "The requested queue order should survive persistence.");
+}
+
 static void BonusSignal()
 {
     using var h = NewHarness();
@@ -406,7 +585,11 @@ static void CategoryAndTieRank()
     h.Service.StartMaster();
     h.Service.Finish();
     h.Service.Record();
-    h.Service.Arm(officialTwo.Id);
+    var promoted = h.Service.GetOperatorSnapshot();
+    Assert.Equal(second.Id, promoted.SelectedCompetitorId);
+    Assert.Equal(0, promoted.Queue.Count);
+    Assert.DoesNotContain(promoted.Queue, item => item.Id == officialTwo.Id);
+    h.Service.ArmCompetitor(second.Id, RunCategory.Official);
     h.Service.StartMaster();
     h.Service.Finish();
     h.Service.Record();
@@ -440,6 +623,125 @@ static void RecoveryAndLock()
     Assert.Contains(recovered.GetOperatorSnapshot().Messages, message => message.Type == "recovery-paused");
     recoveredStore.Dispose();
     Cleanup(path);
+}
+
+static void ClearDatabaseSafety()
+{
+    var path = NewPath();
+    var edition = MakeMvpEdition();
+    var clock = new TestClock();
+    var store = new RunStore(path);
+    try
+    {
+        var service = new RunService(store, edition, clock);
+        var competitor = service.AddCompetitor("Backup competitor");
+        var queuedCompetitor = service.AddCompetitor("Queued competitor");
+        service.AddToQueue(competitor.Id, RunCategory.Official);
+        service.AddToQueue(queuedCompetitor.Id, RunCategory.Playoff);
+        var run = service.ArmCompetitor(competitor.Id, RunCategory.Official);
+        service.StartMaster();
+        service.PressEvent(run.Id, "event-01");
+        var liveRun = service.GetOperatorSnapshot().CurrentRun!;
+        service.EditCurrentRun(new EditRunRequest
+        {
+            ExpectedRevision = liveRun.Revision,
+            Reason = "Seed an edit for the clear test",
+            Notes = "Pre-clear note"
+        });
+        service.SetDeviceAvailability("station-01", DeviceAvailability.Offline, "Seed offline device state");
+
+        var beforeClear = store.Load();
+        store.SaveRunsAndQueue(beforeClear.Runs, beforeClear.Queue, competitor.Id, RunCategory.Official);
+
+        Assert.Throws<CommandException>(() => service.ClearAllData("clear all data"));
+        Assert.True(!Directory.Exists(Path.Combine(path, "backups")), "Rejected confirmation must not create a backup or clear data.");
+        Assert.Equal(2, store.Load().Competitors.Count);
+
+        var backupPath = service.ClearAllData(RunService.DatabaseClearConfirmationPhrase);
+        Assert.True(File.Exists(backupPath), "Clear must return an existing backup path.");
+        Assert.True(backupPath.StartsWith(Path.Combine(path, "backups") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase),
+            "The backup must remain under the isolated test database's backup directory.");
+
+        using (var backup = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = backupPath,
+            Mode = SqliteOpenMode.ReadOnly
+        }.ToString()))
+        {
+            backup.Open();
+            Assert.Equal(2L, CountRows(backup, "competitors"));
+            Assert.Equal(2L, CountRows(backup, "queue_items"));
+            Assert.Equal(1L, CountRows(backup, "runs"));
+            Assert.Equal(edition.Events.Count, (int)CountRows(backup, "run_events"));
+            Assert.True(CountRows(backup, "messages") >= 2, "The backup should retain device/master messages.");
+            Assert.Equal(1L, CountRows(backup, "edits"));
+            Assert.Equal(edition.Events.Count, (int)CountRows(backup, "devices"));
+            using var selection = backup.CreateCommand();
+            selection.CommandText = "SELECT value FROM meta WHERE key = 'selected_competitor_id'";
+            Assert.Equal(competitor.Id, selection.ExecuteScalar() as string);
+        }
+
+        var cleared = service.GetOperatorSnapshot();
+        Assert.Equal(0, cleared.Competitors.Count);
+        Assert.Equal(0, cleared.Queue.Count);
+        Assert.Equal(0, cleared.History.Count);
+        Assert.Equal(0, cleared.Messages.Count);
+        Assert.Equal(0, cleared.Edits.Count);
+        Assert.Equal("", cleared.SelectedCompetitorId);
+        Assert.Equal(null, cleared.SelectedRunCategory);
+        Assert.Equal(null, cleared.CurrentRun);
+        Assert.Equal(edition.Events.Count, cleared.Devices.Count);
+        Assert.True(cleared.Devices.All(device =>
+            device.Availability == DeviceAvailability.Online && device.LastSeenAt is null &&
+            device.Led == LedState.Ready && device.LastError is null), "Configured devices should be restored to ready defaults.");
+
+        var afterClear = store.Load();
+        Assert.Equal(null, afterClear.SelectedCompetitorId);
+        Assert.Equal(null, afterClear.SelectedRunCategory);
+        Assert.Equal(0, afterClear.Runs.Count);
+        Assert.True(File.Exists(backupPath), "The automatically created backup must remain available after clearing.");
+
+        var newCompetitor = service.AddCompetitor("After clear");
+        var newQueueItem = service.AddToQueue(newCompetitor.Id, RunCategory.Official);
+        var newRun = service.Arm(newQueueItem.Id);
+        Assert.Equal(RunStatus.Armed, newRun.Status);
+        Assert.Equal(RunStatus.Active, service.StartMaster().Status);
+    }
+    finally
+    {
+        // Keep this isolated test database and its generated backup; backup files are never removed by this test.
+        store.Dispose();
+    }
+
+    static long CountRows(SqliteConnection connection, string table)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM {table}";
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+}
+
+static void ClearDatabaseBackupFailurePreservesData()
+{
+    var path = NewPath();
+    var store = new RunStore(path);
+    try
+    {
+        var service = new RunService(store, MakeMvpEdition(), new TestClock());
+        service.AddCompetitor("Must survive failed backup");
+        File.WriteAllText(Path.Combine(path, "backups"), "Isolated test fixture blocking backup folder creation.");
+
+        Assert.Throws<IOException>(() => service.ClearAllData(RunService.DatabaseClearConfirmationPhrase));
+        var afterFailure = service.GetOperatorSnapshot();
+        Assert.Equal(1, afterFailure.Competitors.Count);
+        Assert.Equal("Must survive failed backup", afterFailure.Competitors[0].Name);
+        Assert.Equal(0, afterFailure.History.Count);
+    }
+    finally
+    {
+        // Keep the isolated test fixture in place; it is not a database backup and no backup file is removed.
+        store.Dispose();
+    }
 }
 
 static void EditsAndIsolation()
@@ -491,7 +793,7 @@ static void EditsAndIsolation()
     Assert.Equal(liveAfterEdit.Id, h.Service.GetOperatorSnapshot().CurrentRun!.Id);
     var edit = h.Service.GetOperatorSnapshot().Edits.Single(e => e.RunId == historical.Id);
     var undone = h.Service.UndoHistoricalEdit(historical.Id, edit.Id, corrected.Revision, "Undo score correction");
-    Assert.Equal(100, undone.Events.Single(e => e.EventId == "event-01").Score);
+    Assert.Equal(50, undone.Events.Single(e => e.EventId == "event-01").Score);
     Assert.True(undone.Revision > corrected.Revision);
 
     var historyAgain = h.Service.GetOperatorSnapshot().History.Single(r => r.Id == historical.Id);
@@ -555,7 +857,7 @@ static EditionDefinition MakeMvpEdition(int durationSeconds = 300) => new()
     EditionId = "mvp-test-edition",
     Name = "MVP test edition",
     DurationLimitSeconds = durationSeconds,
-    Scoring = new ScoringRule { ManualEventPoints = true },
+    Scoring = new ScoringRule(),
     Events =
     [
         new EventDefinition { EventId = "event-01", Name = "Perfect Pour", DeviceId = "station-01", Type = EventKind.Standard },

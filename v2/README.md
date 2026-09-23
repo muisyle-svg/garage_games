@@ -31,9 +31,26 @@ to open the separate spectator view at `/scoreboard` (the alias is also directly
 usable). The default data path is
 `%LOCALAPPDATA%\GarageGamesV2`; pass `--data-path` to isolate a test or event
 store. The app enforces loopback-only URLs; a `--urls` value such as `0.0.0.0`
-is rejected rather than exposed. Double-click `v2\Start Garage Games V2.cmd`
-for the easiest launch. It uses the repository-local toolchain and a distinct
-`GarageGamesV2` data directory. If a published executable exists at
+is rejected rather than exposed. For normal Windows use, double-click
+`v2\Start Garage Games V2.cmd`. It opens the operator view in your browser and
+leaves Garage Games in the Windows notification area (system tray). Right-click
+the tray icon for **Open Garage Games** or **Exit**; double-clicking the icon
+also opens the app. Closing the browser only closes that window. Choosing Exit
+asks the server started by this tray session to shut down cleanly so the local
+database can close safely. The tray launcher is single-instance for the
+current Windows user, creates no Windows startup entry, and stores launcher logs under
+`v2\.tools\logs`.
+
+If the launcher finds a healthy server that was already running before this
+tray session, it reuses that server. In that case the tray menu says
+**Exit (leave existing server running)** and will not stop it or any unrelated
+process. If shutdown of a server owned by this tray session cannot be confirmed,
+the launcher will not force-kill it; the tray stays available so Exit can be
+retried. If a startup problem appears, check the `.out.log` and `.err.log` files
+under `v2\.tools\logs`.
+
+The launcher uses the repository-local toolchain and a distinct `GarageGamesV2`
+data directory. If a published executable exists at
 `v2\publish\win-x64\GarageGames.V2.exe`, the launcher uses it directly.
 Because the launcher deliberately redirects its local .NET environment, its
 data path is `v2\.tools\localappdata\GarageGamesV2` in this repository. A

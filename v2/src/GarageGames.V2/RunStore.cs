@@ -13,6 +13,8 @@ public sealed class StoreSnapshot
     public List<RunRecord> Runs { get; } = [];
     public List<MessageRecord> Messages { get; } = [];
     public List<EditRecord> Edits { get; } = [];
+    public string? SelectedCompetitorId { get; set; }
+    public RunCategory? SelectedRunCategory { get; set; }
 }
 
 public sealed class RunStore : IDisposable
@@ -89,6 +91,24 @@ public sealed class RunStore : IDisposable
         ThrowIfDisposed();
         var snapshot = new StoreSnapshot();
         using var connection = OpenConnection();
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT key, value FROM meta WHERE key IN ('selected_competitor_id', 'selected_run_category')";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var value = reader.GetString(1);
+                if (reader.GetString(0) == "selected_competitor_id")
+                {
+                    snapshot.SelectedCompetitorId = string.IsNullOrEmpty(value) ? null : value;
+                }
+                else if (!string.IsNullOrEmpty(value))
+                {
+                    snapshot.SelectedRunCategory = ParseEnum<RunCategory>(value, "selected run category");
+                }
+            }
+        }
 
         using (var command = connection.CreateCommand())
         {
@@ -330,7 +350,8 @@ public sealed class RunStore : IDisposable
 
     public void SaveRunAndMessage(RunRecord run, MessageRecord message) => SaveRuns([run], message);
 
-    public void SaveRunsAndQueue(IEnumerable<RunRecord> runs, IReadOnlyCollection<QueueItemRecord> queue)
+    public void SaveRunsAndQueue(IEnumerable<RunRecord> runs, IReadOnlyCollection<QueueItemRecord> queue,
+        string? selectedCompetitorId, RunCategory? selectedRunCategory)
     {
         ExecuteTransaction((connection, transaction) =>
         {
@@ -357,7 +378,20 @@ public sealed class RunStore : IDisposable
                 command.Parameters.AddWithValue("$position", item.Position);
                 command.ExecuteNonQuery();
             }
+
+            SetMetaValue(connection, transaction, "selected_competitor_id", selectedCompetitorId ?? "");
+            SetMetaValue(connection, transaction, "selected_run_category", selectedRunCategory?.ToString() ?? "");
         });
+    }
+
+    private static void SetMetaValue(SqliteConnection connection, SqliteTransaction transaction, string key, string value)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "INSERT INTO meta(key, value) VALUES($key, $value) ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+        command.Parameters.AddWithValue("$key", key);
+        command.Parameters.AddWithValue("$value", value);
+        command.ExecuteNonQuery();
     }
 
     public bool HasMessage(string runId, string messageId)
@@ -409,6 +443,48 @@ public sealed class RunStore : IDisposable
         command.Parameters.AddWithValue("$path", path);
         command.ExecuteNonQuery();
         return path;
+    }
+
+    internal void ClearPersistedData(EditionDefinition edition)
+    {
+        ThrowIfDisposed();
+        EditionDefinition.Validate(edition);
+        ExecuteTransaction((connection, transaction) =>
+        {
+            foreach (var table in new[] { "edits", "messages", "queue_items", "run_events", "runs", "competitors", "devices" })
+            {
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = $"DELETE FROM {table}";
+                command.ExecuteNonQuery();
+            }
+
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = "DELETE FROM meta WHERE key <> 'schema_version'";
+                command.ExecuteNonQuery();
+            }
+
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = "DELETE FROM sqlite_sequence WHERE name IN ('messages', 'edits')";
+                command.ExecuteNonQuery();
+            }
+
+            foreach (var eventDefinition in edition.Events)
+            {
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = "INSERT INTO devices(device_id, event_id, availability, last_seen_at, led, last_error) VALUES($device_id, $event_id, $availability, NULL, $led, NULL)";
+                command.Parameters.AddWithValue("$device_id", eventDefinition.DeviceId);
+                command.Parameters.AddWithValue("$event_id", eventDefinition.EventId);
+                command.Parameters.AddWithValue("$availability", DeviceAvailability.Online.ToString());
+                command.Parameters.AddWithValue("$led", LedState.Ready.ToString());
+                command.ExecuteNonQuery();
+            }
+        });
     }
 
     public void ExecuteTransaction(Action<SqliteConnection, SqliteTransaction> action)

@@ -3,11 +3,11 @@
   "name": "Garage Games 2026",
   "durationLimitSeconds": 300,
   "scoring": {
-    "manualEventPoints": true,
-    "basePoints": 100,
+    "manualEventPoints": false,
+    "basePoints": 50,
     "decayPoints": 5,
     "decayEverySeconds": 5,
-    "minimumPoints": 50
+    "minimumPoints": 25
   },
   "events": [
     { "eventId": "event-01", "name": "Perfect Pour", "deviceId": "station-01", "type": "standard" },

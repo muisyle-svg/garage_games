@@ -52,6 +52,8 @@ public sealed class EventEditRequest
 
 public sealed class RunService
 {
+    public const string DatabaseClearConfirmationPhrase = "CLEAR ALL DATA";
+
     private readonly object _gate = new();
     private readonly RunStore _store;
     private readonly EditionDefinition _edition;
@@ -97,6 +99,43 @@ public sealed class RunService
 
     public string EditionId => _edition.EditionId;
 
+    public string ClearAllData(string confirmationPhrase)
+    {
+        lock (_gate)
+        {
+            if (!string.Equals(confirmationPhrase, DatabaseClearConfirmationPhrase, StringComparison.Ordinal))
+            {
+                throw new CommandException($"Type {DatabaseClearConfirmationPhrase} exactly to clear the database.");
+            }
+
+            RefreshActiveClock();
+            var backupPath = _store.CreateBackup();
+            _store.ClearPersistedData(_edition);
+
+            _data.Competitors.Clear();
+            _data.Queue.Clear();
+            _data.Devices.Clear();
+            _data.Devices.AddRange(_edition.Events.Select(eventDefinition => new DeviceRecord
+            {
+                DeviceId = eventDefinition.DeviceId,
+                EventId = eventDefinition.EventId,
+                Availability = DeviceAvailability.Online,
+                Led = LedState.Ready
+            }));
+            _data.Runs.Clear();
+            _data.Messages.Clear();
+            _data.Edits.Clear();
+            _data.SelectedCompetitorId = null;
+            _data.SelectedRunCategory = null;
+            _current = null;
+            _lastDisplayedRun = null;
+            _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+            UpdateDeviceLeds();
+
+            return backupPath;
+        }
+    }
+
     public void Checkpoint()
     {
         lock (_gate)
@@ -124,6 +163,8 @@ public sealed class RunService
                 EditionName = _edition.Name,
                 DurationLimitSeconds = _edition.DurationLimitSeconds,
                 SimulationMode = simulationMode,
+                SelectedCompetitorId = _data.SelectedCompetitorId ?? "",
+                SelectedRunCategory = _data.SelectedRunCategory,
                 CurrentRun = _current is null ? (_lastDisplayedRun is null ? null : Clone(_lastDisplayedRun)) : Clone(_current),
                 Events = _edition.ToSnapshot().Events,
                 Competitors = _data.Competitors.Select(Clone).ToList(),
@@ -262,7 +303,7 @@ public sealed class RunService
             }, manualOfflineOverride: false);
             try
             {
-                _store.SaveRuns([run]);
+                _store.SaveRunsAndQueue([run], _data.Queue, selectedCompetitorId: null, selectedRunCategory: null);
             }
             catch
             {
@@ -270,6 +311,8 @@ public sealed class RunService
                 throw;
             }
             _data.Runs.Add(run);
+            _data.SelectedCompetitorId = null;
+            _data.SelectedRunCategory = null;
             _current = run;
             _lastDisplayedRun = run;
             UpdateDeviceLeds();
@@ -436,7 +479,7 @@ public sealed class RunService
             var runs = replacementSource is null ? new[] { run } : new[] { replacementSource, run };
             try
             {
-                _store.SaveRunsAndQueue(runs, _data.Queue);
+                _store.SaveRunsAndQueue(runs, _data.Queue, selectedCompetitorId: null, selectedRunCategory: null);
             }
             catch
             {
@@ -444,6 +487,8 @@ public sealed class RunService
                 throw;
             }
             _data.Runs.Add(run);
+            _data.SelectedCompetitorId = null;
+            _data.SelectedRunCategory = null;
             _current = run;
             _lastDisplayedRun = run;
             UpdateDeviceLeds();
@@ -584,7 +629,7 @@ public sealed class RunService
             {
                 if (_lastDisplayedRun is { Status: RunStatus.TimedOut } timedOut)
                 {
-                    return RecordHistoricalRun(timedOut.Id);
+                    return RecordRunAndPromoteQueue(timedOut, complete: false);
                 }
                 if (_lastDisplayedRun is { Status: RunStatus.Completed } completed)
                 {
@@ -603,23 +648,7 @@ public sealed class RunService
                 throw new CommandException("Finish the run before recording it.");
             }
 
-            run.Status = RunStatus.Completed;
-            run.RecordedAt = _clock.UtcNow;
-            run.FinishedAt ??= _clock.UtcNow;
-            run.Revision++;
-            try
-            {
-                _store.SaveRuns([run]);
-            }
-            catch
-            {
-                ReloadInMemoryAfterPersistenceFailure();
-                throw;
-            }
-            _lastDisplayedRun = Clone(run);
-            _current = null;
-            UpdateDeviceLeds();
-            return Clone(run);
+            return RecordRunAndPromoteQueue(run, complete: true);
         }
     }
 
@@ -638,32 +667,63 @@ public sealed class RunService
             {
                 return Clone(run);
             }
+            if (_lastDisplayedRun?.Id == run.Id && run.Status == RunStatus.TimedOut)
+            {
+                return RecordRunAndPromoteQueue(run, complete: false);
+            }
             if (run.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused or RunStatus.Finished)
             {
                 throw new CommandException("Record the current run from the scorekeeping tab.");
             }
 
-            run.RecordedAt = _clock.UtcNow;
-            if (run.Status == RunStatus.Finished)
-            {
-                run.Status = RunStatus.Completed;
-            }
-            run.Revision++;
-            try
-            {
-                _store.SaveRuns([run]);
-            }
-            catch
-            {
-                ReloadInMemoryAfterPersistenceFailure();
-                throw;
-            }
-            if (_lastDisplayedRun?.Id == run.Id)
-            {
-                _lastDisplayedRun = Clone(run);
-            }
+            return RecordRunAndPromoteQueue(run, complete: false);
+        }
+    }
+
+    private RunRecord RecordRunAndPromoteQueue(RunRecord run, bool complete)
+    {
+        if (run.IsRecorded)
+        {
             return Clone(run);
         }
+
+        if (complete)
+        {
+            run.Status = RunStatus.Completed;
+        }
+        run.RecordedAt = _clock.UtcNow;
+        run.FinishedAt ??= _clock.UtcNow;
+        run.Revision++;
+
+        var promoted = _data.Queue.OrderBy(item => item.Position).FirstOrDefault();
+        if (promoted is not null)
+        {
+            _data.Queue.Remove(promoted);
+            NormalizeQueue();
+        }
+
+        try
+        {
+            _store.SaveRunsAndQueue([run], _data.Queue, promoted?.CompetitorId, promoted?.Category);
+        }
+        catch
+        {
+            ReloadInMemoryAfterPersistenceFailure();
+            throw;
+        }
+
+        _data.SelectedCompetitorId = promoted?.CompetitorId;
+        _data.SelectedRunCategory = promoted?.Category;
+        if (_lastDisplayedRun?.Id == run.Id || _lastDisplayedRun is null)
+        {
+            _lastDisplayedRun = Clone(run);
+        }
+        if (_current?.Id == run.Id)
+        {
+            _current = null;
+        }
+        UpdateDeviceLeds();
+        return Clone(run);
     }
 
     public RunRecord Abort(string? reason = null)
@@ -1566,6 +1626,8 @@ public sealed class RunService
         _data.Messages.AddRange(fresh.Messages);
         _data.Edits.Clear();
         _data.Edits.AddRange(fresh.Edits);
+        _data.SelectedCompetitorId = fresh.SelectedCompetitorId;
+        _data.SelectedRunCategory = fresh.SelectedRunCategory;
         _current = _data.Runs.SingleOrDefault(r => r.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused or RunStatus.Finished);
         _lastDisplayedRun = _current ?? _data.Runs.OrderByDescending(r => r.CreatedAt).FirstOrDefault();
         _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
