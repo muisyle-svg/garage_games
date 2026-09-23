@@ -35,6 +35,16 @@ and [USB serial default](https://wiki.seeedstudio.com/XIAO_ESP32C3_Pin_Multiplex
   the local five-tap reset should still work. A five-second hold should enter
   the existing Speed discovery/game; verify button presses do not carry into
   another game.
+- For a spoke preflight scan, send a fresh idle status such as
+  `GG1 STATUS NONE 0`, then `GG1 SCAN preflight_1`. Scan IDs are 1–32 ASCII
+  letters, digits, hyphens, or underscores. Over about two seconds, each unique
+  responding MAC produces `GG1 SCAN preflight_1 NODE <12-hex-MAC>`, followed by
+  `GG1 SCAN preflight_1 DONE <count>`. A non-idle Speed state, host status of
+  COUNTDOWN, ACTIVE, or PAUSED, missing or stale host status, or unavailable
+  radio returns `GG1 SCAN preflight_1 BUSY` and stops discovery. The scan reuses
+  the compatible version-3 `DISCOVER`/`HELLO` exchange and keeps its responders
+  out of the Speed game's discovery registry. Its separate table holds 64 MACs;
+  overflow ends with BUSY rather than reporting a partial count as complete.
 - Pair with the existing Speed spokes and confirm discovery/game operation on
   ESP-NOW channel 1.
 

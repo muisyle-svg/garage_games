@@ -99,6 +99,33 @@ event times using the edition's scoring rules unless manually overridden;
 clearing a points override restores automatic scoring. Run bonus scoring is
 also editable.
 
+## Setup and device readiness
+
+Use the operator **Setup** tab to change the active edition name and event
+roster, including event names, types, and device assignments. The setup API is
+`GET /api/setup` and `PUT /api/setup` with
+`{ "editionId", "name", "events": [{ "eventId", "name", "deviceId", "type" }] }`.
+The active setup is stored transactionally in SQLite metadata; a database
+backup is created before a changed setup is saved. Setup is locked while a run
+is in progress or waiting to be recorded. Each run keeps its own edition
+snapshot, so editing setup never rewrites historical results. If a roster
+changes while recorded runs exist in the current edition, the saved setup gets
+a new edition ID and the leaderboard starts a separate edition; earlier scores
+remain in history and are not deleted.
+
+Use **Scan devices** or arm a run while the physical master is connected. The
+server sends `GG1 STATUS` immediately before `GG1 SCAN <id>`; the master
+reports discovered 12-hex device IDs. `POST /api/master/scan` returns
+`connected`, `completed`, `detectedDeviceIds`, and per-event statuses
+`Responding`, `NotResponding`, or `NotScanned`. A scan only confirms devices
+that reported during that scan; it does not verify event wiring or gameplay
+inputs. Placeholder assignments such as `station-01`, a disconnected master,
+an incomplete/BUSY scan, or a process restart are **Unverified**, not Online.
+Missing or unverified spokes do not prevent arming: use the operator's virtual
+event controls as a fallback. Physical station packets from unverified or
+missing devices remain rejected. Disconnecting the master invalidates its last
+scan readiness.
+
 ## Physical master smoke test
 
 Physical hardware support is implemented but not yet physically verified: the
@@ -127,9 +154,8 @@ operation.
    start Speed discovery. Discovery currently requires at least three
    compatible spokes on ESP-NOW channel 1.
 
-The current integration uses the master for Garage Start and run-status
-display; physical spokes still run the existing Speed protocol and do not yet
-report Garage event inputs.
+The current integration uses the master for Garage Start, run-status display,
+and spoke discovery. Physical spokes do not yet report Garage event inputs.
 
 ## Storage and recovery
 
@@ -171,10 +197,10 @@ For a self-contained Windows build, run:
 
 The launcher will then use `v2/publish/win-x64/GarageGames.V2.exe`. The
 `--hardware-mode` flag disables simulated device availability and simulator
-clock/input routes and the virtual event-press route, while retaining the
-physical USB serial master transport and operator controls, including virtual
-Start. The default launch keeps virtual event presses enabled alongside master
-connection, so use it for the first master-plus-virtual-events test.
+clock/input routes, while retaining the physical USB serial master transport
+and operator controls, including virtual Start and virtual event presses. The
+trusted operator virtual-event endpoint remains available in hardware mode and
+can score events even when their physical devices are unverified or offline.
 
 ## Future spoke architecture
 

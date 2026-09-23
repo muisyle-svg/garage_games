@@ -56,7 +56,7 @@ public sealed class RunService
 
     private readonly object _gate = new();
     private readonly RunStore _store;
-    private readonly EditionDefinition _edition;
+    private EditionDefinition _edition;
     private readonly IMonotonicClock _clock;
     private readonly StoreSnapshot _data;
     private RunRecord? _current;
@@ -67,9 +67,9 @@ public sealed class RunService
     {
         EditionDefinition.Validate(edition);
         _store = store;
-        _edition = edition;
         _clock = clock;
-        _store.EnsureDevices(edition);
+        _edition = _store.LoadOrInitializeActiveEdition(edition);
+        _store.EnsureDevices(_edition);
         _data = _store.Load();
 
         var unfinished = _data.Runs.Where(r => r.Status is RunStatus.Armed or RunStatus.Countdown or RunStatus.Active or RunStatus.Paused or RunStatus.Finished).ToList();
@@ -99,6 +99,120 @@ public sealed class RunService
 
     public string EditionId => _edition.EditionId;
 
+    public EditionSetup GetSetup()
+    {
+        lock (_gate)
+        {
+            return ToSetup(_edition);
+        }
+    }
+
+    public EditionSetup UpdateSetup(EditionSetup request)
+    {
+        lock (_gate)
+        {
+            if (_current is { Status: RunStatus.Armed or RunStatus.Countdown or RunStatus.Active or RunStatus.Paused or RunStatus.Finished })
+            {
+                throw new CommandException("Edition setup cannot be changed while a run is in progress or awaiting recording.");
+            }
+
+            var candidate = new EditionDefinition
+            {
+                EditionId = request.EditionId?.Trim() ?? "",
+                Name = request.Name?.Trim() ?? "",
+                DurationLimitSeconds = _edition.DurationLimitSeconds,
+                Scoring = _edition.Scoring.Clone(),
+                Events = (request.Events ?? []).Select(CloneEventDefinition).ToList()
+            };
+            foreach (var eventDefinition in candidate.Events)
+            {
+                eventDefinition.EventId = eventDefinition.EventId.Trim();
+                eventDefinition.Name = eventDefinition.Name.Trim();
+                eventDefinition.DeviceId = NormalizeDeviceId(eventDefinition.DeviceId.Trim());
+            }
+
+            try
+            {
+                EditionDefinition.Validate(candidate, "setup request");
+            }
+            catch (InvalidDataException exception)
+            {
+                throw new CommandException(exception.Message);
+            }
+
+            var rosterChanged = !SameRoster(_edition.Events, candidate.Events);
+            if (rosterChanged && string.Equals(candidate.EditionId, _edition.EditionId, StringComparison.Ordinal) &&
+                _data.Runs.Any(run => run.EditionId == _edition.EditionId && run.IsRecorded))
+            {
+                candidate.EditionId = NewId("edition");
+            }
+
+            if (string.Equals(Serialize(candidate), Serialize(_edition), StringComparison.Ordinal))
+            {
+                return ToSetup(_edition);
+            }
+
+            // Keep a pre-change copy so a failed backup never leaves settings partially changed.
+            _store.CreateBackup();
+            _store.SaveActiveEdition(candidate);
+            _edition = candidate;
+            var fresh = _store.Load();
+            _data.Devices.Clear();
+            _data.Devices.AddRange(fresh.Devices);
+            UpdateDeviceLeds();
+            return ToSetup(_edition);
+        }
+    }
+
+    public DeviceScanResult RecordDeviceScan(bool connected, bool completed, IEnumerable<string> detectedDeviceIds)
+    {
+        lock (_gate)
+        {
+            var detected = detectedDeviceIds
+                .Where(MasterProtocolCodec.IsValidDeviceId)
+                .Select(NormalizeDeviceId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var now = _clock.UtcNow;
+            var deviceRows = new List<DeviceRecord>(_edition.Events.Count);
+            var scanEntries = new List<DeviceScanEntry>(_edition.Events.Count);
+
+            foreach (var eventDefinition in _edition.Events)
+            {
+                var device = _data.Devices.Single(row => string.Equals(row.DeviceId, eventDefinition.DeviceId, StringComparison.OrdinalIgnoreCase));
+                var hasPhysicalId = MasterProtocolCodec.IsValidDeviceId(eventDefinition.DeviceId);
+                var responding = connected && completed && hasPhysicalId && detected.Contains(NormalizeDeviceId(eventDefinition.DeviceId));
+                var missing = connected && completed && hasPhysicalId && !responding;
+                device.Availability = responding
+                    ? DeviceAvailability.Online
+                    : missing ? DeviceAvailability.Offline : DeviceAvailability.Unverified;
+                device.LastSeenAt = responding ? now : null;
+                device.LastError = missing ? "No response in the most recent completed device scan." : null;
+                deviceRows.Add(Clone(device));
+
+                var status = !connected || !completed || !hasPhysicalId
+                    ? "NotScanned"
+                    : responding ? "Responding" : "NotResponding";
+                scanEntries.Add(new DeviceScanEntry(eventDefinition.EventId, eventDefinition.Name, eventDefinition.DeviceId, status));
+            }
+
+            try
+            {
+                _store.SaveDevices(deviceRows);
+            }
+            catch
+            {
+                ReloadInMemoryAfterPersistenceFailure();
+                throw;
+            }
+
+            UpdateDeviceLeds();
+            return new DeviceScanResult(connected, connected && completed,
+                connected && completed ? detected.Order(StringComparer.Ordinal).ToList() : [], scanEntries);
+        }
+    }
+
+    public void MarkDevicesUnverified() => RecordDeviceScan(false, false, []);
+
     public string ClearAllData(string confirmationPhrase)
     {
         lock (_gate)
@@ -119,7 +233,7 @@ public sealed class RunService
             {
                 DeviceId = eventDefinition.DeviceId,
                 EventId = eventDefinition.EventId,
-                Availability = DeviceAvailability.Online,
+                Availability = DeviceAvailability.Unverified,
                 Led = LedState.Ready
             }));
             _data.Runs.Clear();
@@ -207,7 +321,11 @@ public sealed class RunService
                 Events = _edition.ToSnapshot().Events,
                 Competitors = _data.Competitors.Select(Clone).ToList(),
                 Queue = _data.Queue.OrderBy(q => q.Position).Select(Clone).ToList(),
-                Devices = _data.Devices.Select(Clone).ToList(),
+                Devices = _edition.Events
+                    .Select(eventDefinition => _data.Devices.Single(device =>
+                        string.Equals(device.DeviceId, eventDefinition.DeviceId, StringComparison.OrdinalIgnoreCase)))
+                    .Select(Clone)
+                    .ToList(),
                 History = _data.Runs.OrderByDescending(r => r.CreatedAt).Select(Clone).ToList(),
                 Messages = _data.Messages.OrderByDescending(m => m.Id).Take(250).Select(Clone).ToList(),
                 Edits = _data.Edits.OrderByDescending(e => e.Id).Take(250).Select(Clone).ToList(),
@@ -371,7 +489,7 @@ public sealed class RunService
             var eventResult = run.Events.SingleOrDefault(e => e.EventId == eventId)
                 ?? throw new CommandException("Event was not found in this run.");
             using var payload = JsonDocument.Parse("{}");
-            return Receive(new InputEnvelope
+            return ReceiveCore(new InputEnvelope
             {
                 MessageId = NewId("virtual-press"),
                 SessionId = run.Id,
@@ -380,7 +498,7 @@ public sealed class RunService
                 Type = "event-press",
                 ElapsedMilliseconds = run.ActiveElapsedMs,
                 Payload = payload.RootElement.Clone()
-            });
+            }, trustedVirtual: true);
         }
     }
 
@@ -440,7 +558,7 @@ public sealed class RunService
         {
             return _edition.Events.Select(eventDefinition =>
             {
-                var device = _data.Devices.Single(d => d.DeviceId == eventDefinition.DeviceId);
+                var device = _data.Devices.Single(d => string.Equals(d.DeviceId, eventDefinition.DeviceId, StringComparison.OrdinalIgnoreCase));
                 return new PreflightResult
                 {
                     DeviceId = device.DeviceId,
@@ -449,7 +567,9 @@ public sealed class RunService
                     LastSeenAt = device.LastSeenAt,
                     Passed = device.Availability == DeviceAvailability.Online,
                     ManualOverrideAvailable = device.Availability != DeviceAvailability.Online,
-                    Message = device.Availability == DeviceAvailability.Online ? "Ready" : "Station is unavailable; explicit manual scoring override required."
+                    Message = device.Availability == DeviceAvailability.Online
+                        ? "Responded in the current device scan."
+                        : "Station is not verified as responding; virtual event controls remain available."
                 };
             }).ToList();
         }
@@ -459,7 +579,7 @@ public sealed class RunService
     {
         lock (_gate)
         {
-            var device = _data.Devices.SingleOrDefault(d => d.DeviceId == deviceId)
+            var device = _data.Devices.SingleOrDefault(d => string.Equals(d.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
                 ?? throw new CommandException($"Unknown device '{deviceId}'.");
             device.Availability = availability;
             device.LastError = availability == DeviceAvailability.Online ? null : error ?? "Marked unavailable by operator.";
@@ -489,10 +609,6 @@ public sealed class RunService
             var queueItem = _data.Queue.SingleOrDefault(q => q.Id == queueId)
                 ?? throw new CommandException("Queue item was not found.");
             var preflightFailures = Preflight().Where(p => !p.Passed).ToList();
-            if (preflightFailures.Count > 0 && !manualOfflineOverride)
-            {
-                throw new CommandException("Preflight failed. Explicitly enable manual scoring override to arm with unavailable stations.");
-            }
 
             var existingOfficial = queueItem.Category == RunCategory.Official
                 ? FindAcceptedOfficial(queueItem.CompetitorId, _edition.EditionId)
@@ -945,7 +1061,9 @@ public sealed class RunService
         }
     }
 
-    public InputResult Receive(InputEnvelope envelope)
+    public InputResult Receive(InputEnvelope envelope) => ReceiveCore(envelope, trustedVirtual: false);
+
+    private InputResult ReceiveCore(InputEnvelope envelope, bool trustedVirtual)
     {
         lock (_gate)
         {
@@ -1019,7 +1137,8 @@ public sealed class RunService
                 {
                     return RecordRejected(envelope, MessageDisposition.UnknownStation, "Bonus signal came from an unknown station.", payloadJson);
                 }
-                if (envelope.DeviceId != "master" && _data.Devices.Single(d => d.DeviceId == envelope.DeviceId).Availability != DeviceAvailability.Online)
+                if (!trustedVirtual && envelope.DeviceId != "master" && _data.Devices.Single(d =>
+                    string.Equals(d.DeviceId, envelope.DeviceId, StringComparison.OrdinalIgnoreCase)).Availability != DeviceAvailability.Online)
                 {
                     return RecordRejected(envelope, MessageDisposition.Offline, "Bonus signal station is offline; record bonus results manually.", payloadJson);
                 }
@@ -1030,14 +1149,14 @@ public sealed class RunService
                 return RecordAccepted(envelope, run, "Bonus signal recorded; scoring remains deferred.", payloadJson);
             }
 
-            var device = _data.Devices.SingleOrDefault(d => d.DeviceId == envelope.DeviceId);
-            var eventResult = run.Events.SingleOrDefault(e => e.DeviceId == envelope.DeviceId);
+            var device = _data.Devices.SingleOrDefault(d => string.Equals(d.DeviceId, envelope.DeviceId, StringComparison.OrdinalIgnoreCase));
+            var eventResult = run.Events.SingleOrDefault(e => string.Equals(e.DeviceId, envelope.DeviceId, StringComparison.OrdinalIgnoreCase));
             if (device is null || eventResult is null)
             {
                 return RecordRejected(envelope, MessageDisposition.UnknownStation, "Device is not assigned in this run roster.", payloadJson);
             }
 
-            if (device.Availability != DeviceAvailability.Online)
+            if (!trustedVirtual && device.Availability != DeviceAvailability.Online)
             {
                 return RecordRejected(envelope, MessageDisposition.Offline, "Station is offline; manual mode requires operator edits and does not accept simulated station packets.", payloadJson);
             }
@@ -2026,6 +2145,36 @@ public sealed class RunService
         };
 
     private static string NewId(string prefix) => $"{prefix}-{Guid.NewGuid():N}";
+    private static string NormalizeDeviceId(string deviceId) => MasterProtocolCodec.IsValidDeviceId(deviceId)
+        ? deviceId.ToUpperInvariant()
+        : deviceId;
+
+    private static EventDefinition CloneEventDefinition(EventDefinition eventDefinition) => new()
+    {
+        EventId = eventDefinition.EventId ?? "",
+        Name = eventDefinition.Name ?? "",
+        DeviceId = eventDefinition.DeviceId ?? "",
+        Type = eventDefinition.Type,
+        Prompt = eventDefinition.Prompt,
+        Answer = eventDefinition.Answer
+    };
+
+    private static EditionSetup ToSetup(EditionDefinition edition) => new()
+    {
+        EditionId = edition.EditionId,
+        Name = edition.Name,
+        Events = edition.Events.Select(CloneEventDefinition).ToList()
+    };
+
+    private static bool SameRoster(IReadOnlyList<EventDefinition> left, IReadOnlyList<EventDefinition> right) =>
+        left.Count == right.Count && left.Zip(right).All(pair =>
+            string.Equals(pair.First.EventId, pair.Second.EventId, StringComparison.Ordinal) &&
+            string.Equals(pair.First.Name, pair.Second.Name, StringComparison.Ordinal) &&
+            string.Equals(pair.First.DeviceId, pair.Second.DeviceId, StringComparison.OrdinalIgnoreCase) &&
+            pair.First.Type == pair.Second.Type &&
+            string.Equals(pair.First.Prompt, pair.Second.Prompt, StringComparison.Ordinal) &&
+            string.Equals(pair.First.Answer, pair.Second.Answer, StringComparison.Ordinal));
+
     private static string RequireReason(string reason) => string.IsNullOrWhiteSpace(reason) ? throw new CommandException("A correction reason is required.") : reason.Trim();
     private static string Serialize<T>(T value) => JsonSerializer.Serialize(value, JsonDefaults.Options);
     private static RunRecord DeserializeRun(string value) => JsonSerializer.Deserialize<RunRecord>(value, JsonDefaults.Options)

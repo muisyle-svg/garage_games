@@ -47,7 +47,8 @@ public enum DeviceAvailability
 {
     Online,
     Offline,
-    Error
+    Error,
+    Unverified
 }
 
 public enum LedState
@@ -156,10 +157,11 @@ public sealed class EditionDefinition
             throw new InvalidDataException($"Edition '{source}' contains an invalid duration or scoring rule.");
         }
 
-        if (edition.Events.Count == 0 || edition.Events.GroupBy(e => e.EventId).Any(g => g.Count() > 1) ||
-            edition.Events.GroupBy(e => e.DeviceId).Any(g => g.Count() > 1))
+        if (edition.Events.Count is 0 or > 64 ||
+            edition.Events.GroupBy(e => e.EventId, StringComparer.Ordinal).Any(g => g.Count() > 1) ||
+            edition.Events.GroupBy(e => e.DeviceId, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1))
         {
-            throw new InvalidDataException($"Edition '{source}' must have unique event and device identifiers.");
+            throw new InvalidDataException($"Edition '{source}' must contain between 1 and 64 events with unique event and device identifiers.");
         }
 
         foreach (var eventDefinition in edition.Events)
@@ -174,8 +176,20 @@ public sealed class EditionDefinition
             {
                 throw new InvalidDataException($"Keypad event '{eventDefinition.EventId}' requires an answer.");
             }
+
+            if (!Enum.IsDefined(eventDefinition.Type))
+            {
+                throw new InvalidDataException($"Event '{eventDefinition.EventId}' has an invalid type.");
+            }
         }
     }
+}
+
+public sealed class EditionSetup
+{
+    public required string EditionId { get; set; }
+    public required string Name { get; set; }
+    public List<EventDefinition> Events { get; set; } = [];
 }
 
 public sealed class EditionSnapshot
@@ -226,6 +240,14 @@ public sealed class DeviceRecord
     public LedState Led { get; set; } = LedState.Ready;
     public string? LastError { get; set; }
 }
+
+public sealed record DeviceScanEntry(string EventId, string Name, string DeviceId, string Status);
+
+public sealed record DeviceScanResult(
+    bool Connected,
+    bool Completed,
+    IReadOnlyList<string> DetectedDeviceIds,
+    IReadOnlyList<DeviceScanEntry> Devices);
 
 public sealed class EventRecord
 {

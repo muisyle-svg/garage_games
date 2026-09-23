@@ -26,7 +26,12 @@ var tests = new (string Name, Action Run)[]
     ("finishing and recording are distinct and recording releases the next run", FinishIsIdempotent),
     ("duplicate and per-event stale input", DuplicateAndStale),
     ("keypad and arcade completion rules", SpecialCompletion),
-    ("manual preflight override retains roster and rejects offline packets", ManualOverride),
+    ("manual offline override remains optional and station packets stay guarded", ManualOverride),
+    ("setup persists safely, versions changed rosters, and preserves run snapshots", SetupPersistenceAndRosterIsolation),
+    ("setup is locked during an unrecorded run and validates device mappings", SetupLockAndValidation),
+    ("device scan readiness distinguishes responding, missing, and unassigned stations", DeviceScanReadiness),
+    ("device scan protocol accepts only correlated 12-hex node replies", DeviceScanProtocol),
+    ("trusted virtual presses work with unverified hardware while station packets stay guarded", VirtualPressReadinessFallback),
     ("bonus records signals without automatic points", BonusSignal),
     ("restart lineage and one official result", RestartAndOfficialRule),
     ("category exclusion and shared tie rank", CategoryAndTieRank),
@@ -843,7 +848,6 @@ static void ManualOverride()
 {
     using var h = NewHarness();
     h.Service.SetDeviceAvailability("station-01", DeviceAvailability.Offline);
-    Assert.Throws<CommandException>(() => h.ArmAndStart());
     var item = h.Service.GetOperatorSnapshot().Queue.Single();
     var run = h.Service.Arm(item.Id, manualOfflineOverride: true);
     Assert.True(run.ManualOfflineOverride);
@@ -866,6 +870,116 @@ static void ManualOverride()
         }]
     });
     Assert.Equal(77, edited.Events.Single(e => e.EventId == "event-01").Score);
+}
+
+static void SetupPersistenceAndRosterIsolation()
+{
+    using var h = NewHarness();
+    var run = h.ArmAndStart();
+    h.Service.Finish();
+    var recorded = h.Service.Record();
+    var priorEditionId = recorded.EditionId;
+
+    var setup = h.Service.GetSetup();
+    setup.Events[0].Name = "Renamed physical station";
+    setup.Events[0].DeviceId = "aabbccddeeff";
+    var saved = h.Service.UpdateSetup(setup);
+
+    Assert.True(saved.EditionId != priorEditionId, "Roster changes after recorded runs must start a separate leaderboard edition.");
+    Assert.Equal("AABBCCDDEEFF", saved.Events[0].DeviceId);
+    Assert.Equal("Event 1", h.Service.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Edition.Events[0].Name);
+    Assert.Equal(saved.EditionId, h.Service.GetOperatorSnapshot().EditionId);
+    Assert.Equal(0, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+    Assert.True(h.Service.GetOperatorSnapshot().Devices.All(device => device.Availability == DeviceAvailability.Unverified));
+    Assert.True(Directory.GetFiles(System.IO.Path.Combine(h.Path, "backups"), "*.db").Length >= 1,
+        "Changing setup should create a pre-change database backup.");
+
+    var path = h.Path;
+    h.Store.Dispose();
+    using var reopenedStore = new RunStore(path);
+    var reopened = new RunService(reopenedStore, MakeEdition(), new TestClock());
+    var persisted = reopened.GetSetup();
+    Assert.Equal(saved.EditionId, persisted.EditionId);
+    Assert.Equal("Renamed physical station", persisted.Events[0].Name);
+    Assert.Equal("Event 1", reopened.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Edition.Events[0].Name);
+    Assert.True(reopened.GetOperatorSnapshot().Devices.All(device => device.Availability == DeviceAvailability.Unverified));
+    Assert.True(saved.Events.Select(item => item.DeviceId).SequenceEqual(
+        h.Service.GetOperatorSnapshot().Devices.Select(item => item.DeviceId)));
+}
+
+static void SetupLockAndValidation()
+{
+    using var h = NewHarness();
+    var current = h.Service.GetSetup();
+    var queueId = h.Service.GetOperatorSnapshot().Queue.Single().Id;
+    h.Service.Arm(queueId);
+    Assert.Throws<CommandException>(() => h.Service.UpdateSetup(current));
+
+    h.Service.Abort("End setup-lock test run");
+    current = h.Service.GetSetup();
+    current.Events[1].DeviceId = current.Events[0].DeviceId;
+    Assert.Throws<CommandException>(() => h.Service.UpdateSetup(current));
+
+    current = h.Service.GetSetup();
+    current.Events[1].EventId = current.Events[0].EventId;
+    Assert.Throws<CommandException>(() => h.Service.UpdateSetup(current));
+}
+
+static void DeviceScanReadiness()
+{
+    using var h = NewHarness(simulatedDevicesOnline: false);
+    Assert.True(h.Service.GetOperatorSnapshot().Devices.All(device => device.Availability == DeviceAvailability.Unverified));
+    Assert.True(h.Service.Preflight().All(result => !result.Passed));
+
+    var setup = h.Service.GetSetup();
+    setup.Events[0].DeviceId = "aabbccddeeff";
+    setup.Events[1].DeviceId = "112233445566";
+    h.Service.UpdateSetup(setup);
+    var result = h.Service.RecordDeviceScan(true, true, ["AABBCCDDEEFF"]);
+
+    Assert.True(result.Connected && result.Completed);
+    Assert.True(result.DetectedDeviceIds.SequenceEqual(["AABBCCDDEEFF"]));
+    Assert.Equal("Responding", result.Devices.Single(device => device.EventId == "event-01").Status);
+    Assert.Equal("NotResponding", result.Devices.Single(device => device.EventId == "event-02").Status);
+    Assert.Equal("NotScanned", result.Devices.Single(device => device.EventId == "event-03").Status);
+    Assert.Equal(DeviceAvailability.Online, h.Service.GetOperatorSnapshot().Devices.Single(device => device.EventId == "event-01").Availability);
+    Assert.Equal(DeviceAvailability.Offline, h.Service.GetOperatorSnapshot().Devices.Single(device => device.EventId == "event-02").Availability);
+    Assert.Equal(DeviceAvailability.Unverified, h.Service.GetOperatorSnapshot().Devices.Single(device => device.EventId == "event-03").Availability);
+
+    var disconnected = h.Service.RecordDeviceScan(false, false, ["AABBCCDDEEFF"]);
+    Assert.True(!disconnected.Connected && !disconnected.Completed);
+    Assert.True(h.Service.GetOperatorSnapshot().Devices.All(device =>
+        device.Availability == DeviceAvailability.Unverified && device.LastSeenAt is null));
+}
+
+static void DeviceScanProtocol()
+{
+    Assert.True(MasterProtocolCodec.TryParseScanReply("GG1 SCAN scan-123 NODE aabbccddeeff", out var node));
+    Assert.Equal("scan-123", node.ScanId);
+    Assert.Equal("NODE", node.Kind);
+    Assert.Equal("AABBCCDDEEFF", node.DeviceId);
+    Assert.True(MasterProtocolCodec.TryParseScanReply("GG1 SCAN scan-123 DONE 1", out var done));
+    Assert.Equal(1, done.Count);
+    Assert.True(MasterProtocolCodec.TryParseScanReply("GG1 SCAN scan-123 BUSY", out var busy));
+    Assert.Equal("BUSY", busy.Kind);
+    Assert.True(!MasterProtocolCodec.TryParseScanReply("GG1 SCAN scan-123 NODE aabbccddeefg", out _));
+    Assert.True(!MasterProtocolCodec.TryParseScanReply("GG1 SCAN scan-123 DONE -1", out _));
+    Assert.True(!MasterProtocolCodec.TryParseScanReply("GG1 SCAN scan-123 NODE aabbccddeeff EXTRA", out _));
+}
+
+static void VirtualPressReadinessFallback()
+{
+    using var h = NewHarness(simulatedDevicesOnline: false);
+    var queueId = h.Service.GetOperatorSnapshot().Queue.Single().Id;
+    var armed = h.Service.Arm(queueId);
+    Assert.True(!armed.ManualOfflineOverride, "Unverified readiness alone should not require or imply manual override.");
+    var run = h.StartRun();
+
+    Assert.Equal(MessageDisposition.Offline, h.Send(run, "station-01", "event-press", "unverified-packet").Disposition);
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "event-01").Disposition);
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "event-01").Disposition);
+    Assert.Equal(DeviceAvailability.Unverified, h.Service.GetOperatorSnapshot().Devices
+        .Single(device => device.DeviceId == "station-01").Availability);
 }
 
 static void QueueReorderPersists()
@@ -1048,8 +1162,8 @@ static void ClearDatabaseSafety()
         Assert.Equal(null, cleared.CurrentRun);
         Assert.Equal(edition.Events.Count, cleared.Devices.Count);
         Assert.True(cleared.Devices.All(device =>
-            device.Availability == DeviceAvailability.Online && device.LastSeenAt is null &&
-            device.Led == LedState.Ready && device.LastError is null), "Configured devices should be restored to ready defaults.");
+            device.Availability == DeviceAvailability.Unverified && device.LastSeenAt is null &&
+            device.Led == LedState.OfflineError && device.LastError is null), "Configured devices should be restored as unverified and not represented as online.");
 
         var afterClear = store.Load();
         Assert.Equal(null, afterClear.SelectedCompetitorId);
@@ -1191,7 +1305,8 @@ static void CompleteAllEvents(TestHarness h, RunRecord run)
     h.Send(run, "station-04", "event-press", "bonus-e4-finish", 0);
 }
 
-static TestHarness NewHarness(int durationSeconds = 300) => new(MakeEdition(durationSeconds), NewPath());
+static TestHarness NewHarness(int durationSeconds = 300, bool simulatedDevicesOnline = true) =>
+    new(MakeEdition(durationSeconds), NewPath(), simulatedDevicesOnline);
 
 static EditionDefinition MakeEdition(int durationSeconds = 300, string editionId = "test-edition") => new()
 {
@@ -1250,12 +1365,19 @@ static void Cleanup(string path)
 
 sealed class TestHarness : IDisposable
 {
-    public TestHarness(EditionDefinition edition, string path)
+    public TestHarness(EditionDefinition edition, string path, bool simulatedDevicesOnline = true)
     {
         Path = path;
         Clock = new TestClock();
         Store = new RunStore(path);
         Service = new RunService(Store, edition, Clock);
+        if (simulatedDevicesOnline)
+        {
+            foreach (var device in Service.GetOperatorSnapshot().Devices)
+            {
+                Service.SetDeviceAvailability(device.DeviceId, DeviceAvailability.Online, "Explicit simulated-test fixture response.");
+            }
+        }
         var competitor = Service.AddCompetitor("Primary competitor");
         CompetitorId = competitor.Id;
         CompetitorName = competitor.Name;

@@ -69,6 +69,8 @@ app.UseStaticFiles();
 
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok", simulationMode }));
 app.MapGet("/api/master", (PhysicalMasterSerialService master) => Results.Ok(master.GetSnapshot()));
+app.MapPost("/api/master/scan", async (PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+    Results.Ok(await master.ScanDevicesAsync(cancellationToken)));
 app.MapPost("/api/master/connect", (ConnectMasterRequest request, PhysicalMasterSerialService master) =>
     Results.Ok(master.Connect(request.Port)));
 app.MapPost("/api/master/disconnect", (PhysicalMasterSerialService master) =>
@@ -115,6 +117,8 @@ if (!string.IsNullOrWhiteSpace(trayShutdownToken))
 }
 app.MapGet("/api/operator", (RunService runs) => Results.Ok(runs.GetOperatorSnapshot(simulationMode)));
 app.MapGet("/api/scoreboard", (RunService runs) => Results.Ok(runs.GetScoreboard(simulationMode)));
+app.MapGet("/api/setup", (RunService runs) => Results.Ok(runs.GetSetup()));
+app.MapPut("/api/setup", (EditionSetup request, RunService runs) => Results.Ok(runs.UpdateSetup(request)));
 app.MapGet("/api/run/countdown-state", (RunService runs) => Results.Ok(runs.GetCountdownState()));
 app.MapGet("/api/export", (RunService runs) => Results.Json(runs.GetOperatorSnapshot(simulationMode), JsonDefaults.Options));
 app.MapGet("/scoreboard", () => Results.File(Path.Combine(AppContext.BaseDirectory, "wwwroot", "scoreboard.html"), "text/html"));
@@ -134,14 +138,16 @@ app.MapPost("/api/queue/reorder", (ReorderQueueRequest request, RunService runs)
     runs.ReorderQueue(request.QueueIds);
     return Results.Ok(runs.GetOperatorSnapshot(simulationMode));
 });
-app.MapPost("/api/queue/{queueId}/arm", (string queueId, ArmRequest request, RunService runs, PhysicalMasterSerialService master) =>
-    Results.Ok(master.ArmQueue(runs, queueId, request.ManualOfflineOverride)));
+app.MapPost("/api/queue/{queueId}/arm", async (string queueId, ArmRequest request, RunService runs,
+    PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+    Results.Ok(await master.ArmQueueAsync(runs, queueId, request.ManualOfflineOverride, cancellationToken)));
 
 app.MapPost("/api/run/start", (RunService runs, PhysicalMasterSerialService master) => Results.Ok(master.StartVirtual(runs)));
 app.MapPost("/api/run/countdown-finished", (CountdownFinishedRequest request, RunService runs) =>
     Results.Ok(runs.CompleteCountdown(request.RunId)));
-app.MapPost("/api/run/arm", (StartCompetitorRunRequest request, RunService runs, PhysicalMasterSerialService master) =>
-    Results.Ok(master.ArmCompetitor(runs, request.CompetitorId, request.Category)));
+app.MapPost("/api/run/arm", async (StartCompetitorRunRequest request, RunService runs,
+    PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+    Results.Ok(await master.ArmCompetitorAsync(runs, request.CompetitorId, request.Category, cancellationToken)));
 app.MapPost("/api/run/pause", (RunService runs) => Results.Ok(runs.Pause()));
 app.MapPost("/api/run/resume", (RunService runs) => Results.Ok(runs.Resume()));
 app.MapPost("/api/run/finish", (RunService runs) => Results.Ok(runs.Finish()));
@@ -158,7 +164,7 @@ app.MapPut("/api/runs/{runId}/edit", (string runId, EditRunRequest request, RunS
 app.MapPost("/api/runs/{runId}/record", (string runId, RunService runs) =>
     Results.Ok(runs.RecordHistoricalRun(runId)));
 app.MapPost("/api/runs/{runId}/events/{eventId}/press", (string runId, string eventId, RunService runs) =>
-    simulationMode ? Results.Ok(runs.PressEvent(runId, eventId)) : Results.NotFound());
+    Results.Ok(runs.PressEvent(runId, eventId)));
 app.MapPost("/api/runs/{runId}/undo", (string runId, UndoRequest request, RunService runs) =>
     Results.Ok(runs.IsCurrentRun(runId)
         ? runs.UndoCurrentEdit(request.EditId, request.ExpectedRevision, request.Reason)

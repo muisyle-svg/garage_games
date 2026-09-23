@@ -53,7 +53,9 @@
 struct RxPacket;
 enum HostStatus : uint8_t;
 void finishGame(const char* reason);
+void finishHostScan(bool busy);
 void processRx();
+void beginHostScan(const char* scanId);
 
 // --------------------------- Configuration ---------------------------
 constexpr uint8_t PROTOCOL_VERSION = 3;
@@ -69,6 +71,11 @@ constexpr uint32_t NODE_RECLAIM_MS = 15000;
 constexpr uint32_t MASTER_HOLD_MS = 5000;
 constexpr uint32_t DEBOUNCE_MS = 30;
 constexpr uint32_t HOST_HELLO_INTERVAL_MS = 2000;
+constexpr uint32_t HOST_SCAN_DURATION_MS = 2000;
+constexpr uint32_t HOST_SCAN_PING_MS = 500;
+constexpr uint32_t HOST_STATUS_STALE_MS = 3000;
+constexpr uint8_t HOST_SCAN_MAX_RESPONDERS = 64;
+constexpr size_t HOST_SCAN_ID_MAX_LENGTH = 32;
 constexpr uint8_t HOST_RX_BYTES_PER_LOOP = 32;
 constexpr size_t HOST_RX_LINE_CAPACITY = 80;
 constexpr uint32_t CONTROL_REPEAT_GAP_MS = 25;
@@ -490,6 +497,8 @@ enum FirmwareMode { FIRMWARE_MODE_IDLE, FIRMWARE_MODE_SPEED };
 
 HostStatus hostStatus = HOST_STATUS_NONE;
 uint32_t hostRemainingSeconds = 0;
+uint32_t lastHostStatusMs = 0;
+bool hostStatusReceived = false;
 uint32_t bootToken = 0;
 uint32_t hostStartSequence = 0;
 uint32_t lastHostHelloMs = 0;
@@ -508,6 +517,88 @@ bool scoreResetSaved = true;
 bool hostBlocksStarts() {
   return hostStatus == HOST_STATUS_COUNTDOWN ||
          hostStatus == HOST_STATUS_ACTIVE || hostStatus == HOST_STATUS_PAUSED;
+}
+
+struct HostScanResponder {
+  uint8_t mac[6];
+};
+
+HostScanResponder hostScanResponders[HOST_SCAN_MAX_RESPONDERS];
+uint16_t hostScanResponderCount = 0;
+bool hostScanActive = false;
+char hostScanId[HOST_SCAN_ID_MAX_LENGTH + 1];
+uint32_t hostScanToken = 0;
+uint32_t lastHostScanToken = 0;
+uint32_t hostScanStartedMs = 0;
+uint32_t hostScanUntilMs = 0;
+uint32_t nextHostScanPingMs = 0;
+
+bool hostScanSafe(uint32_t now) {
+  return gameState == IDLE && !hostBlocksStarts() && hostStatusReceived &&
+         (uint32_t)(now - lastHostStatusMs) <= HOST_STATUS_STALE_MS;
+}
+
+bool hostScanWindowContains(uint32_t receivedAtMs) {
+  return (int32_t)(receivedAtMs - hostScanStartedMs) >= 0 &&
+         (int32_t)(hostScanUntilMs - receivedAtMs) > 0;
+}
+
+bool hostScanHasResponder(const uint8_t* mac) {
+  for (uint16_t i = 0; i < hostScanResponderCount; ++i) {
+    if (macEqual(hostScanResponders[i].mac, mac)) return true;
+  }
+  return false;
+}
+
+void recordHostScanResponder(const uint8_t* mac) {
+  if (hostScanHasResponder(mac)) return;
+  if (hostScanResponderCount >= HOST_SCAN_MAX_RESPONDERS) {
+    Serial.printf("[SCAN] Responder table full for scan %s\n", hostScanId);
+    finishHostScan(true);
+    return;
+  }
+
+  memcpy(hostScanResponders[hostScanResponderCount].mac, mac, 6);
+  ++hostScanResponderCount;
+  char macText[13];
+  macToHex(mac, macText, sizeof(macText));
+  Serial.printf("GG1 SCAN %s NODE %s\n", hostScanId, macText);
+}
+
+void emitHostScanDiscovery() {
+  char message[40];
+  snprintf(message, sizeof(message), "DISCOVER:%u:%lu",
+           PROTOCOL_VERSION, (unsigned long)hostScanToken);
+  sendBroadcast(message);
+}
+
+void finishHostScan(bool busy) {
+  if (!hostScanActive) return;
+  if (busy) {
+    Serial.printf("GG1 SCAN %s BUSY\n", hostScanId);
+  } else {
+    Serial.printf("GG1 SCAN %s DONE %u\n", hostScanId,
+                  (unsigned)hostScanResponderCount);
+  }
+  hostScanActive = false;
+  hostScanId[0] = '\0';
+}
+
+void updateHostScan() {
+  if (!hostScanActive) return;
+  uint32_t now = millis();
+  if (!hostScanSafe(now)) {
+    finishHostScan(true);
+    return;
+  }
+  if ((int32_t)(now - hostScanUntilMs) >= 0) {
+    finishHostScan(false);
+    return;
+  }
+  if ((int32_t)(now - nextHostScanPingMs) >= 0) {
+    emitHostScanDiscovery();
+    nextHostScanPingMs = now + HOST_SCAN_PING_MS;
+  }
 }
 
 bool hostWaitingLedActive = false;
@@ -569,21 +660,78 @@ bool parseHostStatusLine(const char* line, HostStatus& parsedStatus,
   return true;
 }
 
+bool parseHostScanCommand(const char* line, char* scanId, size_t scanIdSize) {
+  static const char prefix[] = "GG1 SCAN ";
+  if (!line || !scanId || scanIdSize < 2 ||
+      strncmp(line, prefix, sizeof(prefix) - 1) != 0) return false;
+
+  const char* cursor = line + sizeof(prefix) - 1;
+  size_t length = 0;
+  while (*cursor != '\0') {
+    char value = *cursor++;
+    bool allowed = (value >= 'A' && value <= 'Z') ||
+                   (value >= 'a' && value <= 'z') ||
+                   (value >= '0' && value <= '9') || value == '-' || value == '_';
+    if (!allowed || length >= HOST_SCAN_ID_MAX_LENGTH || length + 1 >= scanIdSize) {
+      return false;
+    }
+    scanId[length++] = value;
+  }
+  if (length == 0) return false;
+  scanId[length] = '\0';
+  return true;
+}
+
+void beginHostScan(const char* scanId) {
+  if (!scanId) return;
+  uint32_t now = millis();
+  if (hostScanActive || masterHoldActive || !radioReady || !hostScanSafe(now)) {
+    Serial.printf("GG1 SCAN %s BUSY\n", scanId);
+    return;
+  }
+
+  strncpy(hostScanId, scanId, sizeof(hostScanId) - 1);
+  hostScanId[sizeof(hostScanId) - 1] = '\0';
+  hostScanResponderCount = 0;
+  if (lastHostScanToken == 0) {
+    do {
+      hostScanToken = esp_random();
+    } while (hostScanToken == 0 || hostScanToken == discoveryToken);
+  } else {
+    hostScanToken = lastHostScanToken;
+    do {
+      ++hostScanToken;
+    } while (hostScanToken == 0 || hostScanToken == discoveryToken);
+  }
+  lastHostScanToken = hostScanToken;
+  hostScanStartedMs = now;
+  hostScanUntilMs = now + HOST_SCAN_DURATION_MS;
+  nextHostScanPingMs = now;
+  hostScanActive = true;
+}
+
 void processHostSerialLine(const char* line) {
   HostStatus parsedStatus;
   uint32_t parsedRemainingSeconds;
-  if (!parseHostStatusLine(line, parsedStatus, parsedRemainingSeconds)) return;
-  if (parsedStatus == HOST_STATUS_COUNTDOWN && hostStatus != HOST_STATUS_COUNTDOWN) {
-    quickTapCount = 0;
-    lastQuickTapMs = 0;
-    if (masterHoldActive) {
-      masterHoldActive = false;
-      masterStartTriggered = true;
-      masterStartArmed = false;
+  if (parseHostStatusLine(line, parsedStatus, parsedRemainingSeconds)) {
+    if (parsedStatus == HOST_STATUS_COUNTDOWN && hostStatus != HOST_STATUS_COUNTDOWN) {
+      quickTapCount = 0;
+      lastQuickTapMs = 0;
+      if (masterHoldActive) {
+        masterHoldActive = false;
+        masterStartTriggered = true;
+        masterStartArmed = false;
+      }
     }
+    hostStatus = parsedStatus;
+    hostRemainingSeconds = parsedRemainingSeconds;
+    lastHostStatusMs = millis();
+    hostStatusReceived = true;
+    return;
   }
-  hostStatus = parsedStatus;
-  hostRemainingSeconds = parsedRemainingSeconds;
+
+  char scanId[HOST_SCAN_ID_MAX_LENGTH + 1];
+  if (parseHostScanCommand(line, scanId, sizeof(scanId))) beginHostScan(scanId);
 }
 
 void updateHostSerialInput() {
@@ -1235,9 +1383,16 @@ void processRx() {
     unsigned long packetToken = 0;
     unsigned long packetRun = 0;
 
-    if (sscanf(packet.data, "HELLO:%u:%lu", &version, &packetToken) == 2) {
-      if (version == PROTOCOL_VERSION && gameState == DISCOVERING &&
-          packetToken == discoveryToken) {
+    int helloLength = 0;
+    if (sscanf(packet.data, "HELLO:%u:%lu%n", &version, &packetToken,
+               &helloLength) == 2 && helloLength > 0 &&
+        packet.data[helloLength] == '\0') {
+      if (version == PROTOCOL_VERSION && hostScanActive &&
+          packetToken == hostScanToken && hostScanSafe(millis()) &&
+          hostScanWindowContains(packet.receivedAtMs)) {
+        recordHostScanResponder(packet.source);
+      } else if (version == PROTOCOL_VERSION && gameState == DISCOVERING &&
+                 packetToken == discoveryToken) {
         bool newlyAdded = false;
         int nodeIndex = upsertSpoke(packet.source, newlyAdded);
         if (nodeIndex >= 0) {
@@ -1307,9 +1462,10 @@ void updateMasterButton() {
   if ((uint32_t)(now - lastButtonChangeMs) < DEBOUNCE_MS || reading == stableButton) return;
   stableButton = reading;
 
-  // Ignore every button gesture while the operator's start audio is playing.
-  // In particular, don't let waiting taps accumulate toward the local score reset.
-  if (gameState == IDLE && hostStatus == HOST_STATUS_COUNTDOWN) {
+  // Host countdowns and spoke scans temporarily own idle control. Ignore all
+  // button gestures so they cannot start a game or alter the local high score.
+  if (gameState == IDLE &&
+      (hostStatus == HOST_STATUS_COUNTDOWN || hostScanActive)) {
     quickTapCount = 0;
     lastQuickTapMs = 0;
     masterHoldActive = false;
@@ -1454,6 +1610,7 @@ void setup() {
 void loop() {
   updateHostSerialInput();
   processRx();
+  updateHostScan();
   updatePendingTransmissions();
   updateRadioDiagnostics();
   updateMasterButton();

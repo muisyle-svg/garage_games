@@ -8,6 +8,8 @@ public enum MasterMode
 
 public sealed record MasterRunStatus(string State, int RemainingSeconds);
 
+public sealed record MasterScanReply(string ScanId, string Kind, string? DeviceId, int? Count);
+
 public sealed record MasterConnectionSnapshot(
     bool Connected,
     string? Port,
@@ -23,11 +25,48 @@ public static class MasterProtocolCodec
         !string.IsNullOrEmpty(token) && token.Length <= 64 && token.All(character =>
             char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
+    public static bool IsValidDeviceId(string? deviceId) =>
+        deviceId is { Length: 12 } && deviceId.All(IsHexDigit);
+
     public static string GetStartMessageId(string bootToken, ulong sequence) =>
         $"master-start:{bootToken}:{sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
     public static string FormatStatus(MasterRunStatus status) =>
         $"GG1 STATUS {status.State} {status.RemainingSeconds}";
+
+    public static bool TryParseScanReply(string line, out MasterScanReply reply)
+    {
+        reply = null!;
+        if (line.Length > MaximumLineLength)
+        {
+            return false;
+        }
+
+        var parts = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 5 && parts[0] == "GG1" && parts[1] == "SCAN" && IsValidBootToken(parts[2]) &&
+            parts[3] == "NODE" && IsValidDeviceId(parts[4]))
+        {
+            reply = new MasterScanReply(parts[2], "NODE", parts[4].ToUpperInvariant(), null);
+            return true;
+        }
+
+        if (parts.Length == 5 && parts[0] == "GG1" && parts[1] == "SCAN" && IsValidBootToken(parts[2]) &&
+            parts[3] == "DONE" && int.TryParse(parts[4], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var count) && count >= 0)
+        {
+            reply = new MasterScanReply(parts[2], "DONE", null, count);
+            return true;
+        }
+
+        if (parts.Length == 4 && parts[0] == "GG1" && parts[1] == "SCAN" && IsValidBootToken(parts[2]) &&
+            parts[3] == "BUSY")
+        {
+            reply = new MasterScanReply(parts[2], "BUSY", null, null);
+            return true;
+        }
+
+        return false;
+    }
 
     public static bool TryParseStartMessageId(string messageId, out string bootToken, out ulong sequence)
     {
@@ -51,6 +90,9 @@ public static class MasterProtocolCodec
         bootToken = suffix[..separator];
         return true;
     }
+
+    private static bool IsHexDigit(char character) =>
+        character is >= '0' and <= '9' or >= 'A' and <= 'F' or >= 'a' and <= 'f';
 
     public static bool TryParseLine(string line, out string normalizedLine, out string kind,
         out string value, out ulong sequence)

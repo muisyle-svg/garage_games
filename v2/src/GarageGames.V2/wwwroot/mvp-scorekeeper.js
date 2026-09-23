@@ -32,7 +32,18 @@
     initializedSelection: false,
     receivedAt: Date.now(),
     timeoutRefreshRunId: null,
-    alertTimer: null
+    alertTimer: null,
+    setupDraft: null,
+    setupDirty: false,
+    setupLoading: false,
+    setupSaving: false,
+    setupScanLoading: false,
+    setupScan: null,
+    setupScanFresh: false,
+    setupScanAt: 0,
+    setupScanError: "",
+    setupLoadError: "",
+    setupSelectedEventId: null
   };
 
   const clearDatabasePhrase = "CLEAR ALL DATA";
@@ -40,6 +51,7 @@
   const scorekeeperTime = window.GarageGamesScorekeeperTime;
   const masterActions = window.GarageGamesMasterActions;
   const runActions = window.GarageGamesRunActions;
+  const setupTools = window.GarageGamesScorekeeperSetup;
   const scorecardOrder = window.GarageGamesScorecardOrder;
   const leaderboardTools = window.GarageGamesLeaderboards;
   const ui = {
@@ -48,8 +60,8 @@
     lastUpdated: $("last-updated"),
     refresh: $("refresh-button"),
     alert: $("alert-region"),
-    tabs: [$("tab-scorekeeping"), $("tab-on-deck"), $("tab-history"), $("tab-leaderboards")],
-    tabPanels: [$("panel-scorekeeping"), $("panel-on-deck"), $("panel-history"), $("panel-leaderboards")],
+    tabs: [$("tab-scorekeeping"), $("tab-on-deck"), $("tab-history"), $("tab-leaderboards"), $("tab-setup")],
+    tabPanels: [$("panel-scorekeeping"), $("panel-on-deck"), $("panel-history"), $("panel-leaderboards"), $("panel-setup")],
     caption: $("run-caption"),
     competitor: $("competitor-select"),
     category: $("run-category"),
@@ -110,7 +122,22 @@
     eventLeaderboardsGrid: $("event-leaderboards-grid"),
     clearDatabaseConfirmation: $("clear-database-confirmation"),
     clearDatabaseButton: $("clear-database-button"),
-    clearDatabaseResult: $("clear-database-result")
+    clearDatabaseResult: $("clear-database-result"),
+    setupLoadState: $("setup-load-state"),
+    setupRetryLoad: $("setup-retry-load"),
+    setupContent: $("setup-content"),
+    setupEditionName: $("setup-edition-name"),
+    setupScanAll: $("setup-scan-all"),
+    setupSave: $("setup-save"),
+    setupSaveBottom: $("setup-save-bottom"),
+    setupScanSummary: $("setup-scan-summary"),
+    setupSelectedEventLabel: $("setup-selected-event-label"),
+    setupDiscoveredDevices: $("setup-discovered-devices"),
+    setupEventCount: $("setup-event-count"),
+    setupAddEvent: $("setup-add-event"),
+    setupValidation: $("setup-validation"),
+    setupEventList: $("setup-event-list"),
+    setupSaveState: $("setup-save-state")
   };
 
   function isLiveLock(run) {
@@ -286,6 +313,359 @@
     }
   }
 
+  async function loadSetup() {
+    if (state.setupLoading) return false;
+    state.setupLoading = true;
+    state.setupLoadError = "";
+    renderSetup();
+    try {
+      const payload = await request("/api/setup", { cache: "no-store" });
+      state.setupDraft = setupTools.normalizeSetup(payload);
+      state.setupDirty = false;
+      state.setupScan = null;
+      state.setupScanFresh = false;
+      state.setupScanAt = 0;
+      state.setupScanError = "";
+      state.setupSelectedEventId = state.setupDraft.events[0]?.eventId || null;
+      renderSetup();
+      if (state.snapshot) renderVirtualButtons(state.snapshot.currentRun);
+      return true;
+    } catch (error) {
+      state.setupLoadError = error.message || "Setup could not be loaded.";
+      renderSetup();
+      return false;
+    } finally {
+      state.setupLoading = false;
+      renderSetupControls();
+    }
+  }
+
+  function setupEvent(eventId) {
+    return state.setupDraft?.events.find((event) => event.eventId === eventId) || null;
+  }
+
+  function updateSetupValidation() {
+    if (!state.setupDraft) return;
+    try {
+      setupTools.buildSetupPayload(state.setupDraft);
+      ui.setupValidation.textContent = "";
+    } catch (error) {
+      ui.setupValidation.textContent = error.message || "Review setup before saving.";
+    }
+  }
+
+  function renderSetupControls() {
+    if (!state.setupDraft) return;
+    const busy = state.setupLoading || state.setupSaving || state.setupScanLoading || state.busy;
+    ui.setupEventCount.textContent = `${state.setupDraft.events.length} ${state.setupDraft.events.length === 1 ? "event" : "events"}`;
+    ui.setupScanSummary.textContent = setupTools.scanSummary(state.setupScan, state.setupScanFresh);
+    if (state.setupScanError) ui.setupScanSummary.textContent += ` ${state.setupScanError}`;
+    if (state.setupDirty && !state.setupScanFresh) ui.setupScanSummary.textContent += " Save setup before scanning the current assignments.";
+    ui.setupSaveState.textContent = state.setupSaving
+      ? "Saving setup…"
+      : state.setupDirty ? "Unsaved setup changes." : "Setup is saved on this computer.";
+    ui.setupSave.disabled = busy || !state.setupDirty;
+    ui.setupSaveBottom.disabled = busy || !state.setupDirty;
+    ui.setupAddEvent.disabled = busy;
+    ui.setupScanAll.disabled = busy || state.setupScanLoading || state.setupDirty;
+    ui.setupEditionName.disabled = busy;
+    ui.setupEventList.querySelectorAll("input").forEach((input) => { input.disabled = busy; });
+    ui.setupEventList.querySelectorAll("button[data-setup-action]").forEach((button) => {
+      const action = button.dataset.setupAction;
+      button.disabled = busy || action === "check" && (state.setupScanLoading || state.setupDirty);
+    });
+    if (state.setupScanLoading) {
+      ui.setupScanSummary.textContent = "Scanning physical devices… availability remains unverified until the scan completes.";
+    }
+    renderSetupReadiness();
+    updateSetupValidation();
+  }
+
+  function renderSetupSelection() {
+    const selected = setupEvent(state.setupSelectedEventId);
+    ui.setupEventList.querySelectorAll(".setup-event-row").forEach((row) => {
+      const isSelected = row.dataset.eventId === state.setupSelectedEventId;
+      row.classList.toggle("is-selected", isSelected);
+      const button = row.querySelector('[data-setup-action="select"]');
+      if (button) {
+        button.setAttribute("aria-pressed", String(isSelected));
+        const label = button.querySelector("[data-setup-select-label]");
+        if (label) label.textContent = isSelected ? "Selected" : "Select event";
+      }
+    });
+    ui.setupSelectedEventLabel.textContent = selected
+      ? `Assigning to: ${selected.name || selected.eventId}`
+      : "Select an event to assign a device.";
+  }
+
+  function renderSetupDiscovery() {
+    ui.setupDiscoveredDevices.replaceChildren();
+    const scan = state.setupScan;
+    if (!scan?.connected || !scan.completed || !scan.detectedDeviceIds.length) {
+      ui.setupDiscoveredDevices.appendChild(make("span", "small-note", scan?.connected && scan?.completed
+        ? "No hardware IDs were discovered by the last completed scan."
+        : "No completed scan results."));
+      return;
+    }
+
+    const selectedEventId = state.setupSelectedEventId;
+    const assignedOwners = new Map();
+    state.setupDraft.events.forEach((event) => {
+      const mac = setupTools.hardwareId(event.assignmentValue);
+      if (mac) assignedOwners.set(mac, event);
+    });
+    scan.detectedDeviceIds.forEach((mac) => {
+      const owner = assignedOwners.get(mac);
+      const button = make("button", "setup-device-chip", owner ? `${mac} · ${owner.name}` : mac);
+      button.type = "button";
+      button.dataset.setupDevice = mac;
+      button.disabled = state.setupSaving || state.setupScanLoading || !selectedEventId || Boolean(owner && owner.eventId !== selectedEventId);
+      button.setAttribute("aria-label", owner && owner.eventId === selectedEventId
+        ? `${mac} is assigned to ${owner.name}`
+        : owner ? `${mac} is already assigned to ${owner.name}` : `Assign ${mac} to selected event`);
+      if (owner?.eventId === selectedEventId) button.setAttribute("aria-pressed", "true");
+      ui.setupDiscoveredDevices.appendChild(button);
+    });
+  }
+
+  function renderSetupReadiness() {
+    ui.setupEventList.querySelectorAll(".setup-event-row").forEach((row) => {
+      const event = setupEvent(row.dataset.eventId);
+      const status = row.querySelector("[data-setup-readiness]");
+      if (!event || !status) return;
+      const readiness = physicalReadiness(event);
+      status.className = `setup-readiness ${readiness.key}`;
+      status.textContent = readiness.label;
+      const check = row.querySelector('[data-setup-action="check"]');
+      if (check) check.disabled = state.setupLoading || state.setupSaving || state.setupScanLoading || state.setupDirty || state.busy;
+    });
+  }
+
+  function renderSetupEvents() {
+    ui.setupEventList.replaceChildren();
+    const events = state.setupDraft?.events || [];
+    if (!events.length) {
+      ui.setupEventList.appendChild(make("p", "empty-state", "No events configured. Add at least one event to build the scorecard."));
+      return;
+    }
+    events.forEach((event, index) => {
+      const row = make("article", "setup-event-row");
+      row.dataset.eventId = event.eventId;
+      const top = make("div", "setup-event-top");
+      const select = make("button", "setup-event-pick");
+      select.type = "button";
+      select.dataset.setupAction = "select";
+      select.dataset.setupEventId = event.eventId;
+      select.setAttribute("aria-pressed", String(event.eventId === state.setupSelectedEventId));
+      select.append(make("span", "setup-event-number", String(index + 1).padStart(2, "0")), make("span", "", event.eventId === state.setupSelectedEventId ? "Selected" : "Select event"));
+      select.lastElementChild.dataset.setupSelectLabel = "true";
+
+      const nameLabel = make("label", "setup-event-name");
+      nameLabel.append(make("span", "", "Event name"));
+      const nameInput = make("input");
+      nameInput.type = "text";
+      nameInput.maxLength = 120;
+      nameInput.autocomplete = "off";
+      nameInput.value = event.name;
+      nameInput.dataset.setupField = "name";
+      nameInput.dataset.setupEventId = event.eventId;
+      nameInput.setAttribute("aria-label", `Event ${index + 1} name`);
+      nameLabel.appendChild(nameInput);
+
+      const kind = make("div", "setup-event-kind");
+      kind.append(make("span", "", "Event type"), make("strong", "", ({ standard: "Standard", keypad: "Keypad", magneticArcade: "Magnetic arcade" })[event.type] || event.type));
+      const remove = make("button", "button button-quiet setup-event-remove", "Remove");
+      remove.type = "button";
+      remove.dataset.setupAction = "remove";
+      remove.dataset.setupEventId = event.eventId;
+      remove.setAttribute("aria-label", `Remove ${event.name || event.eventId}`);
+      top.append(select, nameLabel, kind, remove);
+
+      const deviceRow = make("div", "setup-event-device-row");
+      const assignmentLabel = make("label", "setup-event-assignment");
+      assignmentLabel.append(make("span", "", "Physical device MAC (optional)"));
+      const assignment = make("input");
+      assignment.type = "text";
+      assignment.maxLength = 17;
+      assignment.inputMode = "text";
+      assignment.autocomplete = "off";
+      assignment.spellcheck = false;
+      assignment.placeholder = "Unassigned · 12 hex digits";
+      assignment.value = event.assignmentValue;
+      assignment.dataset.setupField = "assignment";
+      assignment.dataset.setupEventId = event.eventId;
+      assignment.setAttribute("aria-label", `${event.name} physical device MAC; blank means unassigned`);
+      assignmentLabel.appendChild(assignment);
+      const unassign = make("button", "button button-quiet setup-event-clear", "Use virtual");
+      unassign.type = "button";
+      unassign.dataset.setupAction = "unassign";
+      unassign.dataset.setupEventId = event.eventId;
+      unassign.setAttribute("aria-label", `Unassign physical hardware for ${event.name}; keep its virtual event button`);
+
+      const readiness = make("div", "setup-event-readiness");
+      const readinessBadge = make("span", "setup-readiness", "Unverified");
+      readinessBadge.dataset.setupReadiness = "true";
+      const check = make("button", "button button-secondary setup-event-check", "Check");
+      check.type = "button";
+      check.dataset.setupAction = "check";
+      check.dataset.setupEventId = event.eventId;
+      check.setAttribute("aria-label", `Run a fresh physical scan for ${event.name}`);
+      readiness.append(readinessBadge, check);
+      deviceRow.append(assignmentLabel, unassign, readiness);
+
+      const internalId = make("p", "setup-event-id", `Event ID · ${event.eventId}`);
+      row.append(top, deviceRow, internalId);
+      ui.setupEventList.appendChild(row);
+    });
+    renderSetupSelection();
+    renderSetupReadiness();
+  }
+
+  function renderSetup() {
+    const hasSetup = Boolean(state.setupDraft);
+    ui.setupContent.hidden = !hasSetup;
+    ui.setupLoadState.hidden = hasSetup;
+    ui.setupRetryLoad.hidden = hasSetup || !state.setupLoadError;
+    if (!hasSetup) {
+      ui.setupLoadState.textContent = state.setupLoadError
+        ? `Setup could not be loaded: ${state.setupLoadError}`
+        : state.setupLoading ? "Loading setup…" : "Setup is unavailable. Retry to load the edition configuration.";
+      return;
+    }
+    if (document.activeElement !== ui.setupEditionName) ui.setupEditionName.value = state.setupDraft.name;
+    renderSetupEvents();
+    renderSetupDiscovery();
+    renderSetupControls();
+    renderSetupSelection();
+  }
+
+  function markSetupChanged() {
+    state.setupDirty = true;
+    state.setupScanFresh = false;
+    state.virtualKey = null;
+    renderSetupControls();
+    renderSetupDiscovery();
+    renderSetupReadiness();
+    if (state.snapshot) renderVirtualButtons(state.snapshot.currentRun);
+  }
+
+  function onSetupInput(event) {
+    if (!state.setupDraft) return;
+    if (event.target === ui.setupEditionName) {
+      state.setupDraft.name = event.target.value;
+      markSetupChanged();
+      return;
+    }
+    const input = event.target.closest("input[data-setup-field]");
+    if (!input) return;
+    const target = setupEvent(input.dataset.setupEventId);
+    if (!target) return;
+    if (input.dataset.setupField === "name") target.name = input.value;
+    else if (input.dataset.setupField === "assignment") target.assignmentValue = input.value;
+    markSetupChanged();
+  }
+
+  function onSetupClick(event) {
+    const deviceButton = event.target.closest("button[data-setup-device]");
+    if (deviceButton) {
+      const target = setupEvent(state.setupSelectedEventId);
+      if (!target || deviceButton.disabled) return;
+      target.assignmentValue = deviceButton.dataset.setupDevice;
+      const row = Array.from(ui.setupEventList.querySelectorAll(".setup-event-row")).find((item) => item.dataset.eventId === target.eventId);
+      const input = row?.querySelector('input[data-setup-field="assignment"]');
+      if (input) input.value = target.assignmentValue;
+      markSetupChanged();
+      return;
+    }
+    const actionButton = event.target.closest("button[data-setup-action]");
+    if (!actionButton || actionButton.disabled) return;
+    const action = actionButton.dataset.setupAction;
+    const eventId = actionButton.dataset.setupEventId;
+    const target = setupEvent(eventId);
+    if (action === "select" && target) {
+      state.setupSelectedEventId = eventId;
+      renderSetupSelection();
+      renderSetupDiscovery();
+    } else if (action === "unassign" && target) {
+      target.assignmentValue = "";
+      const row = actionButton.closest(".setup-event-row");
+      const input = row?.querySelector('input[data-setup-field="assignment"]');
+      if (input) input.value = "";
+      markSetupChanged();
+    } else if (action === "remove" && target) {
+      state.setupDraft.events = state.setupDraft.events.filter((item) => item.eventId !== eventId);
+      if (state.setupSelectedEventId === eventId) state.setupSelectedEventId = state.setupDraft.events[0]?.eventId || null;
+      markSetupChanged();
+      renderSetupEvents();
+      renderSetupControls();
+      renderSetupDiscovery();
+    } else if (action === "check") {
+      void runSetupScan(eventId);
+    }
+  }
+
+  async function runSetupScan(eventId = null) {
+    if (state.setupScanLoading || state.setupDirty) {
+      if (state.setupDirty) ui.setupValidation.textContent = "Save setup changes before scanning the current event assignments.";
+      return;
+    }
+    state.setupScanLoading = true;
+    state.setupScanError = "";
+    renderSetupControls();
+    renderSetupReadiness();
+    try {
+      state.setupScan = setupTools.normalizeScanResponse(await request("/api/master/scan", { method: "POST" }));
+      state.setupScanFresh = state.setupScan.connected && state.setupScan.completed;
+      state.setupScanAt = Date.now();
+      if (eventId) state.setupSelectedEventId = eventId;
+    } catch (error) {
+      state.setupScan = { connected: false, completed: false, devices: [], detectedDeviceIds: [] };
+      state.setupScanFresh = false;
+      state.setupScanAt = 0;
+      state.setupScanError = `Scan failed: ${error.message || "the master scan could not be completed."}`;
+    } finally {
+      state.setupScanLoading = false;
+      state.virtualKey = null;
+      renderSetupControls();
+      renderSetupDiscovery();
+      renderSetupReadiness();
+      renderSetupSelection();
+      if (state.snapshot) renderVirtualButtons(state.snapshot.currentRun);
+    }
+  }
+
+  async function saveSetup() {
+    if (!state.setupDraft || state.setupSaving || !state.setupDirty) return;
+    let payload;
+    try {
+      payload = setupTools.buildSetupPayload(state.setupDraft);
+    } catch (error) {
+      ui.setupValidation.textContent = error.message || "Review setup before saving.";
+      return;
+    }
+    state.setupSaving = true;
+    renderSetupControls();
+    renderSetupReadiness();
+    try {
+      const response = await request("/api/setup", { method: "PUT", body: JSON.stringify(payload) });
+      const effective = response && (Array.isArray(response.events) || Array.isArray(response.setup?.events)) ? response : payload;
+      state.setupDraft = setupTools.normalizeSetup(effective);
+      state.setupDirty = false;
+      state.setupScanFresh = false;
+      state.setupScanAt = 0;
+      state.setupScanError = "";
+      if (!setupEvent(state.setupSelectedEventId)) state.setupSelectedEventId = state.setupDraft.events[0]?.eventId || null;
+      renderSetup();
+      await loadSnapshot(true);
+      showAlert("Setup saved. Run a fresh scan to check physical availability.", "success");
+    } catch (error) {
+      ui.setupValidation.textContent = error.message || "Setup could not be saved.";
+    } finally {
+      state.setupSaving = false;
+      renderSetupControls();
+    }
+  }
+
   function renderCompetitors() {
     const competitors = state.snapshot?.competitors || [];
     const signature = competitors.map((item) => `${item.id}:${item.name}`).join("|");
@@ -428,9 +808,17 @@
   }
 
   function rowTiming(row, run) {
-    const event = runEvents(run).find((item) => item.eventId === row.dataset.eventId);
     const durationCell = row.querySelector(".duration-cell");
     const statusCell = row.querySelector(".event-status");
+    if (!run) {
+      if (durationCell) durationCell.textContent = "—";
+      if (statusCell) {
+        statusCell.textContent = "Pending";
+        statusCell.className = "event-status pending";
+      }
+      return;
+    }
+    const event = runEvents(run).find((item) => item.eventId === row.dataset.eventId);
     const durationSeconds = runDurationSeconds(run);
     const startMs = event
       ? eventElapsedMsForDraft(run, event, "start")
@@ -450,6 +838,7 @@
   }
 
   function eventElapsedMsForDraft(run, event, field) {
+    if (!run || !event?.eventId) return null;
     const draft = state.drafts.get(run.id)?.get(event.eventId);
     const elapsedField = field === "start" ? "startElapsedMs" : "finishElapsedMs";
     return scorekeeperTime.elapsedMsForDraft(
@@ -684,27 +1073,33 @@
   }
 
   function renderVirtualButtons(run) {
-    ui.virtualNote.textContent = !run
-      ? "Start a run to enable the virtual event buttons."
+    const physicalSignature = currentEditionEvents(run)
+      .map((event) => `${event.eventId}:${physicalReadinessKey(event)}`)
+      .join("|");
+    const events = currentEditionEvents(run);
+    const note = !run
+      ? "Start a run to enable virtual presses. They remain available independently of physical hardware readiness."
       : run.status === "active"
-        ? "Times count down from the run limit. Press once to start an event and again to finish it."
+        ? "Times count down from the run limit. Virtual presses remain available even when physical hardware is unassigned or unverified. Press once to start an event and again to finish it."
         : run.status === "countdown"
           ? "Countdown audio must finish before event buttons become available."
         : run.status === "paused"
           ? "Resume the run before recording event presses."
-          : run.status === "armed"
+        : run.status === "armed"
             ? "Start the run to enable event presses."
             : "This run no longer accepts event presses. Review or correct it in history.";
-    const key = run ? `${run.id}:${run.revision}:${run.status}:${state.busy}` : `no-run:${eventRosterSignature()}:${state.busy}`;
+    ui.virtualNote.textContent = `${note} ${physicalAvailabilitySummary(events)}`;
+    const key = run ? `${run.id}:${run.revision}:${run.status}:${state.busy}:${physicalSignature}` : `no-run:${eventRosterSignature()}:${state.busy}:${physicalSignature}`;
     if (key === state.virtualKey) return;
     ui.virtualButtons.replaceChildren();
-    const events = currentEditionEvents(run);
     const canPress = Boolean(run && run.status === "active" && !state.busy);
     events.forEach((event, index) => {
       const button = make("button", "virtual-button");
       button.type = "button";
       button.disabled = !canPress || event.status === "completed";
-      button.setAttribute("aria-label", `${event.name}: ${event.status === "active" ? "finish event" : event.status === "completed" ? "complete" : "start event"}`);
+      const useVirtual = !isPhysicalEventResponding(event);
+      const actionLabel = event.status === "active" ? "finish event" : event.status === "completed" ? "complete" : "start event";
+      button.setAttribute("aria-label", `${event.name}: ${useVirtual && event.status !== "completed" ? "use virtual press to " : ""}${actionLabel}`);
       const name = make("strong", "", `${String(index + 1).padStart(2, "0")} · ${event.name}`);
       let hint = "Start";
       if (event.status === "active") {
@@ -712,12 +1107,50 @@
         hint = `Stop · ${formatSeconds(remainingMs)} left`;
       }
       if (event.status === "completed") hint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
+      else if (useVirtual) hint = `Use virtual · ${hint}`;
       const stateLabel = make("small", "", hint);
       button.append(name, stateLabel);
       button.addEventListener("click", () => pressEvent(run, event));
       ui.virtualButtons.appendChild(button);
     });
     state.virtualKey = key;
+  }
+
+  function physicalReadinessKey(event) {
+    return physicalReadiness(event).key;
+  }
+
+  function physicalReadiness(event) {
+    const configured = setupEvent(event?.eventId) || {
+      eventId: event?.eventId || "",
+      assignmentValue: event?.deviceId || ""
+    };
+    return setupTools.currentReadiness(configured, {
+      snapshot: state.snapshot,
+      scan: state.setupScan,
+      scanFresh: state.setupScanFresh,
+      scanIsNewer: state.setupScanAt > state.receivedAt,
+      masterConnected: state.master?.connected,
+      masterUnavailable: Boolean(state.masterError),
+      dirty: state.setupDirty && Boolean(setupEvent(event?.eventId)),
+      scanLoading: state.setupScanLoading
+    });
+  }
+
+  function physicalAvailabilitySummary(events) {
+    if (state.master?.connected !== true) return "Physical availability is unverified while the master is disconnected or unavailable; virtual event presses remain available.";
+    const readiness = events.map((event) => physicalReadiness(event));
+    const assigned = readiness.filter((item) => item.key !== "unassigned");
+    if (!assigned.length) return "No physical devices are assigned. Virtual event presses remain available.";
+    const responding = readiness.filter((item) => item.key === "responding").length;
+    const missing = assigned.filter((item) => item.key === "not-responding" || item.key === "not-seen").length;
+    const assignedUnverified = assigned.filter((item) => item.key === "unverified" || item.key === "not-scanned").length;
+    if (!responding && !missing) return "Physical availability is unverified until a fresh scan completes; virtual event presses remain available.";
+    return `Latest device status: ${responding} responding, ${missing} not responding, ${assignedUnverified} unverified. See Setup for each event; virtual presses remain available.`;
+  }
+
+  function isPhysicalEventResponding(event) {
+    return physicalReadinessKey(event) === "responding";
   }
 
   function renderQueue() {
@@ -1069,6 +1502,7 @@
     renderLeaderboards();
     setSaveStates();
     renderMasterControls();
+    renderSetupControls();
   }
 
   function render() {
@@ -1384,6 +1818,30 @@
       });
     });
     ui.refresh.addEventListener("click", () => loadSnapshot(false));
+    ui.setupRetryLoad.addEventListener("click", () => loadSetup());
+    ui.setupEditionName.addEventListener("input", onSetupInput);
+    ui.setupEventList.addEventListener("input", onSetupInput);
+    ui.setupEventList.addEventListener("focusin", (event) => {
+      const input = event.target.closest("[data-setup-event-id]");
+      if (!input || !setupEvent(input.dataset.setupEventId)) return;
+      state.setupSelectedEventId = input.dataset.setupEventId;
+      renderSetupSelection();
+      renderSetupDiscovery();
+    });
+    ui.setupEventList.addEventListener("click", onSetupClick);
+    ui.setupDiscoveredDevices.addEventListener("click", onSetupClick);
+    ui.setupScanAll.addEventListener("click", () => runSetupScan());
+    ui.setupSave.addEventListener("click", saveSetup);
+    ui.setupSaveBottom.addEventListener("click", saveSetup);
+    ui.setupAddEvent.addEventListener("click", () => {
+      if (!state.setupDraft || state.setupSaving) return;
+      const added = setupTools.addEvent(state.setupDraft);
+      state.setupSelectedEventId = added.eventId;
+      markSetupChanged();
+      renderSetupEvents();
+      renderSetupSelection();
+      renderSetupControls();
+    });
     ui.countdownRetry.addEventListener("click", () => countdownCoordinator.retry());
     ui.armPhysical.addEventListener("click", () => performAction(armPhysicalRun, "Run armed · waiting for the physical Start button."));
     ui.start.addEventListener("click", () => performAction(startRun, "Countdown started. Run begins at Go."));
@@ -1480,6 +1938,7 @@
   bindActions();
   loadSnapshot(false);
   loadMaster(false);
+  void loadSetup();
   void countdownCoordinator.poll();
   window.setInterval(() => loadSnapshot(true), 2000);
   window.setInterval(() => loadMaster(true), 2000);

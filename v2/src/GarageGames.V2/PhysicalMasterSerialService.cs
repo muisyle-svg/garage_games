@@ -7,11 +7,13 @@ public sealed class PhysicalMasterSerialService : BackgroundService
 {
     private readonly object _gate = new();
     private readonly SemaphoreSlim _writeGate = new(1, 1);
+    private readonly SemaphoreSlim _scanGate = new(1, 1);
     private readonly RunService _runs;
     private readonly ILogger<PhysicalMasterSerialService> _logger;
     private readonly MasterProtocolState _protocol = new();
     private SerialPort? _port;
     private CancellationTokenSource? _connectionCancellation;
+    private ScanWaiter? _pendingScan;
 
     public PhysicalMasterSerialService(RunService runs, ILogger<PhysicalMasterSerialService> logger)
     {
@@ -105,6 +107,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
             _ = Task.Run(() => ReadLoopAsync(port, connectionCancellation.Token));
         }
 
+        _runs.MarkDevicesUnverified();
         return GetSnapshot();
     }
 
@@ -115,11 +118,19 @@ public sealed class PhysicalMasterSerialService : BackgroundService
             CloseConnectionLocked();
         }
 
+        _runs.MarkDevicesUnverified();
         return GetSnapshot();
     }
 
-    public RunRecord ArmQueue(RunService runs, string queueId, bool manualOfflineOverride)
+    public async Task<RunRecord> ArmQueueAsync(RunService runs, string queueId, bool manualOfflineOverride,
+        CancellationToken cancellationToken = default)
     {
+        lock (_gate)
+        {
+            _protocol.EnsureArmAllowed();
+        }
+
+        await ScanDevicesAsync(cancellationToken);
         lock (_gate)
         {
             _protocol.EnsureArmAllowed();
@@ -127,12 +138,125 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         }
     }
 
-    public RunRecord ArmCompetitor(RunService runs, string competitorId, RunCategory category)
+    public async Task<RunRecord> ArmCompetitorAsync(RunService runs, string competitorId, RunCategory category,
+        CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
             _protocol.EnsureArmAllowed();
+        }
+
+        await ScanDevicesAsync(cancellationToken);
+        lock (_gate)
+        {
+            _protocol.EnsureArmAllowed();
             return runs.ArmCompetitor(competitorId, category);
+        }
+    }
+
+    public async Task<DeviceScanResult> ScanDevicesAsync(CancellationToken cancellationToken = default)
+    {
+        await _scanGate.WaitAsync(cancellationToken);
+        ScanWaiter? waiterToClear = null;
+        try
+        {
+            SerialPort? port;
+            ScanWaiter waiter;
+            lock (_gate)
+            {
+                port = _port?.IsOpen == true ? _port : null;
+                if (port is null)
+                {
+                    return _runs.RecordDeviceScan(false, false, []);
+                }
+
+                _protocol.EnsureArmAllowed();
+                waiter = new ScanWaiter(Guid.NewGuid().ToString("N")[..12]);
+                _pendingScan = waiter;
+                waiterToClear = waiter;
+            }
+
+            try
+            {
+                // The firmware rejects scans until it has seen a fresh controller status.
+                await SendStatusAsync(cancellationToken);
+                lock (_gate)
+                {
+                    if (!ReferenceEquals(_port, port) || !port.IsOpen)
+                    {
+                        if (ReferenceEquals(_pendingScan, waiter))
+                        {
+                            _pendingScan = null;
+                        }
+                        return _runs.RecordDeviceScan(false, false, []);
+                    }
+                }
+
+                var bytes = Encoding.ASCII.GetBytes($"GG1 SCAN {waiter.ScanId}\n");
+                await _writeGate.WaitAsync(cancellationToken);
+                try
+                {
+                    await port.BaseStream.WriteAsync(bytes.AsMemory(), cancellationToken);
+                    await port.BaseStream.FlushAsync(cancellationToken);
+                }
+                finally
+                {
+                    _writeGate.Release();
+                }
+            }
+            catch (Exception exception) when (exception is IOException or InvalidOperationException)
+            {
+                _logger.LogInformation("Physical master scan request failed ({ErrorType}).", exception.GetType().Name);
+                lock (_gate)
+                {
+                    if (ReferenceEquals(_pendingScan, waiter))
+                    {
+                        _pendingScan = null;
+                    }
+                    var stillConnected = ReferenceEquals(_port, port) && port.IsOpen;
+                    return _runs.RecordDeviceScan(stillConnected, false, []);
+                }
+            }
+
+            var timeout = Task.Delay(TimeSpan.FromSeconds(4), cancellationToken);
+            var completedTask = await Task.WhenAny(waiter.Completion.Task, timeout);
+            cancellationToken.ThrowIfCancellationRequested();
+            var doneCount = completedTask == waiter.Completion.Task
+                ? await waiter.Completion.Task
+                : -1;
+
+            DeviceScanResult scanResult;
+            var busy = doneCount == -2;
+            lock (_gate)
+            {
+                if (ReferenceEquals(_pendingScan, waiter))
+                {
+                    _pendingScan = null;
+                }
+
+                var stillConnected = ReferenceEquals(_port, port) && port.IsOpen;
+                var completed = stillConnected && doneCount >= 0 && doneCount == waiter.DeviceIds.Count;
+                scanResult = _runs.RecordDeviceScan(stillConnected, completed,
+                    completed ? waiter.DeviceIds : []);
+            }
+
+            if (busy && scanResult.Connected)
+            {
+                // Firmware asks for a fresh controller status before another scan can be accepted.
+                await SendStatusAsync(cancellationToken);
+            }
+            return scanResult;
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                if (waiterToClear is not null && ReferenceEquals(_pendingScan, waiterToClear))
+                {
+                    _pendingScan = null;
+                }
+            }
+            _scanGate.Release();
         }
     }
 
@@ -214,12 +338,18 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         }
         finally
         {
+            var connectionEnded = false;
             lock (_gate)
             {
                 if (ReferenceEquals(_port, port))
                 {
                     CloseConnectionLocked();
+                    connectionEnded = true;
                 }
+            }
+            if (connectionEnded)
+            {
+                _runs.MarkDevicesUnverified();
             }
         }
     }
@@ -235,6 +365,26 @@ public sealed class PhysicalMasterSerialService : BackgroundService
 
             try
             {
+                if (MasterProtocolCodec.TryParseScanReply(line, out var scanReply))
+                {
+                    if (_pendingScan is { } scan && string.Equals(scan.ScanId, scanReply.ScanId, StringComparison.Ordinal))
+                    {
+                        if (scanReply.Kind == "NODE" && scanReply.DeviceId is not null)
+                        {
+                            scan.DeviceIds.Add(scanReply.DeviceId);
+                        }
+                        else if (scanReply.Kind == "DONE" && scanReply.Count is int count)
+                        {
+                            scan.Completion.TrySetResult(count);
+                        }
+                        else if (scanReply.Kind == "BUSY")
+                        {
+                            scan.Completion.TrySetResult(-2);
+                        }
+                    }
+                    return;
+                }
+
                 _protocol.ProcessLine(line, (bootToken, sequence, startAllowed) =>
                     _runs.ReceivePhysicalMasterStart(bootToken, sequence, startAllowed));
             }
@@ -278,12 +428,18 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         catch (Exception exception) when (exception is IOException or InvalidOperationException)
         {
             _logger.LogInformation("Physical master status write failed ({ErrorType}).", exception.GetType().Name);
+            var connectionEnded = false;
             lock (_gate)
             {
                 if (ReferenceEquals(_port, port))
                 {
                     CloseConnectionLocked();
+                    connectionEnded = true;
                 }
+            }
+            if (connectionEnded)
+            {
+                _runs.MarkDevicesUnverified();
             }
         }
     }
@@ -294,6 +450,8 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         var cancellation = _connectionCancellation;
         _port = null;
         _connectionCancellation = null;
+        _pendingScan?.Completion.TrySetResult(-1);
+        _pendingScan = null;
         _protocol.Reset();
         cancellation?.Cancel();
         if (port is not null)
@@ -308,5 +466,12 @@ public sealed class PhysicalMasterSerialService : BackgroundService
             port.Dispose();
         }
         cancellation?.Dispose();
+    }
+
+    private sealed class ScanWaiter(string scanId)
+    {
+        public string ScanId { get; } = scanId;
+        public HashSet<string> DeviceIds { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public TaskCompletionSource<int> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }

@@ -30,6 +30,7 @@
       <button id="tab-on-deck" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-on-deck" tabindex="-1">On deck</button>
       <button id="tab-history" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1">Run history</button>
       <button id="tab-leaderboards" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-leaderboards" tabindex="-1">Leaderboards</button>
+      <button id="tab-setup" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-setup" tabindex="-1">Setup</button>
     </div>
 
     <section id="panel-scorekeeping" class="tab-panel" role="tabpanel" aria-labelledby="tab-scorekeeping" tabindex="0">
@@ -235,6 +236,48 @@
       </section>
     </section>
 
+    <section id="panel-setup" class="tab-panel" role="tabpanel" aria-labelledby="tab-setup" tabindex="0" hidden>
+      <section class="sheet-card setup-panel" aria-labelledby="setup-heading">
+        <div class="card-heading">
+          <div><p class="mvp-kicker">Edition configuration</p><h2 id="setup-heading">Events & hardware</h2></div>
+          <span id="setup-event-count" class="small-note">— events</span>
+        </div>
+        <p class="setup-intro">Name the edition and configure its event roster. Physical availability is unverified until a fresh scan completes. Virtual event presses remain available when hardware is missing or unassigned.</p>
+        <div id="setup-load-state" class="setup-load-state" role="status" aria-live="polite">Loading setup…</div>
+        <button id="setup-retry-load" class="button button-quiet setup-retry" type="button" hidden>Retry loading setup</button>
+        <div id="setup-content" hidden>
+          <div class="setup-toolbar">
+            <label class="setup-edition-name" for="setup-edition-name">Edition name
+              <input id="setup-edition-name" type="text" maxlength="120" autocomplete="off">
+            </label>
+            <div class="setup-toolbar-actions">
+              <button id="setup-scan-all" class="button button-secondary" type="button" disabled>Scan physical devices</button>
+              <button id="setup-save" class="button button-primary" type="button" disabled>Save setup</button>
+            </div>
+          </div>
+          <p id="setup-scan-summary" class="setup-scan-summary" role="status" aria-live="polite">Physical availability is unverified until a fresh scan completes.</p>
+          <section class="setup-discovery" aria-labelledby="setup-discovery-heading">
+            <div class="setup-subheading">
+              <h3 id="setup-discovery-heading">Discovered hardware</h3>
+              <span id="setup-selected-event-label" class="small-note">Select an event to assign a device.</span>
+            </div>
+            <p id="setup-discovery-help" class="small-note">Run a fresh scan, select an event below, then select a discovered device. You can also enter its 12-hex MAC address manually.</p>
+            <div id="setup-discovered-devices" class="setup-discovered-devices"><span class="small-note">No fresh scan results.</span></div>
+          </section>
+          <div class="setup-list-heading">
+            <div><p class="mvp-kicker">Event stations</p><h3>Configured events</h3></div>
+            <button id="setup-add-event" class="button button-quiet" type="button">Add event</button>
+          </div>
+          <p id="setup-validation" class="setup-validation" role="status" aria-live="polite"></p>
+          <div id="setup-event-list" class="setup-event-list"></div>
+          <div class="setup-footer">
+            <span id="setup-save-state" class="small-note">Changes save when you choose Save setup.</span>
+            <button id="setup-save-bottom" class="button button-primary" type="button" disabled>Save setup</button>
+          </div>
+        </div>
+      </section>
+    </section>
+
     <details class="danger-tools">
       <summary>Testing tools / Danger zone</summary>
       <div class="danger-tools-content">
@@ -255,6 +298,7 @@
 
   <footer class="mvp-footer"><span>Garage Games</span><span>Local scorekeeper · changes save on this computer</span></footer>
   <script src="mvp-scorekeeper-time.js" defer></script>
+  <script src="mvp-scorekeeper-setup.js" defer></script>
   <script src="mvp-scorekeeper-countdown.js" defer></script>
   <script src="mvp-scorekeeper-master.js" defer></script>
   <script src="mvp-scorekeeper-run-actions.js" defer></script>

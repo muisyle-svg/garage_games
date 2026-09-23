@@ -64,24 +64,53 @@ public sealed class RunStore : IDisposable
     public string DataDirectory { get; }
     public string DatabasePath { get; }
 
+    public EditionDefinition LoadOrInitializeActiveEdition(EditionDefinition fallback)
+    {
+        ThrowIfDisposed();
+        EditionDefinition.Validate(fallback);
+        using (var connection = OpenConnection())
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT value FROM meta WHERE key = 'active_edition_json'";
+            if (command.ExecuteScalar() is string storedJson)
+            {
+                var stored = Deserialize<EditionDefinition>(storedJson, "active edition configuration");
+                EditionDefinition.Validate(stored, "stored active edition");
+                return stored;
+            }
+        }
+
+        SaveActiveEdition(fallback);
+        return fallback;
+    }
+
+    public void SaveActiveEdition(EditionDefinition edition)
+    {
+        ThrowIfDisposed();
+        EditionDefinition.Validate(edition);
+        var json = JsonSerializer.Serialize(edition, JsonDefaults.Options);
+        ExecuteTransaction((connection, transaction) =>
+        {
+            SetMetaValue(connection, transaction, "active_edition_json", json);
+            EnsureDeviceRows(connection, transaction, edition.Events);
+        });
+    }
+
     public void EnsureDevices(EditionDefinition edition)
+    {
+        ThrowIfDisposed();
+        EditionDefinition.Validate(edition);
+        ExecuteTransaction((connection, transaction) =>
+            EnsureDeviceRows(connection, transaction, edition.Events));
+    }
+
+    public void SaveDevices(IReadOnlyCollection<DeviceRecord> devices)
     {
         ExecuteTransaction((connection, transaction) =>
         {
-            foreach (var eventDefinition in edition.Events)
+            foreach (var device in devices)
             {
-                using var command = connection.CreateCommand();
-                command.Transaction = transaction;
-                command.CommandText = """
-                    INSERT INTO devices(device_id, event_id, availability, last_seen_at, led, last_error)
-                    VALUES($device_id, $event_id, $availability, NULL, $led, NULL)
-                    ON CONFLICT(device_id) DO UPDATE SET event_id = excluded.event_id
-                    """;
-                command.Parameters.AddWithValue("$device_id", eventDefinition.DeviceId);
-                command.Parameters.AddWithValue("$event_id", eventDefinition.EventId);
-                command.Parameters.AddWithValue("$availability", DeviceAvailability.Online.ToString());
-                command.Parameters.AddWithValue("$led", LedState.Ready.ToString());
-                command.ExecuteNonQuery();
+                UpsertDevice(connection, transaction, device);
             }
         });
     }
@@ -477,17 +506,8 @@ public sealed class RunStore : IDisposable
                 command.ExecuteNonQuery();
             }
 
-            foreach (var eventDefinition in edition.Events)
-            {
-                using var command = connection.CreateCommand();
-                command.Transaction = transaction;
-                command.CommandText = "INSERT INTO devices(device_id, event_id, availability, last_seen_at, led, last_error) VALUES($device_id, $event_id, $availability, NULL, $led, NULL)";
-                command.Parameters.AddWithValue("$device_id", eventDefinition.DeviceId);
-                command.Parameters.AddWithValue("$event_id", eventDefinition.EventId);
-                command.Parameters.AddWithValue("$availability", DeviceAvailability.Online.ToString());
-                command.Parameters.AddWithValue("$led", LedState.Ready.ToString());
-                command.ExecuteNonQuery();
-            }
+            SetMetaValue(connection, transaction, "active_edition_json", JsonSerializer.Serialize(edition, JsonDefaults.Options));
+            EnsureDeviceRows(connection, transaction, edition.Events);
         });
     }
 
@@ -618,6 +638,31 @@ public sealed class RunStore : IDisposable
         command.Parameters.AddWithValue("$led", device.Led.ToString());
         command.Parameters.AddWithValue("$last_error", ValueOrNull(device.LastError));
         command.ExecuteNonQuery();
+    }
+
+    private static void EnsureDeviceRows(SqliteConnection connection, SqliteTransaction transaction,
+        IEnumerable<EventDefinition> events)
+    {
+        foreach (var eventDefinition in events)
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT INTO devices(device_id, event_id, availability, last_seen_at, led, last_error)
+                VALUES($device_id, $event_id, $availability, NULL, $led, NULL)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    event_id = excluded.event_id,
+                    availability = excluded.availability,
+                    last_seen_at = NULL,
+                    led = excluded.led,
+                    last_error = NULL
+                """;
+            command.Parameters.AddWithValue("$device_id", eventDefinition.DeviceId);
+            command.Parameters.AddWithValue("$event_id", eventDefinition.EventId);
+            command.Parameters.AddWithValue("$availability", DeviceAvailability.Unverified.ToString());
+            command.Parameters.AddWithValue("$led", LedState.Ready.ToString());
+            command.ExecuteNonQuery();
+        }
     }
 
     private static long InsertMessage(SqliteConnection connection, SqliteTransaction transaction, MessageRecord message)
