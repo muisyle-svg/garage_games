@@ -48,13 +48,68 @@
     return start === null || finish === null ? null : finish - start;
   }
 
+  function elapsedMsForDraft(originalElapsedMs, touched, value, durationSeconds) {
+    if (!touched) return originalElapsedMs === null || originalElapsedMs === undefined ? null : Number(originalElapsedMs);
+    if (value === "") return null;
+    return elapsedMsFromRemainingSeconds(value, durationSeconds);
+  }
+
+  function previewEventScore(result, scoring = {}) {
+    if (result?.scoreOverride !== null && result?.scoreOverride !== undefined) {
+      const override = Number(result.scoreOverride);
+      return Number.isFinite(override) ? override : 0;
+    }
+    if (scoring.manualEventPoints) return 0;
+    if (result?.status !== "completed" || result.startElapsedMs === null || result.startElapsedMs === undefined ||
+        result.finishElapsedMs === null || result.finishElapsedMs === undefined) return 0;
+
+    const durationMs = Number(result.finishElapsedMs) - Number(result.startElapsedMs);
+    const decayEverySeconds = Number(scoring.decayEverySeconds ?? 5);
+    const basePoints = Number(scoring.basePoints ?? 50);
+    const decayPoints = Number(scoring.decayPoints ?? 5);
+    const minimumPoints = Number(scoring.minimumPoints ?? 25);
+    if (!Number.isFinite(durationMs) || durationMs < 0 || !Number.isFinite(decayEverySeconds) || decayEverySeconds <= 0 ||
+        !Number.isFinite(basePoints) || !Number.isFinite(decayPoints) || !Number.isFinite(minimumPoints)) return 0;
+
+    const fullDecaySteps = Math.floor(durationMs / (decayEverySeconds * 1000));
+    return Math.max(minimumPoints, basePoints - fullDecaySteps * decayPoints);
+  }
+
+  function eventScoreDraftView({
+    scoreTouched = false,
+    scoreValue = "",
+    timingTouched = false,
+    previewScore = 0,
+    persistedScore = 0
+  } = {}) {
+    const preview = Number(previewScore);
+    const safePreview = Number.isFinite(preview) && preview >= 0 ? preview : 0;
+    if (scoreTouched) {
+      if (scoreValue === "") return { inputValue: "", totalPoints: safePreview };
+      const typed = Number(scoreValue);
+      return {
+        inputValue: String(scoreValue),
+        totalPoints: Number.isFinite(typed) && typed >= 0 ? typed : 0
+      };
+    }
+    if (timingTouched) return { inputValue: String(safePreview), totalPoints: safePreview };
+    const persisted = Number(persistedScore ?? 0);
+    return {
+      inputValue: String(persistedScore ?? 0),
+      totalPoints: Number.isFinite(persisted) && persisted >= 0 ? persisted : 0
+    };
+  }
+
   const api = Object.freeze({
     parseClockTimeToSeconds,
     formatClockMs,
     millisecondsFromClockTime,
     elapsedMsFromRemainingSeconds,
     remainingSecondsFromElapsedMs,
-    durationMsFromRemainingSeconds
+    durationMsFromRemainingSeconds,
+    elapsedMsForDraft,
+    previewEventScore,
+    eventScoreDraftView
   });
 
   if (typeof module !== "undefined" && module.exports) module.exports = api;

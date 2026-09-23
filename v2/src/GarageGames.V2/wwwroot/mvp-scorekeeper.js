@@ -411,13 +411,14 @@
 
   function displayedValue(run, event, field) {
     const draft = state.drafts.get(run.id)?.get(event.eventId);
+    if (field === "score") return eventScoreDraftView(run, event).inputValue;
     if (draft?.touched.has(field)) return draft[field];
     if (field === "start" || field === "finish") {
       const elapsed = field === "start" ? event.startElapsedMs : event.finishElapsedMs;
       const remaining = scorekeeperTime.remainingSecondsFromElapsedMs(elapsed, runDurationSeconds(run));
       return remaining === null ? "" : formatSeconds(remaining * 1000);
     }
-    return String(event.scoreOverride ?? event.score ?? 0);
+    return "";
   }
 
   function currentElapsedMs(run) {
@@ -427,13 +428,16 @@
   }
 
   function rowTiming(row, run) {
-    const start = parsedSeconds(row.querySelector('[data-field="start"]')?.value);
-    const finish = parsedSeconds(row.querySelector('[data-field="finish"]')?.value);
+    const event = runEvents(run).find((item) => item.eventId === row.dataset.eventId);
     const durationCell = row.querySelector(".duration-cell");
     const statusCell = row.querySelector(".event-status");
     const durationSeconds = runDurationSeconds(run);
-    const startMs = scorekeeperTime.elapsedMsFromRemainingSeconds(start, durationSeconds);
-    const finishMs = scorekeeperTime.elapsedMsFromRemainingSeconds(finish, durationSeconds);
+    const startMs = event
+      ? eventElapsedMsForDraft(run, event, "start")
+      : scorekeeperTime.elapsedMsFromRemainingSeconds(parsedSeconds(row.querySelector('[data-field="start"]')?.value), durationSeconds);
+    const finishMs = event
+      ? eventElapsedMsForDraft(run, event, "finish")
+      : scorekeeperTime.elapsedMsFromRemainingSeconds(parsedSeconds(row.querySelector('[data-field="finish"]')?.value), durationSeconds);
     let duration = null;
     if (startMs !== null && finishMs !== null) duration = finishMs - startMs;
     else if (startMs !== null && run?.status === "active") duration = currentElapsedMs(run) - startMs;
@@ -445,14 +449,54 @@
     }
   }
 
-  function displayedScore(run, event) {
+  function eventElapsedMsForDraft(run, event, field) {
     const draft = state.drafts.get(run.id)?.get(event.eventId);
-    if (draft?.touched.has("score")) {
-      if (draft.score === "") return 0;
-      const score = Number(draft.score);
-      return Number.isFinite(score) && score >= 0 ? score : 0;
+    const elapsedField = field === "start" ? "startElapsedMs" : "finishElapsedMs";
+    return scorekeeperTime.elapsedMsForDraft(
+      event[elapsedField],
+      Boolean(draft?.touched.has(field)),
+      draft?.[field],
+      runDurationSeconds(run)
+    );
+  }
+
+  function previewEventScore(run, event) {
+    const startElapsedMs = eventElapsedMsForDraft(run, event, "start");
+    const finishElapsedMs = eventElapsedMsForDraft(run, event, "finish");
+    const draft = state.drafts.get(run.id)?.get(event.eventId);
+    const timingTouched = draft?.touched.has("start") || draft?.touched.has("finish");
+    let scoreOverride = event.scoreOverride;
+    if (draft?.touched.has("score")) scoreOverride = draft.score === "" ? null : Number(draft.score);
+    let status = event.status;
+    if (timingTouched) {
+      status = startElapsedMs !== null && finishElapsedMs !== null
+        ? "completed"
+        : startElapsedMs !== null ? "active" : "pending";
     }
-    return Number(event.score || 0);
+    return scorekeeperTime.previewEventScore({
+      status,
+      startElapsedMs,
+      finishElapsedMs,
+      scoreOverride
+    }, run.edition?.scoring);
+  }
+
+  function eventScoreDraftView(run, event) {
+    const draft = state.drafts.get(run.id)?.get(event.eventId);
+    const scoreTouched = Boolean(draft?.touched.has("score"));
+    const timingTouched = Boolean(draft?.touched.has("start") || draft?.touched.has("finish"));
+    const needsPreview = timingTouched || (scoreTouched && draft.score === "");
+    return scorekeeperTime.eventScoreDraftView({
+      scoreTouched,
+      scoreValue: draft?.score,
+      timingTouched,
+      previewScore: needsPreview ? previewEventScore(run, event) : 0,
+      persistedScore: event.scoreOverride ?? event.score ?? 0
+    });
+  }
+
+  function displayedScore(run, event) {
+    return eventScoreDraftView(run, event).totalPoints;
   }
 
   function displayedBonus(run) {
@@ -1185,7 +1229,18 @@
       ? state.snapshot.currentRun
       : state.snapshot?.history?.find((item) => item.id === runId);
     const row = input.closest("tr");
-    if (row && run) rowTiming(row, run);
+    if (row && run) {
+      rowTiming(row, run);
+      const draft = state.drafts.get(runId)?.get(eventId);
+      if ((field === "start" || field === "finish") && !draft?.touched.has("score")) {
+        const eventResult = runEvents(run).find((item) => item.eventId === eventId);
+        const scoreInput = row.querySelector('input[data-field="score"]');
+        if (eventResult && scoreInput) {
+          const value = displayedValue(run, eventResult, "score");
+          if (scoreInput.value !== value) scoreInput.value = value;
+        }
+      }
+    }
     if (run) updateTableTotal(input.closest("#current-event-body") ? "current" : "history", run);
     setSaveStates();
   }

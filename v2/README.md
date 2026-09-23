@@ -92,8 +92,12 @@ and sends milliseconds to the backend. Completing all
 regular events freezes the timer and leaves the run marked finished but
 unrecorded until **Record result**. The operator can also finish a partial run
 and choose whether to record it. Event times and points remain editable before
-or after recording. Event points are calculated automatically, with editable
-overrides and bonus scoring.
+or after recording. When correcting a stopped or recorded run, missing event
+timestamps may be added anywhere within the run limit; the saved elapsed time
+extends through the latest corrected event. Points preview automatically from
+event times using the edition's scoring rules unless manually overridden;
+clearing a points override restores automatic scoring. Run bonus scoring is
+also editable.
 
 ## Physical master smoke test
 

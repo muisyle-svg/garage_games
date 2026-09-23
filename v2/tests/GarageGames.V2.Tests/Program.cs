@@ -15,6 +15,9 @@ var tests = new (string Name, Action Run)[]
     ("timeout autosaves and releases next competitor", MvpTimeoutAndNextRun),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
     ("MVP timing fields clear and manual score overrides add to total", MvpEditableScorecard),
+    ("recorded exhibition correction extends timeline and can be undone", RecordedExhibitionCorrectionTimeline),
+    ("early-finished correction extends timeline while explicit and invalid times remain enforced", FinishedCorrectionTimeline),
+    ("armed and paused current corrections remain within current elapsed time", UnfinishedCurrentCorrectionTimelineLimits),
     ("completed event scores and general bonus persist through historical edits", AutomatedScoreAndBonusPersistence),
     ("recording atomically promotes and persists the next on-deck competitor", RecordPromotesNextCompetitor),
     ("reordering on-deck queue persists the requested order", QueueReorderPersists),
@@ -422,6 +425,134 @@ static void MvpEditableScorecard()
     Assert.Equal(null, historical.Events.Single(e => e.EventId == "event-01").FinishElapsedMs);
     Assert.Equal(EventStatus.Pending, historical.Events.Single(e => e.EventId == "event-01").Status);
     Assert.Equal(12, historical.TotalPoints);
+}
+
+static void RecordedExhibitionCorrectionTimeline()
+{
+    using var h = NewHarness();
+    var run = h.ArmAndStart(RunCategory.Exhibition);
+    var finished = h.Service.Finish();
+    Assert.Equal(0L, finished.ActiveElapsedMs);
+    var recorded = h.Service.Record();
+
+    var corrected = h.Service.EditHistoricalRun(recorded.Id, new EditRunRequest
+    {
+        ExpectedRevision = recorded.Revision,
+        Reason = "Add the missing exhibition event timing",
+        Events = [new EventEditRequest { EventId = "event-01", StartElapsedMs = 90_000, FinishElapsedMs = 120_000 }]
+    });
+
+    var result = corrected.Events.Single(e => e.EventId == "event-01");
+    Assert.Equal(120_000L, corrected.ActiveElapsedMs);
+    Assert.Equal(30_000L, result.DurationMs);
+    Assert.Equal(25, result.Score);
+    Assert.Equal(120_000L, h.Store.Load().Runs.Single(r => r.Id == run.Id).ActiveElapsedMs);
+    Assert.Equal(1, h.Store.Load().Edits.Count(e => e.RunId == run.Id));
+
+    var edit = h.Service.GetOperatorSnapshot().Edits.Single(e => e.RunId == run.Id);
+    var undone = h.Service.UndoHistoricalEdit(run.Id, edit.Id, corrected.Revision, "Undo missing event timing");
+    Assert.Equal(0L, undone.ActiveElapsedMs);
+    Assert.Equal(EventStatus.Pending, undone.Events.Single(e => e.EventId == "event-01").Status);
+    Assert.Equal(null, undone.Events.Single(e => e.EventId == "event-01").StartElapsedMs);
+    Assert.Equal(0L, h.Store.Load().Runs.Single(r => r.Id == run.Id).ActiveElapsedMs);
+    Assert.Equal(edit.Id, h.Store.Load().Edits.Single(e => e.UndoneEditId == edit.Id).UndoneEditId);
+}
+
+static void FinishedCorrectionTimeline()
+{
+    using var h = NewHarness();
+    var run = h.ArmAndStart(RunCategory.Exhibition);
+
+    var live = h.Service.GetOperatorSnapshot().CurrentRun!;
+    Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = live.Revision,
+        Reason = "Active runs cannot extend their current timeline",
+        Events = [new EventEditRequest { EventId = "event-01", StartElapsedMs = 90_000, FinishElapsedMs = 120_000 }]
+    }));
+    Assert.Equal(0L, h.Service.GetOperatorSnapshot().CurrentRun!.ActiveElapsedMs);
+
+    var finished = h.Service.Finish();
+    var corrected = h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = finished.Revision,
+        Reason = "Correct event timing after early finish",
+        Events = [new EventEditRequest { EventId = "event-01", StartElapsedMs = 90_000, FinishElapsedMs = 120_000 }]
+    });
+    Assert.Equal(RunStatus.Finished, corrected.Status);
+    Assert.Equal(120_000L, corrected.ActiveElapsedMs);
+    Assert.Equal(25, corrected.Events.Single(e => e.EventId == "event-01").Score);
+    Assert.Equal(120_000L, h.Store.Load().Runs.Single(r => r.Id == run.Id).ActiveElapsedMs);
+    Assert.Equal(1, h.Store.Load().Edits.Count(e => e.RunId == run.Id));
+
+    var edit = h.Service.GetOperatorSnapshot().Edits.Single(e => e.RunId == run.Id);
+    var undone = h.Service.UndoCurrentEdit(edit.Id, corrected.Revision, "Undo finished-run timing correction");
+    Assert.Equal(0L, undone.ActiveElapsedMs);
+    Assert.Equal(EventStatus.Pending, undone.Events.Single(e => e.EventId == "event-01").Status);
+    Assert.Equal(0L, h.Store.Load().Runs.Single(r => r.Id == run.Id).ActiveElapsedMs);
+    Assert.Equal(2, h.Store.Load().Edits.Count(e => e.RunId == run.Id));
+
+    var afterUndo = h.Service.GetOperatorSnapshot().CurrentRun!;
+    Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = afterUndo.Revision,
+        Reason = "Explicit elapsed time shorter than event finish must fail",
+        ActiveElapsedMs = 110_000,
+        Events = [new EventEditRequest { EventId = "event-01", StartElapsedMs = 90_000, FinishElapsedMs = 120_000 }]
+    }));
+    Assert.Equal(0L, h.Service.GetOperatorSnapshot().CurrentRun!.ActiveElapsedMs);
+
+    var explicitDuration = h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = afterUndo.Revision,
+        Reason = "Set elapsed time explicitly",
+        ActiveElapsedMs = 150_000,
+        Events = [new EventEditRequest { EventId = "event-01", StartElapsedMs = 90_000, FinishElapsedMs = 120_000 }]
+    });
+    Assert.Equal(150_000L, explicitDuration.ActiveElapsedMs);
+    Assert.Equal(25, explicitDuration.Events.Single(e => e.EventId == "event-01").Score);
+
+    Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = explicitDuration.Revision,
+        Reason = "Reject event timing beyond edition duration",
+        Events = [new EventEditRequest { EventId = "event-02", StartElapsedMs = 299_000, FinishElapsedMs = 300_001 }]
+    }));
+    Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = explicitDuration.Revision,
+        Reason = "Reject reversed event timing",
+        Events = [new EventEditRequest { EventId = "event-02", StartElapsedMs = 170_000, FinishElapsedMs = 160_000 }]
+    }));
+    Assert.Equal(150_000L, h.Service.GetOperatorSnapshot().CurrentRun!.ActiveElapsedMs);
+}
+
+static void UnfinishedCurrentCorrectionTimelineLimits()
+{
+    using (var h = NewHarness())
+    {
+        var armed = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+        Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(new EditRunRequest
+        {
+            ExpectedRevision = armed.Revision,
+            Reason = "Armed run timestamps cannot advance the timeline",
+            Events = [new EventEditRequest { EventId = "event-01", StartElapsedMs = 90_000, FinishElapsedMs = 120_000 }]
+        }));
+        Assert.Equal(0L, h.Service.GetOperatorSnapshot().CurrentRun!.ActiveElapsedMs);
+    }
+
+    using (var h = NewHarness())
+    {
+        h.ArmAndStart();
+        var paused = h.Service.Pause();
+        Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(new EditRunRequest
+        {
+            ExpectedRevision = paused.Revision,
+            Reason = "Paused run timestamps cannot advance the timeline",
+            Events = [new EventEditRequest { EventId = "event-01", StartElapsedMs = 90_000, FinishElapsedMs = 120_000 }]
+        }));
+        Assert.Equal(0L, h.Service.GetOperatorSnapshot().CurrentRun!.ActiveElapsedMs);
+    }
 }
 
 static void AutomatedScoreAndBonusPersistence()

@@ -1086,6 +1086,10 @@ public sealed class RunService
 
             var candidate = Clone(run);
             ApplyEdit(candidate, request);
+            if (IsStoppedHistoricalStatus(run.Status))
+            {
+                ExtendStoppedCorrectionTimeline(candidate, request);
+            }
             ValidateHistoricalCandidate(candidate);
             HandleOfficialConflict(run, candidate, request.ReplaceExistingOfficial, out var replaced);
 
@@ -1132,6 +1136,10 @@ public sealed class RunService
 
             var candidate = Clone(run);
             ApplyEdit(candidate, request);
+            if (run.Status == RunStatus.Finished)
+            {
+                ExtendStoppedCorrectionTimeline(candidate, request);
+            }
             ValidateLiveCandidate(candidate);
             HandleOfficialConflict(run, candidate, request.ReplaceExistingOfficial, out var replaced);
 
@@ -1193,8 +1201,10 @@ public sealed class RunService
             var before = DeserializeRun(edit.BeforeJson);
             var candidate = Clone(run);
             ApplyInverseFields(candidate, before, after);
+            candidate.ActiveElapsedMs = run.Status == RunStatus.Finished
+                ? before.ActiveElapsedMs
+                : run.ActiveElapsedMs;
             ValidateLiveCandidate(candidate);
-            candidate.ActiveElapsedMs = run.ActiveElapsedMs;
             candidate.LastAcceptedInputElapsedMs = run.LastAcceptedInputElapsedMs;
             candidate.SupersedesRunId = run.SupersedesRunId;
             candidate.SupersededByRunId = run.SupersededByRunId;
@@ -1662,6 +1672,42 @@ public sealed class RunService
             }
             result.Score = ScoreCalculator.Calculate(result, candidate.Edition.Scoring);
         }
+    }
+
+    private static bool IsStoppedHistoricalStatus(RunStatus status) =>
+        status is RunStatus.Finished or RunStatus.Completed or RunStatus.TimedOut or RunStatus.Aborted or RunStatus.Superseded;
+
+    private static void ExtendStoppedCorrectionTimeline(RunRecord candidate, EditRunRequest request)
+    {
+        if (request.ActiveElapsedMs is not null)
+        {
+            return;
+        }
+
+        var timedEventIds = request.Events
+            .Where(edit => edit.StartElapsedMs is not null || edit.ClearStartElapsedMs ||
+                edit.FinishElapsedMs is not null || edit.ClearFinishElapsedMs || edit.DurationMs is not null)
+            .Select(edit => edit.EventId)
+            .ToHashSet(StringComparer.Ordinal);
+        if (timedEventIds.Count == 0)
+        {
+            return;
+        }
+
+        var latestCorrectedElapsed = candidate.Events
+            .Where(result => timedEventIds.Contains(result.EventId))
+            .SelectMany(result => new long?[] { result.StartElapsedMs, result.FinishElapsedMs })
+            .Where(timestamp => timestamp is not null)
+            .Select(timestamp => timestamp!.Value)
+            .DefaultIfEmpty(candidate.ActiveElapsedMs)
+            .Max();
+        if (latestCorrectedElapsed <= candidate.ActiveElapsedMs)
+        {
+            return;
+        }
+
+        var durationLimitMilliseconds = candidate.Edition.DurationLimitSeconds * 1000L;
+        candidate.ActiveElapsedMs = Math.Min(latestCorrectedElapsed, durationLimitMilliseconds);
     }
 
     private void ValidateLiveCandidate(RunRecord candidate)
