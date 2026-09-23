@@ -37,6 +37,8 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddSingleton(store);
 builder.Services.AddSingleton<IMonotonicClock>(clock);
 builder.Services.AddSingleton(service);
+builder.Services.AddSingleton<PhysicalMasterSerialService>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<PhysicalMasterSerialService>());
 builder.Services.AddHostedService<RunCheckpointHostedService>();
 builder.WebHost.UseUrls(urls);
 
@@ -66,6 +68,11 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok", simulationMode }));
+app.MapGet("/api/master", (PhysicalMasterSerialService master) => Results.Ok(master.GetSnapshot()));
+app.MapPost("/api/master/connect", (ConnectMasterRequest request, PhysicalMasterSerialService master) =>
+    Results.Ok(master.Connect(request.Port)));
+app.MapPost("/api/master/disconnect", (PhysicalMasterSerialService master) =>
+    Results.Ok(master.Disconnect()));
 var trayShutdownToken = Environment.GetEnvironmentVariable("GARAGE_GAMES_V2_SHUTDOWN_TOKEN");
 if (!string.IsNullOrWhiteSpace(trayShutdownToken))
 {
@@ -126,13 +133,12 @@ app.MapPost("/api/queue/reorder", (ReorderQueueRequest request, RunService runs)
     runs.ReorderQueue(request.QueueIds);
     return Results.Ok(runs.GetOperatorSnapshot(simulationMode));
 });
-app.MapPost("/api/queue/{queueId}/arm", (string queueId, ArmRequest request, RunService runs) =>
-    Results.Ok(runs.Arm(queueId, request.ManualOfflineOverride)));
+app.MapPost("/api/queue/{queueId}/arm", (string queueId, ArmRequest request, RunService runs, PhysicalMasterSerialService master) =>
+    Results.Ok(master.ArmQueue(runs, queueId, request.ManualOfflineOverride)));
 
-app.MapPost("/api/run/start", (RunService runs) =>
-    simulationMode ? Results.Ok(runs.StartMaster()) : Results.Problem("Physical master transport is not implemented in this build; virtual start is disabled in hardware mode.", statusCode: StatusCodes.Status501NotImplemented));
-app.MapPost("/api/run/arm", (StartCompetitorRunRequest request, RunService runs) =>
-    Results.Ok(runs.ArmCompetitor(request.CompetitorId, request.Category)));
+app.MapPost("/api/run/start", (RunService runs, PhysicalMasterSerialService master) => Results.Ok(master.StartVirtual(runs)));
+app.MapPost("/api/run/arm", (StartCompetitorRunRequest request, RunService runs, PhysicalMasterSerialService master) =>
+    Results.Ok(master.ArmCompetitor(runs, request.CompetitorId, request.Category)));
 app.MapPost("/api/run/pause", (RunService runs) => Results.Ok(runs.Pause()));
 app.MapPost("/api/run/resume", (RunService runs) => Results.Ok(runs.Resume()));
 app.MapPost("/api/run/finish", (RunService runs) => Results.Ok(runs.Finish()));

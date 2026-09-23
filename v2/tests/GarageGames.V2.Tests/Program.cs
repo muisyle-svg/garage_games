@@ -6,6 +6,9 @@ var tests = new (string Name, Action Run)[]
 {
     ("automatic event-score cutoffs", ScoreBoundaries),
     ("pause freezes time and timeout precedence", PauseAndTimeout),
+    ("physical master protocol validates boot tokens and SPEED interlock", MasterProtocolAndSpeedInterlock),
+    ("physical master start is durable, deduplicated, and consumes its on-deck item", PhysicalMasterStartDurabilityAndQueue),
+    ("physical master status follows run countdown", PhysicalMasterStatusCountdown),
     ("timeout autosaves and releases next competitor", MvpTimeoutAndNextRun),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
     ("MVP timing fields clear and manual score overrides add to total", MvpEditableScorecard),
@@ -95,6 +98,114 @@ static void PauseAndTimeout()
 
     var late = h.Send(run, "station-01", "event-press", "after-timeout");
     Assert.Equal(MessageDisposition.TimedOut, late.Disposition);
+}
+
+static void MasterProtocolAndSpeedInterlock()
+{
+    var protocol = new MasterProtocolState();
+    var starts = new List<(string BootToken, ulong Sequence, bool Allowed)>();
+    InputResult Receive(string bootToken, ulong sequence, bool allowed)
+    {
+        starts.Add((bootToken, sequence, allowed));
+        return new InputResult(MessageDisposition.Accepted, "test", null);
+    }
+
+    Assert.Equal(false, protocol.ProcessLine("serial debug: ready", Receive));
+    Assert.Equal(false, protocol.ProcessLine("GG1 HELLO token/invalid", Receive));
+    Assert.Equal(true, protocol.ProcessLine("GG1 HELLO boot_A-1", Receive));
+    Assert.Equal(true, protocol.ProcessLine("GG1 START older_boot 4", Receive));
+    Assert.Equal(0, starts.Count);
+    Assert.Equal(true, protocol.ProcessLine("GG1 MODE SPEED", Receive));
+    Assert.Equal(MasterMode.Speed, protocol.Mode);
+    Assert.Throws<CommandException>(protocol.EnsureArmAllowed);
+    Assert.Equal(true, protocol.ProcessLine("GG1 START boot_A-1 5", Receive));
+    Assert.Equal(("boot_A-1", 5UL, false), starts.Single());
+    Assert.Equal("GG1 START boot_A-1 5", protocol.LastMessage);
+    Assert.Equal(false, protocol.ProcessLine($"GG1 START boot_A-1 {new string('9', 140)}", Receive));
+    Assert.Equal(true, protocol.ProcessLine("GG1 MODE IDLE", Receive));
+    protocol.EnsureArmAllowed();
+    Assert.Equal("GG1 STATUS ACTIVE 12", MasterProtocolCodec.FormatStatus(new MasterRunStatus("ACTIVE", 12)));
+
+    using var h = NewHarness();
+    var queueId = h.Service.GetOperatorSnapshot().Queue.Single().Id;
+    h.Service.Arm(queueId);
+    var speedInterlock = new MasterProtocolState();
+    speedInterlock.ProcessLine("GG1 HELLO speed-test", Receive);
+    speedInterlock.ProcessLine("GG1 MODE SPEED", Receive);
+    InputResult? physicalResult = null;
+    speedInterlock.ProcessLine("GG1 START speed-test 1", (boot, sequence, allowed) =>
+    {
+        physicalResult = h.Service.ReceivePhysicalMasterStart(boot, sequence, allowed);
+        return physicalResult;
+    });
+    Assert.Equal(MessageDisposition.InvalidSignal, physicalResult!.Disposition);
+    Assert.Equal(RunStatus.Armed, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+    Assert.Throws<CommandException>(() => speedInterlock.EnsureArmAllowed());
+    speedInterlock.ProcessLine("GG1 MODE IDLE", Receive);
+    speedInterlock.EnsureArmAllowed();
+    Assert.Equal(RunStatus.Active, h.Service.StartMaster().Status);
+}
+
+static void PhysicalMasterStartDurabilityAndQueue()
+{
+    var path = NewPath();
+    var queueId = "";
+    try
+    {
+        using (var store = new RunStore(path))
+        {
+            var clock = new TestClock();
+            var service = new RunService(store, MakeEdition(), clock);
+            var competitor = service.AddCompetitor("Physical master competitor");
+            queueId = service.AddToQueue(competitor.Id, RunCategory.Official).Id;
+            var nextCompetitor = service.AddCompetitor("Next on-deck competitor");
+            service.AddToQueue(nextCompetitor.Id, RunCategory.Official);
+            service.ArmCompetitor(competitor.Id, RunCategory.Official);
+
+            var accepted = service.ReceivePhysicalMasterStart("boot-token-1", 8, startAllowed: true);
+            Assert.Equal(MessageDisposition.Accepted, accepted.Disposition);
+            Assert.Equal(RunStatus.Active, accepted.Run!.Status);
+            Assert.Equal(1, service.GetOperatorSnapshot().Queue.Count);
+            Assert.Equal(nextCompetitor.Id, service.GetOperatorSnapshot().Queue.Single().CompetitorId);
+            service.RemoveFromQueue(queueId); // Existing virtual clients may still issue their post-start cleanup.
+
+            Assert.Equal(MessageDisposition.Duplicate,
+                service.ReceivePhysicalMasterStart("boot-token-1", 8, startAllowed: true).Disposition);
+            Assert.Equal(MessageDisposition.StaleSequence,
+                service.ReceivePhysicalMasterStart("boot-token-1", 7, startAllowed: true).Disposition);
+            Assert.Equal(RunStatus.Active, service.GetOperatorSnapshot().CurrentRun!.Status);
+        }
+
+        using (var store = new RunStore(path))
+        {
+            var service = new RunService(store, MakeEdition(), new TestClock());
+            Assert.Equal(RunStatus.Paused, service.GetOperatorSnapshot().CurrentRun!.Status);
+            Assert.Equal(1, service.GetOperatorSnapshot().Queue.Count);
+            Assert.Equal(MessageDisposition.Duplicate,
+                service.ReceivePhysicalMasterStart("boot-token-1", 8, startAllowed: true).Disposition);
+            Assert.Equal(MessageDisposition.StaleSequence,
+                service.ReceivePhysicalMasterStart("boot-token-1", 6, startAllowed: true).Disposition);
+        }
+    }
+    finally
+    {
+        Cleanup(path);
+    }
+}
+
+static void PhysicalMasterStatusCountdown()
+{
+    using var h = NewHarness(durationSeconds: 20);
+    h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    Assert.Equal(new MasterRunStatus("ARMED", 20), h.Service.GetMasterStatus());
+    h.Service.StartMaster();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1_100));
+    Assert.Equal(new MasterRunStatus("ACTIVE", 19), h.Service.GetMasterStatus());
+    h.Service.Pause();
+    Assert.Equal(new MasterRunStatus("PAUSED", 19), h.Service.GetMasterStatus());
+    h.Service.Finish();
+    Assert.Equal(new MasterRunStatus("FINISHED", 0), h.Service.GetMasterStatus());
+    Assert.Equal(RunStatus.Finished, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
 }
 
 static void MvpTimeoutAndNextRun()
@@ -670,7 +781,11 @@ static void ClearDatabaseSafety()
         {
             backup.Open();
             Assert.Equal(2L, CountRows(backup, "competitors"));
-            Assert.Equal(2L, CountRows(backup, "queue_items"));
+            // Accepted master start consumes the current competitor's on-deck entry; the other entry remains queued.
+            Assert.Equal(1L, CountRows(backup, "queue_items"));
+            using var remainingQueue = backup.CreateCommand();
+            remainingQueue.CommandText = "SELECT competitor_id FROM queue_items";
+            Assert.Equal(queuedCompetitor.Id, remainingQueue.ExecuteScalar() as string);
             Assert.Equal(1L, CountRows(backup, "runs"));
             Assert.Equal(edition.Events.Count, (int)CountRows(backup, "run_events"));
             Assert.True(CountRows(backup, "messages") >= 2, "The backup should retain device/master messages.");

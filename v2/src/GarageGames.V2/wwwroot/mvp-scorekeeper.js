@@ -5,6 +5,11 @@
     snapshot: null,
     connected: false,
     busy: false,
+    master: null,
+    masterError: "",
+    masterLoading: false,
+    masterBusy: false,
+    masterPortsSignature: "",
     drafts: new Map(),
     bonusDrafts: new Map(),
     selectedHistoryId: null,
@@ -33,6 +38,7 @@
   const clearDatabasePhrase = "CLEAR ALL DATA";
   const $ = (id) => document.getElementById(id);
   const scorekeeperTime = window.GarageGamesScorekeeperTime;
+  const masterActions = window.GarageGamesMasterActions;
   const runActions = window.GarageGamesRunActions;
   const scorecardOrder = window.GarageGamesScorecardOrder;
   const leaderboardTools = window.GarageGamesLeaderboards;
@@ -56,6 +62,15 @@
     addForm: $("add-competitor-form"),
     newCompetitor: $("new-competitor-name"),
     start: $("start-run-button"),
+    armPhysical: $("arm-physical-button"),
+    masterPort: $("master-port-select"),
+    masterConnect: $("master-connect-button"),
+    masterDisconnect: $("master-disconnect-button"),
+    masterRefresh: $("master-refresh-button"),
+    masterConnectionLabel: $("master-connection-label"),
+    masterModeLabel: $("master-mode-label"),
+    masterLastMessage: $("master-last-message"),
+    physicalStartHelp: $("physical-start-help"),
     pause: $("pause-run-button"),
     finish: $("finish-run-button"),
     record: $("record-run-button"),
@@ -142,6 +157,76 @@
     ui.connection.classList.toggle("is-offline", !online);
     const label = ui.connection.querySelector("span");
     if (label) label.textContent = online ? "Connected" : "Offline";
+  }
+
+  function renderMasterControls() {
+    const master = state.master;
+    const ports = Array.isArray(master?.availablePorts) ? master.availablePorts.slice() : [];
+    if (master?.port && !ports.some((port) => port.toLowerCase() === master.port.toLowerCase())) {
+      ports.push(master.port);
+      ports.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+    }
+    const signature = `${ports.join("|")};${master?.port || ""}`;
+    if (signature !== state.masterPortsSignature) {
+      const previous = ui.masterPort.value;
+      ui.masterPort.replaceChildren(new Option(ports.length ? "Select COM port…" : "No COM ports found", ""));
+      ports.forEach((port) => ui.masterPort.appendChild(new Option(port, port)));
+      const selection = master?.connected && master.port
+        ? master.port
+        : ports.includes(previous) ? previous : "";
+      ui.masterPort.value = selection;
+      state.masterPortsSignature = signature;
+    }
+
+    ui.masterConnectionLabel.textContent = state.masterError
+      ? "Master status unavailable"
+      : master?.connected
+        ? `${master.mode === "IDLE" || master.mode === "SPEED" ? "Master connected" : "COM port open"} · ${master.port || "COM port"}`
+        : "Not connected";
+    ui.masterModeLabel.textContent = `Mode: ${master?.mode ? master.mode.toUpperCase() : master?.connected ? "WAITING FOR MASTER" : "—"}`;
+    ui.masterLastMessage.textContent = `Last message: ${master?.lastMessage || "—"}`;
+
+    const run = state.snapshot?.currentRun || null;
+    const handshakeHelp = masterActions.handshakeGuidance(master);
+    if (masterActions.isSpeedMode(master)) {
+      ui.physicalStartHelp.textContent = "SPEED mode is active. Arming and Start are disabled until the master returns to IDLE.";
+    } else if (handshakeHelp) {
+      ui.physicalStartHelp.textContent = handshakeHelp;
+    } else if (run?.status === "armed") {
+      ui.physicalStartHelp.textContent = "Run is armed and waiting for a physical Start press. Virtual Start is also available.";
+    } else if (!master?.connected) {
+      ui.physicalStartHelp.textContent = state.masterError
+        ? `Could not read physical master status: ${state.masterError}`
+        : "Connect a physical master to arm for its Start button. Virtual Start works without hardware.";
+    } else if (!ui.competitor.value) {
+      ui.physicalStartHelp.textContent = "Choose a competitor and run type, then arm for a physical Start.";
+    } else {
+      ui.physicalStartHelp.textContent = "Arm the selected competitor, then use the physical master’s short press to start the timer.";
+    }
+
+    ui.masterPort.disabled = state.busy || state.masterBusy || Boolean(master?.connected);
+    ui.masterConnect.disabled = state.busy || state.masterBusy || Boolean(master?.connected) || !ui.masterPort.value;
+    ui.masterDisconnect.disabled = state.busy || state.masterBusy || !master?.connected;
+    ui.masterRefresh.disabled = state.busy || state.masterBusy || state.masterLoading;
+  }
+
+  async function loadMaster(silent = false) {
+    if (state.masterLoading) return false;
+    state.masterLoading = true;
+    try {
+      state.master = await request("/api/master");
+      state.masterError = "";
+      return true;
+    } catch (error) {
+      state.master = null;
+      state.masterError = error.message || "The physical master status could not be loaded.";
+      if (!silent) showAlert(`Could not load physical master status: ${state.masterError}`);
+      return false;
+    } finally {
+      state.masterLoading = false;
+      renderMasterControls();
+      if (state.snapshot) updateControls();
+    }
   }
 
   async function loadSnapshot(silent = false) {
@@ -506,7 +591,7 @@
       const label = categoryLabel(run.category);
       const competitor = competitorName(run.competitorId);
       const copy = {
-        armed: "Run is armed and ready to start.",
+        armed: "Run is armed and waiting for a physical Start press, or use Start armed run here.",
         active: "Run in progress. Event timestamps count down from the run limit.",
         paused: "Run paused. Resume when the competitor is ready.",
         finished: "All events complete. Timer stopped · finished, not recorded.",
@@ -883,8 +968,10 @@
     const selectedId = ui.competitor.value;
     ui.competitor.disabled = state.busy || locked;
     ui.category.disabled = state.busy || locked;
-    ui.start.disabled = state.busy || (!locked && !selectedId) || (locked && run.status !== "armed");
+    ui.start.disabled = state.busy || state.masterBusy || !masterActions.canStartVirtual(state.master, run, selectedId);
     ui.start.textContent = run?.status === "armed" ? "Start armed run" : "Start 5-minute run";
+    ui.armPhysical.disabled = state.busy || state.masterBusy || !masterActions.canArmPhysical(state.master, run, selectedId);
+    ui.armPhysical.textContent = run?.status === "armed" ? "Waiting for physical Start" : "Arm for physical Start";
     ui.pause.disabled = state.busy || !run || !["active", "paused"].includes(run.status);
     ui.pause.textContent = run?.status === "paused" ? "Resume" : "Pause";
     ui.finish.disabled = state.busy || !run || !["armed", "active", "paused"].includes(run.status);
@@ -902,6 +989,7 @@
     renderHistory();
     renderLeaderboards();
     setSaveStates();
+    renderMasterControls();
   }
 
   function render() {
@@ -981,28 +1069,43 @@
     }
   }
 
+  async function performMasterAction(action, successMessage) {
+    if (state.busy || state.masterBusy) return;
+    state.masterBusy = true;
+    updateControls();
+    try {
+      state.master = await action();
+      state.masterError = "";
+      if (successMessage) showAlert(successMessage, "success");
+    } catch (error) {
+      showAlert(error.message || "The physical master action could not be completed.");
+    } finally {
+      state.masterBusy = false;
+      await loadMaster(true);
+      updateControls();
+    }
+  }
+
   async function startRun() {
     const current = state.snapshot?.currentRun;
-    let competitorId;
-    let category;
-    if (current?.status === "armed") {
-      competitorId = current.competitorId;
-      category = current.category;
-      await request("/api/run/start", { method: "POST" });
-      state.discardedRunNotice = null;
-    } else {
-      competitorId = ui.competitor.value;
-      category = ui.category.value;
-      if (!competitorId) throw new Error("Choose a competitor before starting a run.");
-      await request("/api/run/arm", {
-        method: "POST",
-        body: JSON.stringify({ competitorId, category })
-      });
-      await loadSnapshot(true);
-      await request("/api/run/start", { method: "POST" });
-      state.discardedRunNotice = null;
-    }
-    await removeMatchingQueueEntryAfterStart(competitorId, category);
+    const started = await masterActions.startVirtually(request, {
+      master: state.master,
+      currentRun: current,
+      competitorId: ui.competitor.value,
+      category: ui.category.value
+    }, () => loadSnapshot(true));
+    state.discardedRunNotice = null;
+    await removeMatchingQueueEntryAfterStart(started.competitorId, started.category);
+  }
+
+  async function armPhysicalRun() {
+    await masterActions.armForPhysicalStart(request, {
+      master: state.master,
+      currentRun: state.snapshot?.currentRun || null,
+      competitorId: ui.competitor.value,
+      category: ui.category.value
+    });
+    state.discardedRunNotice = null;
   }
 
   async function removeMatchingQueueEntryAfterStart(competitorId, category) {
@@ -1189,7 +1292,22 @@
       });
     });
     ui.refresh.addEventListener("click", () => loadSnapshot(false));
+    ui.armPhysical.addEventListener("click", () => performAction(armPhysicalRun, "Run armed · waiting for the physical Start button."));
     ui.start.addEventListener("click", () => performAction(startRun, "Run started."));
+    ui.masterConnect.addEventListener("click", () => {
+      const port = ui.masterPort.value;
+      if (!port) return;
+      performMasterAction(
+        () => masterActions.connectMaster(request, port),
+        `Connected to ${port}.`
+      );
+    });
+    ui.masterDisconnect.addEventListener("click", () => performMasterAction(
+      () => masterActions.disconnectMaster(request),
+      "Physical master disconnected."
+    ));
+    ui.masterRefresh.addEventListener("click", () => loadMaster(false));
+    ui.masterPort.addEventListener("change", renderMasterControls);
     ui.pause.addEventListener("click", () => {
       const path = state.snapshot?.currentRun?.status === "paused" ? "/api/run/resume" : "/api/run/pause";
       performAction(() => request(path, { method: "POST" }), path.endsWith("resume") ? "Run resumed." : "Run paused.");
@@ -1267,6 +1385,8 @@
 
   bindActions();
   loadSnapshot(false);
+  loadMaster(false);
   window.setInterval(() => loadSnapshot(true), 2000);
+  window.setInterval(() => loadMaster(true), 2000);
   window.setInterval(tickClock, 200);
 })();

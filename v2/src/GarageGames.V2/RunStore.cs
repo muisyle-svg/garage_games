@@ -351,7 +351,7 @@ public sealed class RunStore : IDisposable
     public void SaveRunAndMessage(RunRecord run, MessageRecord message) => SaveRuns([run], message);
 
     public void SaveRunsAndQueue(IEnumerable<RunRecord> runs, IReadOnlyCollection<QueueItemRecord> queue,
-        string? selectedCompetitorId, RunCategory? selectedRunCategory)
+        string? selectedCompetitorId, RunCategory? selectedRunCategory, MessageRecord? message = null)
     {
         ExecuteTransaction((connection, transaction) =>
         {
@@ -381,6 +381,10 @@ public sealed class RunStore : IDisposable
 
             SetMetaValue(connection, transaction, "selected_competitor_id", selectedCompetitorId ?? "");
             SetMetaValue(connection, transaction, "selected_run_category", selectedRunCategory?.ToString() ?? "");
+            if (message is not null)
+            {
+                message.Id = InsertMessage(connection, transaction, message);
+            }
         });
     }
 

@@ -3,15 +3,27 @@
 Garage Games v2 is a local .NET 10 ASP.NET Core application with an embedded
 SQLite store. Its MVP scorekeeper has 13 regular events, competitor selection,
 a five-minute run clock, pause/resume, virtual two-press event buttons, editable
-timestamps and manual event points, and a history that can be corrected later.
+timestamps, automatic event points with editable overrides and bonus scoring,
+and a history that can be corrected later.
 Timed-out runs remain as incomplete history and do not prevent starting the next
-competitor. The original app, firmware, and existing historical data are not
-used or modified.
+competitor. The original Garage Games app and firmware remain untouched;
+existing historical data is not used or modified.
 
-The virtual buttons are for testing. Physical hardware, the keypad and magnetic
-special events, bonus rounds, and event-specific scoring formulas are deferred.
-The app runs locally and has no Google Sheets or other network-service
-dependency; it does not yet claim physical hardware support.
+The app supports virtual Start without a connected master and can also connect a
+manually attached XIAO ESP32-C3 over USB serial. A short physical button press
+starts a competitor after the operator explicitly arms that competitor in the
+app. The current `GG1` serial protocol runs at 115200 baud; a five-second master
+button hold enters the existing Speed game when no Garage run is active or
+paused. Garage event scoring from physical spokes, the keypad and magnetic
+special events, bonus rounds, and event-specific scoring formulas remain future
+work. The app runs locally and has no Google Sheets or other network-service
+dependency.
+
+The combined master sketch is in `v2\firmware\garage_games_master`. The
+untouched original Speed master and spoke sketches are versioned alongside it
+under `v2\firmware\speed_button_master` and `v2\firmware\speed_button_spoke`.
+The current master retains Speed discovery on ESP-NOW channel 1; its Garage
+serial bridge and physical Start have not yet been verified on hardware.
 
 ## Launch
 
@@ -52,10 +64,19 @@ under `v2\.tools\logs`.
 The launcher uses the repository-local toolchain and a distinct `GarageGamesV2`
 data directory. If a published executable exists at
 `v2\publish\win-x64\GarageGames.V2.exe`, the launcher uses it directly.
+This takes precedence over the source project, so an old published executable
+can hide newer source changes until it is republished or otherwise removed.
 Because the launcher deliberately redirects its local .NET environment, its
 data path is `v2\.tools\localappdata\GarageGamesV2` in this repository. A
 direct command-line launch without those environment overrides uses the normal
 Windows `%LOCALAPPDATA%\GarageGamesV2` path instead.
+
+When the launcher falls back to the source project, it runs with
+`--no-restore`. The app now references `System.IO.Ports`, so run the restore
+command above with the repository `NuGet.Config` before launching the source
+build; the launcher does not restore packages itself. Exit the current tray
+instance before trying updated code; an already-running tray session can keep
+serving its existing process.
 
 Use the on-screen event buttons to test a run. Press an event once to record its
 start and again to record its finish; different events may overlap. Event times
@@ -64,7 +85,38 @@ timestamps larger, while the app persists elapsed milliseconds. Completing all
 regular events freezes the timer and leaves the run marked finished but
 unrecorded until **Record result**. The operator can also finish a partial run
 and choose whether to record it. Event times and points remain editable before
-or after recording; points are manually entered and summed.
+or after recording. Event points are calculated automatically, with editable
+overrides and bonus scoring.
+
+## Physical master smoke test
+
+Physical hardware support is implemented but not yet physically verified: the
+XIAO board is not connected, and the firmware has not been compiled or flashed.
+Treat the following as a test procedure, not a report of successful hardware
+operation.
+
+1. Exit the current Garage Games tray instance so the next launch loads the
+   updated application. Make sure the source project has been restored as
+   described above; if `v2\publish\win-x64\GarageGames.V2.exe` exists, the
+   launcher will prefer that published executable.
+2. In Arduino IDE, open
+   `v2\firmware\garage_games_master\garage_games_master.ino`. Install the
+   ESP32 Arduino board package and `TM1637Display`, select board
+   `XIAO_ESP32C3` and the board's COM port, then flash over USB.
+3. Close Arduino IDE's Serial Monitor before the app opens the port. Start
+   Garage Games, select the master's COM port, choose **Connect**, and wait for
+   the master status to show `IDLE`. The serial protocol is `GG1` at 115200 baud.
+4. Choose a competitor and use **Arm for physical Start**. A short press and
+   release of the master button starts that competitor's run. The on-screen
+   virtual **Start** remains available with no master connected.
+5. An active or paused Garage run blocks the five-second Speed hold. With no
+   active or paused Garage run, hold the master button for five seconds to
+   start Speed discovery. Discovery currently requires at least three
+   compatible spokes on ESP-NOW channel 1.
+
+The current integration uses the master for Garage Start and run-status
+display; physical spokes still run the existing Speed protocol and do not yet
+report Garage event inputs.
 
 ## Storage and recovery
 
@@ -104,6 +156,18 @@ For a self-contained Windows build, run:
 & .tools/dotnet/dotnet.exe publish v2/src/GarageGames.V2/GarageGames.V2.csproj -c Release -r win-x64 --self-contained true -o v2/publish/win-x64
 ```
 
-The launcher will then use `v2/publish/win-x64/GarageGames.V2.exe`. Hardware mode
-is reserved for a future physical transport; virtual start, simulated device
-availability, and simulator clock/input routes are disabled there.
+The launcher will then use `v2/publish/win-x64/GarageGames.V2.exe`. The
+`--hardware-mode` flag disables simulated device availability and simulator
+clock/input routes and the virtual event-press route, while retaining the
+physical USB serial master transport and operator controls, including virtual
+Start. The default launch keeps virtual event presses enabled alongside master
+connection, so use it for the first master-plus-virtual-events test.
+
+## Future spoke architecture
+
+The planned spoke network keeps ESP-NOW on fixed channel 1 and uses it only for
+master-to-spoke and spoke-to-master traffic. Garage event IDs will map through
+a separate Garage protocol, with per-device sequence numbers, acknowledgments,
+preflight status, and LED feedback. This design will not use Google Sheet row
+IDs or Wi-Fi. Battery-powered spokes must keep their radio listening to receive
+a wireless start; deep sleep cannot receive that start signal.

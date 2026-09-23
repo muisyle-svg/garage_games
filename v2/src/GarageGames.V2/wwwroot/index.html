@@ -41,6 +41,7 @@
           <p id="run-caption" class="muted">Choose a competitor, then start the five-minute clock.</p>
         </div>
         <div class="run-controls">
+          <button id="arm-physical-button" class="button button-secondary" type="button" disabled>Arm for physical Start</button>
           <button id="start-run-button" class="button button-primary" type="button" disabled>Start 5-minute run</button>
           <button id="pause-run-button" class="button button-secondary" type="button" disabled>Pause</button>
           <button id="finish-run-button" class="button button-secondary" type="button" disabled>Finish run</button>
@@ -65,6 +66,24 @@
         <div class="summary-stat"><span>Competitor</span><strong id="run-competitor">—</strong></div>
         <div class="summary-stat"><span>Events complete</span><strong id="event-progress">0 / 0</strong></div>
         <div class="summary-stat summary-total"><span>Total points</span><strong id="run-total">0</strong></div>
+      </div>
+
+      <div class="physical-master-strip" aria-label="Physical master connection">
+        <div class="master-port-controls">
+          <label for="master-port-select">Physical master</label>
+          <select id="master-port-select" aria-label="Physical master COM port">
+            <option value="">Loading COM ports…</option>
+          </select>
+          <button id="master-connect-button" class="button button-secondary" type="button" disabled>Connect</button>
+          <button id="master-disconnect-button" class="button button-quiet" type="button" disabled>Disconnect</button>
+          <button id="master-refresh-button" class="button button-quiet" type="button">Refresh</button>
+        </div>
+        <div class="master-readout">
+          <strong id="master-connection-label">Checking connection…</strong>
+          <span id="master-mode-label">Mode: unknown</span>
+          <span id="master-last-message">Last message: —</span>
+        </div>
+        <p id="physical-start-help" class="master-help" role="status" aria-live="polite">Checking physical master status…</p>
       </div>
 
       <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
@@ -232,6 +251,7 @@
 
   <footer class="mvp-footer"><span>Garage Games</span><span>Local scorekeeper · changes save on this computer</span></footer>
   <script src="mvp-scorekeeper-time.js" defer></script>
+  <script src="mvp-scorekeeper-master.js" defer></script>
   <script src="mvp-scorekeeper-run-actions.js" defer></script>
   <script src="mvp-scorecard-order.js" defer></script>
   <script src="mvp-leaderboards.js" defer></script>

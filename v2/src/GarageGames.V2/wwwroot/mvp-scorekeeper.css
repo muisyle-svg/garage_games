@@ -63,6 +63,15 @@ h3 { margin: 0; font-size: .94rem; }
 .muted, #run-caption { margin: 0; color: var(--muted); font-size: .76rem; }
 .run-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .45rem; }
 .run-summary { display: grid; grid-template-columns: minmax(250px, 1.55fr) repeat(4, minmax(110px, .72fr)); gap: .55rem; margin-bottom: .75rem; }
+.physical-master-strip { display: flex; flex-wrap: wrap; align-items: center; gap: .38rem .8rem; margin: 0 0 .75rem; padding: .52rem .65rem; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 15, 13, .22); }
+.master-port-controls { display: flex; flex: 1 1 490px; flex-wrap: wrap; align-items: center; gap: .35rem; min-width: 0; }
+.master-port-controls label { flex: 0 0 auto; color: var(--muted); font-size: .64rem; font-weight: 850; letter-spacing: .05em; text-transform: uppercase; }
+.master-port-controls select { flex: 1 1 125px; width: auto; min-width: 115px; min-height: 33px; }
+.master-port-controls .button { min-height: 33px; padding: .45rem .65rem; font-size: .66rem; }
+.master-readout { display: flex; flex: 1 1 300px; flex-wrap: wrap; align-items: center; gap: .25rem .75rem; min-width: 0; color: var(--muted); font-size: .64rem; }
+.master-readout strong { color: var(--ink); font-size: .67rem; }
+.master-readout span { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
+.master-help { flex: 1 0 100%; margin: 0; color: var(--muted); font-size: .64rem; line-height: 1.35; }
 .competitor-control, .summary-stat { min-width: 0; padding: .72rem .8rem; border: 1px solid var(--line); border-radius: 11px; background: rgba(7, 15, 13, .25); }
 .competitor-control > label { margin-bottom: .35rem; color: var(--muted); font-size: .65rem; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
 .competitor-select-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(105px, .5fr); gap: .4rem; }
@@ -240,6 +249,9 @@ select:disabled, input:disabled { opacity: .58; }
   .on-deck-actions { grid-column: 2; justify-self: end; }
   .summary-total { grid-column: 2; }
   .run-controls .button { flex: 1 1 auto; }
+  .master-port-controls { flex-basis: 100%; }
+  .master-port-controls label { flex: 1 0 100%; }
+  .master-readout { flex-basis: 100%; }
   .operator-tab { flex: 1; padding-right: .35rem; padding-left: .35rem; font-size: .65rem; }
   .leaderboard-player-select { grid-template-columns: 1fr; gap: .35rem; }
   .event-leaderboards-grid { grid-template-columns: 1fr; }

@@ -75,7 +75,8 @@ public enum MessageDisposition
     AlreadyCompleted,
     InvalidSignal,
     BonusNotReady,
-    InvalidEnvelope
+    InvalidEnvelope,
+    StaleSequence
 }
 
 public sealed class ScoringRule

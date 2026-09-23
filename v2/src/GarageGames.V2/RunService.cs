@@ -152,6 +152,33 @@ public sealed class RunService
         }
     }
 
+    public MasterRunStatus GetMasterStatus()
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            var run = _current ?? _lastDisplayedRun;
+            if (run is null)
+            {
+                return new MasterRunStatus("NONE", 0);
+            }
+
+            var state = run.Status switch
+            {
+                RunStatus.Armed => "ARMED",
+                RunStatus.Active => "ACTIVE",
+                RunStatus.Paused => "PAUSED",
+                RunStatus.Finished or RunStatus.Completed or RunStatus.TimedOut => "FINISHED",
+                _ => "NONE"
+            };
+            var remainingMilliseconds = Math.Max(0, run.Edition.DurationLimitSeconds * 1000L - run.ActiveElapsedMs);
+            var remainingSeconds = state is "ARMED" or "ACTIVE" or "PAUSED"
+                ? (int)Math.Min(int.MaxValue, (remainingMilliseconds + 999) / 1000)
+                : 0;
+            return new MasterRunStatus(state, remainingSeconds);
+        }
+    }
+
     public OperatorSnapshot GetOperatorSnapshot(bool simulationMode = true)
     {
         lock (_gate)
@@ -350,8 +377,11 @@ public sealed class RunService
     {
         lock (_gate)
         {
-            var item = _data.Queue.SingleOrDefault(q => q.Id == queueId)
-                ?? throw new CommandException("Queue item was not found.");
+            var item = _data.Queue.SingleOrDefault(q => q.Id == queueId);
+            if (item is null)
+            {
+                return;
+            }
             _data.Queue.Remove(item);
             NormalizeQueue();
             try
@@ -512,6 +542,61 @@ public sealed class RunService
                 Payload = JsonDocument.Parse("{}").RootElement
             });
             return result.Run is null ? throw new CommandException(result.Reason) : result.Run;
+        }
+    }
+
+    public InputResult ReceivePhysicalMasterStart(string bootToken, ulong sequence, bool startAllowed)
+    {
+        lock (_gate)
+        {
+            if (!MasterProtocolCodec.IsValidBootToken(bootToken))
+            {
+                throw new CommandException("Master boot token is invalid.");
+            }
+
+            var messageId = MasterProtocolCodec.GetStartMessageId(bootToken, sequence);
+            var run = _current;
+            var envelope = new InputEnvelope
+            {
+                MessageId = messageId,
+                SessionId = run?.Id ?? "no-active-run",
+                RunId = run?.Id ?? "no-active-run",
+                DeviceId = "master",
+                Type = "master-start",
+                ElapsedMilliseconds = 0,
+                Payload = JsonSerializer.SerializeToElement(new { bootToken, sequence }, JsonDefaults.Options)
+            };
+            var payloadJson = envelope.Payload.GetRawText();
+
+            if (_data.Messages.Any(message => string.Equals(message.MessageId, messageId, StringComparison.Ordinal)))
+            {
+                return RecordRejected(envelope, MessageDisposition.Duplicate,
+                    "Master start sequence was already recorded; retransmission was ignored.", payloadJson);
+            }
+
+            var highestSequence = _data.Messages
+                .Select(message => MasterProtocolCodec.TryParseStartMessageId(message.MessageId, out var priorBoot, out var priorSequence) &&
+                    string.Equals(priorBoot, bootToken, StringComparison.Ordinal) ? priorSequence : (ulong?)null)
+                .Max();
+            if (highestSequence is ulong previous && sequence <= previous)
+            {
+                return RecordRejected(envelope, MessageDisposition.StaleSequence,
+                    "Master start sequence is older than a sequence already recorded for this boot.", payloadJson);
+            }
+
+            if (run?.Status != RunStatus.Armed)
+            {
+                return RecordRejected(envelope, MessageDisposition.InvalidSignal,
+                    "Physical master can start a run only while a competitor is armed.", payloadJson);
+            }
+
+            if (!startAllowed)
+            {
+                return RecordRejected(envelope, MessageDisposition.InvalidSignal,
+                    "Physical master start is disabled while the controller is in SPEED mode.", payloadJson);
+            }
+
+            return Receive(envelope);
         }
     }
 
@@ -1264,14 +1349,44 @@ public sealed class RunService
     {
         var message = CreateMessage(envelope.MessageId, run.Id, envelope.SessionId, envelope.DeviceId, envelope.Type,
             envelope.ElapsedMilliseconds, MessageDisposition.Accepted, reason, payloadJson);
+        var consumesOnDeck = string.Equals(envelope.Type, "master-start", StringComparison.Ordinal);
+        var remainingQueue = consumesOnDeck
+            ? _data.Queue.OrderBy(item => item.Position).Select(Clone).ToList()
+            : null;
+        if (remainingQueue is not null)
+        {
+            var matchingItem = remainingQueue.FirstOrDefault(item =>
+                string.Equals(item.CompetitorId, run.CompetitorId, StringComparison.Ordinal) && item.Category == run.Category);
+            if (matchingItem is not null)
+            {
+                remainingQueue.Remove(matchingItem);
+                for (var index = 0; index < remainingQueue.Count; index++)
+                {
+                    remainingQueue[index].Position = index;
+                }
+            }
+        }
         try
         {
-            _store.SaveRunAndMessage(run, message);
+            if (remainingQueue is null)
+            {
+                _store.SaveRunAndMessage(run, message);
+            }
+            else
+            {
+                _store.SaveRunsAndQueue([run], remainingQueue, selectedCompetitorId: null,
+                    selectedRunCategory: null, message: message);
+            }
         }
         catch
         {
             ReloadInMemoryAfterPersistenceFailure();
             throw;
+        }
+        if (remainingQueue is not null)
+        {
+            _data.Queue.Clear();
+            _data.Queue.AddRange(remainingQueue);
         }
         _data.Messages.Add(message);
         return new InputResult(MessageDisposition.Accepted, reason, Clone(run));
@@ -1281,7 +1396,15 @@ public sealed class RunService
     {
         var message = CreateMessage(envelope.MessageId, envelope.RunId, envelope.SessionId, envelope.DeviceId, envelope.Type,
             envelope.ElapsedMilliseconds, disposition, reason, payloadJson);
-        _store.SaveRuns([], message);
+        try
+        {
+            _store.SaveRuns([], message);
+        }
+        catch
+        {
+            ReloadInMemoryAfterPersistenceFailure();
+            throw;
+        }
         _data.Messages.Add(message);
         return new InputResult(disposition, reason, _current is null ? null : Clone(_current));
     }
