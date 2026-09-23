@@ -79,9 +79,16 @@ instance before trying updated code; an already-running tray session can keep
 serving its existing process.
 
 Use the on-screen event buttons to test a run. Press an event once to record its
-start and again to record its finish; different events may overlap. Event times
-are displayed as seconds remaining from the run limit, making earlier event
-timestamps larger, while the app persists elapsed milliseconds. Completing all
+start and again to record its finish; different events may overlap. The operator
+Start begins the supplied 3-2-1 Go audio; the run timer and event buttons remain
+inactive until playback ends. A blocked or failed playback leaves the run in
+Countdown and offers an explicit retry. This audio gate applies to virtual and
+physical Start; the TV scoreboard never plays the audio. Event times are shown
+and edited as M:SS remaining from the run limit (seconds-only input is also
+accepted), making earlier event timestamps larger, while the app persists
+elapsed milliseconds. Untouched event times retain their original millisecond
+precision. The simulator's custom clock advance also accepts M:SS or seconds
+and sends milliseconds to the backend. Completing all
 regular events freezes the timer and leaves the run marked finished but
 unrecorded until **Record result**. The operator can also finish a partial run
 and choose whether to record it. Event times and points remain editable before
@@ -92,6 +99,8 @@ overrides and bonus scoring.
 
 Physical hardware support is implemented but not yet physically verified: the
 XIAO board is not connected, and the firmware has not been compiled or flashed.
+The countdown audio flow and physical master/spoke interaction have not been
+validated on hardware; virtual/UI behavior is the only validation target so far.
 Treat the following as a test procedure, not a report of successful hardware
 operation.
 

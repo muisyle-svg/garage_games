@@ -72,7 +72,7 @@ public sealed class RunService
         _store.EnsureDevices(edition);
         _data = _store.Load();
 
-        var unfinished = _data.Runs.Where(r => r.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused or RunStatus.Finished).ToList();
+        var unfinished = _data.Runs.Where(r => r.Status is RunStatus.Armed or RunStatus.Countdown or RunStatus.Active or RunStatus.Paused or RunStatus.Finished).ToList();
         if (unfinished.Count > 1)
         {
             throw new InvalidDataException("The database contains more than one unfinished run; manual recovery is required.");
@@ -152,6 +152,16 @@ public sealed class RunService
         }
     }
 
+    public RunCountdownState GetCountdownState()
+    {
+        lock (_gate)
+        {
+            return _current is null
+                ? new RunCountdownState(null, null)
+                : new RunCountdownState(_current.Id, _current.Status);
+        }
+    }
+
     public MasterRunStatus GetMasterStatus()
     {
         lock (_gate)
@@ -166,13 +176,14 @@ public sealed class RunService
             var state = run.Status switch
             {
                 RunStatus.Armed => "ARMED",
+                RunStatus.Countdown => "COUNTDOWN",
                 RunStatus.Active => "ACTIVE",
                 RunStatus.Paused => "PAUSED",
                 RunStatus.Finished or RunStatus.Completed or RunStatus.TimedOut => "FINISHED",
                 _ => "NONE"
             };
             var remainingMilliseconds = Math.Max(0, run.Edition.DurationLimitSeconds * 1000L - run.ActiveElapsedMs);
-            var remainingSeconds = state is "ARMED" or "ACTIVE" or "PAUSED"
+            var remainingSeconds = state is "ARMED" or "COUNTDOWN" or "ACTIVE" or "PAUSED"
                 ? (int)Math.Min(int.MaxValue, (remainingMilliseconds + 999) / 1000)
                 : 0;
             return new MasterRunStatus(state, remainingSeconds);
@@ -470,7 +481,7 @@ public sealed class RunService
         lock (_gate)
         {
             RefreshActiveClock();
-            if (_current is not null && _current.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused or RunStatus.Finished)
+            if (_current is not null && _current.Status is RunStatus.Armed or RunStatus.Countdown or RunStatus.Active or RunStatus.Paused or RunStatus.Finished)
             {
                 throw new CommandException("Finish, pause, or abort the current run before arming another.");
             }
@@ -541,7 +552,50 @@ public sealed class RunService
                 ElapsedMilliseconds = 0,
                 Payload = JsonDocument.Parse("{}").RootElement
             });
-            return result.Run is null ? throw new CommandException(result.Reason) : result.Run;
+            if (result.Disposition != MessageDisposition.Accepted || result.Run is null)
+            {
+                throw new CommandException(result.Reason);
+            }
+            return result.Run;
+        }
+    }
+
+    public RunRecord CompleteCountdown(string runId)
+    {
+        lock (_gate)
+        {
+            var run = _current;
+            if (run is null || !string.Equals(run.Id, runId, StringComparison.Ordinal))
+            {
+                throw new CommandException("Countdown completion does not match the current run.");
+            }
+
+            if (run.Status == RunStatus.Active)
+            {
+                RefreshActiveClock();
+                return Clone(run);
+            }
+
+            if (run.Status != RunStatus.Countdown)
+            {
+                throw new CommandException("Only the current countdown can be completed.");
+            }
+
+            run.Status = RunStatus.Active;
+            run.StartedAt = _clock.UtcNow;
+            run.Revision++;
+            _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+            UpdateDeviceLeds();
+            try
+            {
+                _store.SaveRuns([run]);
+            }
+            catch
+            {
+                ReloadInMemoryAfterPersistenceFailure();
+                throw;
+            }
+            return Clone(run);
         }
     }
 
@@ -723,6 +777,11 @@ public sealed class RunService
                 throw new CommandException("There is no run ready to record.");
             }
 
+            if (_current.Status == RunStatus.Countdown)
+            {
+                throw new CommandException("A countdown must finish before the run can be recorded.");
+            }
+
             if (_current.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused)
             {
                 Finish();
@@ -756,7 +815,7 @@ public sealed class RunService
             {
                 return RecordRunAndPromoteQueue(run, complete: false);
             }
-            if (run.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused or RunStatus.Finished)
+            if (run.Status is RunStatus.Armed or RunStatus.Countdown or RunStatus.Active or RunStatus.Paused or RunStatus.Finished)
             {
                 throw new CommandException("Record the current run from the scorekeeping tab.");
             }
@@ -934,12 +993,10 @@ public sealed class RunService
                     return RecordRejected(envelope, MessageDisposition.InvalidSignal, "Only the virtual/physical master can start an armed run.", payloadJson);
                 }
 
-                run.Status = RunStatus.Active;
-                run.StartedAt = _clock.UtcNow;
+                run.Status = RunStatus.Countdown;
                 run.Revision++;
-                _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
                 UpdateDeviceLeds();
-                return RecordAccepted(envelope, run, "Master started run.", payloadJson);
+                return RecordAccepted(envelope, run, "Master started run countdown.", payloadJson);
             }
 
             if (run.Status != RunStatus.Active)
@@ -1064,6 +1121,10 @@ public sealed class RunService
         {
             var run = RequireCurrent();
             RefreshActiveClock();
+            if (run.Status == RunStatus.Countdown)
+            {
+                throw new CommandException("A live run cannot be edited during its countdown.");
+            }
             if (run.Revision != request.ExpectedRevision)
             {
                 throw new CommandException("This live run changed after it was opened. Reload it before saving.");
@@ -1108,6 +1169,10 @@ public sealed class RunService
         {
             var run = RequireCurrent();
             RefreshActiveClock();
+            if (run.Status == RunStatus.Countdown)
+            {
+                throw new CommandException("A live run edit cannot be undone during its countdown.");
+            }
             if (run.Revision != expectedRevision)
             {
                 throw new CommandException("This live run changed after the edit was opened. Reload it before undoing.");
@@ -1751,7 +1816,7 @@ public sealed class RunService
         _data.Edits.AddRange(fresh.Edits);
         _data.SelectedCompetitorId = fresh.SelectedCompetitorId;
         _data.SelectedRunCategory = fresh.SelectedRunCategory;
-        _current = _data.Runs.SingleOrDefault(r => r.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused or RunStatus.Finished);
+        _current = _data.Runs.SingleOrDefault(r => r.Status is RunStatus.Armed or RunStatus.Countdown or RunStatus.Active or RunStatus.Paused or RunStatus.Finished);
         _lastDisplayedRun = _current ?? _data.Runs.OrderByDescending(r => r.CreatedAt).FirstOrDefault();
         _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
     }
@@ -1843,6 +1908,12 @@ public sealed class RunService
             if (_current.Status == RunStatus.Paused)
             {
                 device.Led = LedState.Paused;
+                continue;
+            }
+
+            if (_current.Status == RunStatus.Countdown)
+            {
+                device.Led = LedState.Countdown;
                 continue;
             }
 

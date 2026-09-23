@@ -5,7 +5,7 @@
 })(typeof window !== "undefined" ? window : globalThis, () => {
   "use strict";
 
-  const liveStatuses = new Set(["armed", "active", "paused", "finished"]);
+  const liveStatuses = new Set(["armed", "countdown", "active", "paused", "finished"]);
 
   function isSpeedMode(master) {
     return String(master?.mode || "").toUpperCase() === "SPEED";
@@ -75,8 +75,8 @@
       await afterArm();
     }
 
-    await request("/api/run/start", { method: "POST" });
-    return { competitorId, category };
+    const run = await request("/api/run/start", { method: "POST" });
+    return { competitorId, category, ...(run && typeof run === "object" ? { run } : {}) };
   }
 
   return Object.freeze({

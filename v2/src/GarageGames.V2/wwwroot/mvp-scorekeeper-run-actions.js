@@ -5,7 +5,7 @@
 })(typeof window !== "undefined" ? window : globalThis, () => {
   "use strict";
 
-  const discardableStatuses = new Set(["armed", "active", "paused", "finished"]);
+  const discardableStatuses = new Set(["armed", "countdown", "active", "paused", "finished"]);
 
   function isDiscardableRun(run) {
     return Boolean(run && run.isRecorded !== true && discardableStatuses.has(run.status));

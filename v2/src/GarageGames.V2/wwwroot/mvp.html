@@ -24,7 +24,7 @@
         <form id="add-competitor-form" class="add-competitor"><label class="sr-only" for="new-competitor">New competitor name</label><input id="new-competitor" maxlength="120" placeholder="Add a competitor…" required><button type="submit" class="button button-light">Add</button></form>
       </div>
       <div class="timer-controls">
-        <div class="timer-copy"><span class="overline">5-minute run</span><strong id="countdown" class="countdown">05:00</strong><span id="run-state" class="run-state">Choose a competitor to begin</span></div>
+        <div class="timer-copy"><span class="overline">5-minute run</span><strong id="countdown" class="countdown">5:00</strong><span id="run-state" class="run-state">Choose a competitor to begin</span></div>
         <div class="run-buttons"><button id="start-button" class="button button-start" type="button" disabled>Start run</button><button id="pause-button" class="button button-pause" type="button" disabled>Pause</button><button id="record-button" class="button button-record" type="button" disabled>Record</button></div>
       </div>
     </section>
@@ -40,7 +40,7 @@
 
       <section class="panel scorecard-panel" aria-labelledby="table-title">
         <div class="panel-heading"><div><p class="overline">Timing &amp; scoring</p><h2 id="table-title">Editable scorecard</h2></div><button id="save-edits" class="button button-save" type="button" disabled>Save corrections</button></div>
-        <div class="table-scroll"><table class="score-table"><thead><tr><th>Event</th><th>Start<br><small>sec left</small></th><th>Finish<br><small>sec left</small></th><th>Duration</th><th>Points</th><th>Status</th></tr></thead><tbody id="score-rows"><tr><td class="empty-row" colspan="6">Select or add a competitor to load a scorecard.</td></tr></tbody></table></div>
+        <div class="table-scroll"><table class="score-table"><thead><tr><th>Event</th><th>Start<br><small>M:SS remaining</small></th><th>Finish<br><small>M:SS remaining</small></th><th>Duration</th><th>Points</th><th>Status</th></tr></thead><tbody id="score-rows"><tr><td class="empty-row" colspan="6">Select or add a competitor to load a scorecard.</td></tr></tbody></table></div>
         <div class="scorecard-footer"><label class="bonus-field">Run bonus points<input id="bonus-points" type="number" min="0" step="1" value="0" disabled></label><div class="scorecard-note"><span id="edit-state">Points are manual for this MVP; totals are a simple sum.</span><strong>Event total <b id="event-total">0</b></strong></div></div>
       </section>
     </div>

@@ -3,6 +3,7 @@
 
   const operatorPage = document.body.classList.contains("operator-view");
   const scoreboardPage = document.body.classList.contains("scoreboard-view");
+  const scorekeeperTime = window.GarageGamesScorekeeperTime;
 
   // Keep every write in one small route map. If the server route changes, this is the only
   // frontend contract table that needs updating; the views do not create local game state.
@@ -106,9 +107,22 @@
   const formatMs = (milliseconds) => {
     const seconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000));
     const minutes = Math.floor(seconds / 60);
-    return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+    return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
   };
-  const formatDuration = (milliseconds) => milliseconds == null ? "—" : `${(Number(milliseconds) / 1000).toFixed(1)}s`;
+  const formatDuration = (milliseconds) => {
+    if (milliseconds == null || !Number.isFinite(Number(milliseconds))) return "—";
+    const seconds = Math.max(0, Math.round(Number(milliseconds) / 1000));
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  };
+  const formatTimeInput = (milliseconds) => milliseconds == null ? "" : formatDuration(milliseconds) === "—" ? "" : formatDuration(milliseconds);
+  const parseTimeInputMs = (value) => {
+    if (value === "" || value == null) return null;
+    const input = String(value).trim();
+    if (!input) return null;
+    const clockMatch = /^(\d+):([0-5]\d)$/.exec(input);
+    const seconds = clockMatch ? Number(clockMatch[1]) * 60 + Number(clockMatch[2]) : Number(input);
+    return Number.isFinite(seconds) && seconds >= 0 ? Math.round(seconds * 1000) : null;
+  };
   const formatDate = (value) => {
     if (!value) return "Unknown time";
     const date = new Date(value);
@@ -355,8 +369,8 @@
       const type = make("td");
       type.appendChild(make("span", "event-type", eventTypeLabel(event.type)));
       row.appendChild(type);
-      row.appendChild(make("td", "numeric-cell", event.startElapsedMs == null ? "—" : `${event.startElapsedMs} ms`));
-      row.appendChild(make("td", "numeric-cell", event.finishElapsedMs == null ? "—" : `${event.finishElapsedMs} ms`));
+      row.appendChild(make("td", "numeric-cell", formatDuration(event.startElapsedMs)));
+      row.appendChild(make("td", "numeric-cell", formatDuration(event.finishElapsedMs)));
       row.appendChild(make("td", "numeric-cell", formatDuration(runDuration(event))));
       const status = make("span", `status-text ${statusClass(event.status)}`, pretty(event.status));
       const statusCell = make("td"); statusCell.appendChild(status); row.appendChild(statusCell);
@@ -550,8 +564,12 @@
     setSelectOptions(q(editorId(kind, "competitor")), competitors, run.competitorId);
     updateOptionValue(q(editorId(kind, "category")), run.category);
     updateOptionValue(status, run.status);
-    q(editorId(kind, "time-limit")).value = get(run.edition, "durationLimitSeconds", snapshot && snapshot.durationLimitSeconds || 300);
-    q(editorId(kind, "active-elapsed")).value = Number(run.activeElapsedMs || 0);
+    const timeLimit = q(editorId(kind, "time-limit"));
+    timeLimit.type = "text"; timeLimit.inputMode = "numeric"; timeLimit.placeholder = "M:SS";
+    timeLimit.value = formatTimeInput(Number(get(run.edition, "durationLimitSeconds", snapshot && snapshot.durationLimitSeconds || 300)) * 1000);
+    const activeElapsed = q(editorId(kind, "active-elapsed"));
+    activeElapsed.type = "text"; activeElapsed.inputMode = "numeric"; activeElapsed.placeholder = "M:SS";
+    activeElapsed.value = formatTimeInput(Number(run.activeElapsedMs || 0));
     q(editorId(kind, "bonus")).value = run.bonusPointsOverride == null ? "" : run.bonusPointsOverride;
     q(editorId(kind, "bonus-result")).value = run.bonusResultJson || "";
     q(editorId(kind, "notes")).value = run.notes || "";
@@ -565,9 +583,9 @@
       const statusSelect = make("select");
       ["pending", "active", "completed"].forEach((value) => { const option = make("option", "", pretty(value)); option.value = value; option.selected = event.status === value; statusSelect.appendChild(option); });
       const statusCell = make("td"); statusCell.appendChild(statusSelect); row.appendChild(statusCell);
-      const start = make("input"); start.type = "number"; start.min = "0"; start.value = event.startElapsedMs == null ? "" : event.startElapsedMs; const startCell = make("td"); startCell.appendChild(start); row.appendChild(startCell);
-      const finish = make("input"); finish.type = "number"; finish.min = "0"; finish.value = event.finishElapsedMs == null ? "" : event.finishElapsedMs; const finishCell = make("td"); finishCell.appendChild(finish); row.appendChild(finishCell);
-      const duration = make("input"); duration.type = "number"; duration.min = "0"; duration.value = runDuration(event) == null ? "" : runDuration(event); const durationCell = make("td"); durationCell.appendChild(duration); row.appendChild(durationCell);
+      const start = make("input"); start.type = "text"; start.inputMode = "numeric"; start.placeholder = "M:SS"; start.value = formatTimeInput(event.startElapsedMs); const startCell = make("td"); startCell.appendChild(start); row.appendChild(startCell);
+      const finish = make("input"); finish.type = "text"; finish.inputMode = "numeric"; finish.placeholder = "M:SS"; finish.value = formatTimeInput(event.finishElapsedMs); const finishCell = make("td"); finishCell.appendChild(finish); row.appendChild(finishCell);
+      const duration = make("input"); duration.type = "text"; duration.inputMode = "numeric"; duration.placeholder = "M:SS"; duration.value = formatTimeInput(runDuration(event)); const durationCell = make("td"); durationCell.appendChild(duration); row.appendChild(durationCell);
       const score = make("input"); score.type = "number"; score.min = "0"; score.value = event.scoreOverride == null ? "" : event.scoreOverride; const scoreCell = make("td"); scoreCell.appendChild(score); row.appendChild(scoreCell);
       const notes = make("input"); notes.type = "text"; notes.maxLength = 1000; notes.value = event.notes || ""; const notesCell = make("td"); notesCell.appendChild(notes); row.appendChild(notesCell);
       eventBody.appendChild(row);
@@ -610,9 +628,14 @@
     const bonusValue = numberValue(q(editorId(kind, "bonus")).value);
     const originalBonus = original.bonusPointsOverride == null ? null : Number(original.bonusPointsOverride);
     const originalTimeLimit = Number(get(original.edition, "durationLimitSeconds", state.snapshot && state.snapshot.durationLimitSeconds || 300));
-    const currentTimeLimit = numberValue(q(editorId(kind, "time-limit")).value);
-    const currentElapsed = numberValue(q(editorId(kind, "active-elapsed")).value, 0);
+    const originalTimeLimitText = formatTimeInput(originalTimeLimit * 1000);
+    const currentTimeLimitText = q(editorId(kind, "time-limit")).value.trim();
+    const currentTimeLimitMs = currentTimeLimitText === originalTimeLimitText ? originalTimeLimit * 1000 : parseTimeInputMs(currentTimeLimitText);
     const originalElapsed = Number(original.activeElapsedMs || 0);
+    const currentElapsedText = q(editorId(kind, "active-elapsed")).value.trim();
+    const currentElapsedMs = currentElapsedText === formatTimeInput(originalElapsed)
+      ? originalElapsed
+      : currentElapsedText === "" ? 0 : parseTimeInputMs(currentElapsedText);
     const request = {
       expectedRevision: editor.openRevision,
       reason: q(editorId(kind, "reason")).value.trim(),
@@ -626,8 +649,16 @@
     if (competitorId !== original.competitorId) request.competitorId = competitorId;
     if (category !== original.category) request.category = category;
     if (status !== original.status) request.status = status;
-    if (currentTimeLimit !== originalTimeLimit && currentTimeLimit != null) request.durationLimitSeconds = currentTimeLimit;
-    if (currentElapsed !== originalElapsed && currentElapsed != null) request.activeElapsedMs = currentElapsed;
+    if (currentTimeLimitText !== originalTimeLimitText && currentTimeLimitMs != null) {
+      if (currentTimeLimitMs % 1000 !== 0) throw new Error("Run time limit must use whole seconds in M:SS format.");
+      request.durationLimitSeconds = currentTimeLimitMs / 1000;
+    } else if (currentTimeLimitText !== originalTimeLimitText) {
+      throw new Error("Enter the run time limit as M:SS or seconds.");
+    }
+    if (currentElapsedText !== formatTimeInput(originalElapsed)) {
+      if (currentElapsedMs == null) throw new Error("Enter elapsed run time as M:SS or seconds.");
+      request.activeElapsedMs = currentElapsedMs;
+    }
     if (bonusResult !== (original.bonusResultJson || "")) request.bonusResultJson = bonusResult;
     if (notes !== (original.notes || "")) request.notes = notes;
     if (bonusValue !== originalBonus) {
@@ -639,13 +670,27 @@
       const originalStart = field.original.startElapsedMs == null ? null : Number(field.original.startElapsedMs);
       const originalFinish = field.original.finishElapsedMs == null ? null : Number(field.original.finishElapsedMs);
       const originalDuration = runDuration(field.original);
-      const start = numberValue(field.start.value);
-      const finish = numberValue(field.finish.value);
-      const duration = numberValue(field.duration.value);
+      const startText = field.start.value.trim();
+      const finishText = field.finish.value.trim();
+      const durationText = field.duration.value.trim();
+      const start = startText === formatTimeInput(originalStart) ? originalStart : parseTimeInputMs(startText);
+      const finish = finishText === formatTimeInput(originalFinish) ? originalFinish : parseTimeInputMs(finishText);
+      const duration = durationText === formatTimeInput(originalDuration) ? originalDuration : parseTimeInputMs(durationText);
       if (field.status.value !== field.original.status) event.status = field.status.value;
-      if (start !== originalStart && start != null) event.startElapsedMs = start;
-      if (finish !== originalFinish && finish != null) event.finishElapsedMs = finish;
-      if (duration !== originalDuration && duration != null) event.durationMs = duration;
+      if (startText !== formatTimeInput(originalStart)) {
+        if (startText === "" && originalStart != null) event.clearStartElapsedMs = true;
+        else if (start == null) throw new Error("Enter event times as M:SS or seconds.");
+        else event.startElapsedMs = start;
+      }
+      if (finishText !== formatTimeInput(originalFinish)) {
+        if (finishText === "" && originalFinish != null) event.clearFinishElapsedMs = true;
+        else if (finish == null) throw new Error("Enter event times as M:SS or seconds.");
+        else event.finishElapsedMs = finish;
+      }
+      if (durationText !== formatTimeInput(originalDuration)) {
+        if (durationText !== "" && duration == null) throw new Error("Enter event durations as M:SS or seconds.");
+        if (duration != null) event.durationMs = duration;
+      }
       const score = numberValue(field.score.value);
       const originalOverride = field.original.scoreOverride == null ? null : Number(field.original.scoreOverride);
       if (score !== originalOverride) {
@@ -744,6 +789,13 @@
     const run = snapshot.currentRun;
     const hasRun = !!run;
     const activeInput = simulation && currentCanReceiveInput();
+    const customAdvance = q("#sim-advance-seconds");
+    if (customAdvance) {
+      customAdvance.type = "text";
+      customAdvance.inputMode = "numeric";
+      customAdvance.placeholder = "M:SS";
+      customAdvance.setAttribute("aria-label", "Custom simulator advance time, M:SS or seconds");
+    }
     ["#sim-master", "#sim-pause", "#sim-keypad-submit", "#sim-emerald-start", "#sim-arcade-end", "#sim-bonus", "#sim-advance", "#sim-advance-30", "#sim-advance-custom", "#sim-timeout"].forEach((selector) => {
       const element = q(selector);
       if (!element) return;
@@ -782,11 +834,11 @@
     if (q("#sim-arcade-end")) q("#sim-arcade-end").dataset.deviceId = arcade ? arcade.deviceId : "";
   }
 
-  async function advanceSimulation(seconds) {
+  async function advanceSimulation(time) {
     if (!state.snapshot || !state.snapshot.simulationMode) { showAlert("Clock controls are disabled in hardware mode."); return; }
-    const milliseconds = Math.max(0, Math.round(Number(seconds) * 1000));
-    if (!Number.isFinite(milliseconds) || milliseconds <= 0) { showAlert("Enter a positive number of seconds."); return; }
-    await perform("Advance clock", API.simulatorAdvance, { milliseconds }, `Clock advanced ${Math.round(milliseconds / 1000)} seconds.`);
+    const milliseconds = scorekeeperTime.millisecondsFromClockTime(time);
+    if (milliseconds === null || milliseconds <= 0) { showAlert("Enter a positive simulator duration as M:SS or seconds."); return; }
+    await perform("Advance clock", API.simulatorAdvance, { milliseconds }, `Clock advanced ${formatMs(milliseconds)}.`);
   }
 
   async function runToTimeout() {

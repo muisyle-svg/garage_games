@@ -89,6 +89,19 @@ test("virtual Start can start a previously armed physical run", async () => {
   assert.deepEqual(started, { competitorId: "competitor-3", category: "exhibition" });
 });
 
+test("virtual Start returns the countdown run so audio can begin immediately", async () => {
+  const countdownRun = { id: "run-countdown", status: "countdown" };
+  const request = async (path) => path === "/api/run/start" ? countdownRun : null;
+  const started = await startVirtually(request, {
+    master: { connected: false },
+    currentRun: { status: "armed", competitorId: "competitor-4", category: "official" },
+    competitorId: "competitor-4",
+    category: "official"
+  });
+
+  assert.deepEqual(started, { competitorId: "competitor-4", category: "official", run: countdownRun });
+});
+
 test("SPEED mode blocks physical arming and virtual start with a clear error", async () => {
   const request = async () => assert.fail("SPEED mode must not send a start request");
   const master = { connected: true, mode: "SPEED" };

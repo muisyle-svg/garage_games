@@ -115,6 +115,7 @@ if (!string.IsNullOrWhiteSpace(trayShutdownToken))
 }
 app.MapGet("/api/operator", (RunService runs) => Results.Ok(runs.GetOperatorSnapshot(simulationMode)));
 app.MapGet("/api/scoreboard", (RunService runs) => Results.Ok(runs.GetScoreboard(simulationMode)));
+app.MapGet("/api/run/countdown-state", (RunService runs) => Results.Ok(runs.GetCountdownState()));
 app.MapGet("/api/export", (RunService runs) => Results.Json(runs.GetOperatorSnapshot(simulationMode), JsonDefaults.Options));
 app.MapGet("/scoreboard", () => Results.File(Path.Combine(AppContext.BaseDirectory, "wwwroot", "scoreboard.html"), "text/html"));
 app.MapGet("/advanced", () => Results.File(Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html"), "text/html"));
@@ -137,6 +138,8 @@ app.MapPost("/api/queue/{queueId}/arm", (string queueId, ArmRequest request, Run
     Results.Ok(master.ArmQueue(runs, queueId, request.ManualOfflineOverride)));
 
 app.MapPost("/api/run/start", (RunService runs, PhysicalMasterSerialService master) => Results.Ok(master.StartVirtual(runs)));
+app.MapPost("/api/run/countdown-finished", (CountdownFinishedRequest request, RunService runs) =>
+    Results.Ok(runs.CompleteCountdown(request.RunId)));
 app.MapPost("/api/run/arm", (StartCompetitorRunRequest request, RunService runs, PhysicalMasterSerialService master) =>
     Results.Ok(master.ArmCompetitor(runs, request.CompetitorId, request.Category)));
 app.MapPost("/api/run/pause", (RunService runs) => Results.Ok(runs.Pause()));

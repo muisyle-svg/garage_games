@@ -62,7 +62,7 @@
             </select>
           </div>
         </div>
-        <div class="summary-stat summary-clock"><span>Time remaining</span><strong id="run-countdown">05:00</strong></div>
+        <div class="summary-stat summary-clock"><span>Time remaining</span><strong id="run-countdown">5:00</strong></div>
         <div class="summary-stat"><span>Competitor</span><strong id="run-competitor">—</strong></div>
         <div class="summary-stat"><span>Events complete</span><strong id="event-progress">0 / 0</strong></div>
         <div class="summary-stat summary-total"><span>Total points</span><strong id="run-total">0</strong></div>
@@ -87,6 +87,10 @@
       </div>
 
       <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
+      <div id="countdown-audio-notice" class="countdown-audio-notice" role="status" aria-live="polite" hidden>
+        <span id="countdown-audio-message"></span>
+        <button id="countdown-audio-retry" class="button button-secondary" type="button" hidden>Retry countdown audio</button>
+      </div>
 
       <div class="scorekeeper-layout">
         <section class="sheet-card virtual-card" aria-labelledby="virtual-heading">
@@ -108,7 +112,7 @@
           <p class="table-help">Times count down from the run limit. Event points are calculated from duration (50 points, minus 5 every 5 seconds, minimum 25); blank points restore automatic scoring.</p>
           <div class="table-scroll">
             <table class="score-table">
-              <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>seconds remaining</small></th><th scope="col">Stop<br><small>seconds remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
+              <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>M:SS remaining</small></th><th scope="col">Stop<br><small>M:SS remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
               <tbody id="current-event-body"><tr><td colspan="6" class="empty-cell">The edition event scorecard will appear here.</td></tr></tbody>
               <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="scorecard-total">0</td><td></td></tr></tfoot>
             </table>
@@ -167,7 +171,7 @@
           <p id="history-editor-meta" class="small-note">Choose a history entry to review or correct its event times and points.</p>
           <div class="table-scroll history-table-wrap">
             <table class="score-table">
-              <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>seconds remaining</small></th><th scope="col">Stop<br><small>seconds remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
+              <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>M:SS remaining</small></th><th scope="col">Stop<br><small>M:SS remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
               <tbody id="history-event-body"><tr><td colspan="6" class="empty-cell">No run selected.</td></tr></tbody>
               <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="history-total">0</td><td></td></tr></tfoot>
             </table>
@@ -212,7 +216,7 @@
           <p id="player-leaderboard-caption" class="leaderboard-help" aria-live="polite">Select a player to review their event times and points.</p>
           <div class="table-scroll player-results-scroll">
             <table class="score-table leaderboard-table player-results-table">
-              <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>seconds remaining</small></th><th scope="col">Finish<br><small>seconds remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th></tr></thead>
+              <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>M:SS remaining</small></th><th scope="col">Finish<br><small>M:SS remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th></tr></thead>
               <tbody id="player-leaderboard-body"><tr><td colspan="5" class="empty-cell">Select a player to see their scorecard.</td></tr></tbody>
               <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="player-leaderboard-total">—</td></tr></tfoot>
             </table>
@@ -251,6 +255,7 @@
 
   <footer class="mvp-footer"><span>Garage Games</span><span>Local scorekeeper · changes save on this computer</span></footer>
   <script src="mvp-scorekeeper-time.js" defer></script>
+  <script src="mvp-scorekeeper-countdown.js" defer></script>
   <script src="mvp-scorekeeper-master.js" defer></script>
   <script src="mvp-scorekeeper-run-actions.js" defer></script>
   <script src="mvp-scorecard-order.js" defer></script>

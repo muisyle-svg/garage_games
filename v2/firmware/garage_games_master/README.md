@@ -22,11 +22,13 @@ and [USB serial default](https://wiki.seeedstudio.com/XIAO_ESP32C3_Pin_Multiplex
 - Confirm `GG1 HELLO <bootToken>` repeats every two seconds and `GG1 MODE IDLE`
   appears on boot, with each hello, and whenever mode changes. Ignore legacy
   debug lines that do not begin with `GG1`.
-- Send `GG1 STATUS ACTIVE 42` and `GG1 STATUS PAUSED 12`, each followed by a
-  newline. While the Speed game is idle, the display should show those seconds;
-  the colon is lit for ACTIVE and off for PAUSED. Short starts and the five-
-  second Speed hold should be gated. Send `GG1 STATUS FINISHED 0` to clear the
-  countdown, redraw the idle screen, and unlock the hold.
+- Send `GG1 STATUS COUNTDOWN 300`, `GG1 STATUS ACTIVE 300`, and
+  `GG1 STATUS PAUSED 42`, each followed by a newline. While the Speed game is
+  idle, COUNTDOWN should show `WAIT` with a blinking amber LED and ignore button
+  gestures. ACTIVE should show `05:00`; the other timer values use MM:SS as
+  well. ACTIVE and PAUSED block host starts and the five-second Speed hold.
+  Send `GG1 STATUS FINISHED 0` to clear the timer, redraw the idle screen, and
+  unlock the hold.
 - With status `NONE` or `ARMED`, a short debounced press/release should emit
   one `GG1 START <bootToken> <seq>`. Five quick idle taps should still clear
   the saved high score. A host with no run armed may reject those START lines;

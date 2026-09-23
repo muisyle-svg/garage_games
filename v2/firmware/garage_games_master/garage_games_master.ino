@@ -202,9 +202,15 @@ void showScore(uint16_t score) {
   display.showNumberDec(score, false);
 }
 
+void showMinutesSeconds(uint32_t totalSeconds) {
+  // TM1637 numeric formatting expects MMSS, not a total-seconds value.
+  if (totalSeconds > 5999) totalSeconds = 5999;
+  uint16_t minutesSeconds = (uint16_t)((totalSeconds / 60) * 100 + totalSeconds % 60);
+  display.showNumberDecEx(minutesSeconds, 0b01000000, true);
+}
+
 void showRemainingSeconds(uint16_t seconds) {
-  // Use the four digits as 00:SS so the active target window is obvious.
-  display.showNumberDecEx(seconds, 0b01000000, true);
+  showMinutesSeconds(seconds);
 }
 
 // --------------------------- ESP-NOW packets ---------------------------
@@ -474,6 +480,7 @@ uint32_t lastReportedSendFailures = 0;
 enum HostStatus : uint8_t {
   HOST_STATUS_NONE,
   HOST_STATUS_ARMED,
+  HOST_STATUS_COUNTDOWN,
   HOST_STATUS_ACTIVE,
   HOST_STATUS_PAUSED,
   HOST_STATUS_FINISHED
@@ -499,7 +506,27 @@ bool hostCountdownWasActive = false;
 bool scoreResetSaved = true;
 
 bool hostBlocksStarts() {
-  return hostStatus == HOST_STATUS_ACTIVE || hostStatus == HOST_STATUS_PAUSED;
+  return hostStatus == HOST_STATUS_COUNTDOWN ||
+         hostStatus == HOST_STATUS_ACTIVE || hostStatus == HOST_STATUS_PAUSED;
+}
+
+bool hostWaitingLedActive = false;
+
+void updateHostStatusLED() {
+  if (gameState != IDLE) {
+    hostWaitingLedActive = false;
+    return;
+  }
+
+  if (hostStatus == HOST_STATUS_COUNTDOWN) {
+    if (!hostWaitingLedActive) {
+      startLEDBlink(true, true, false, 700);
+      hostWaitingLedActive = true;
+    }
+  } else if (hostWaitingLedActive) {
+    stopLEDPattern();
+    hostWaitingLedActive = false;
+  }
 }
 
 bool parseHostStatusLine(const char* line, HostStatus& parsedStatus,
@@ -516,6 +543,8 @@ bool parseHostStatusLine(const char* line, HostStatus& parsedStatus,
     parsedStatus = HOST_STATUS_NONE;
   } else if (statusLength == 5 && strncmp(statusText, "ARMED", 5) == 0) {
     parsedStatus = HOST_STATUS_ARMED;
+  } else if (statusLength == 9 && strncmp(statusText, "COUNTDOWN", 9) == 0) {
+    parsedStatus = HOST_STATUS_COUNTDOWN;
   } else if (statusLength == 6 && strncmp(statusText, "ACTIVE", 6) == 0) {
     parsedStatus = HOST_STATUS_ACTIVE;
   } else if (statusLength == 6 && strncmp(statusText, "PAUSED", 6) == 0) {
@@ -544,6 +573,15 @@ void processHostSerialLine(const char* line) {
   HostStatus parsedStatus;
   uint32_t parsedRemainingSeconds;
   if (!parseHostStatusLine(line, parsedStatus, parsedRemainingSeconds)) return;
+  if (parsedStatus == HOST_STATUS_COUNTDOWN && hostStatus != HOST_STATUS_COUNTDOWN) {
+    quickTapCount = 0;
+    lastQuickTapMs = 0;
+    if (masterHoldActive) {
+      masterHoldActive = false;
+      masterStartTriggered = true;
+      masterStartArmed = false;
+    }
+  }
   hostStatus = parsedStatus;
   hostRemainingSeconds = parsedRemainingSeconds;
 }
@@ -681,12 +719,11 @@ void showHighScoreNumber() {
 void updateIdleDisplay() {
   uint32_t now = millis();
   if (hostBlocksStarts()) {
-    uint32_t displayedSeconds = hostRemainingSeconds > 9999 ? 9999 : hostRemainingSeconds;
+    uint32_t displayedSeconds = hostRemainingSeconds > 5999 ? 5999 : hostRemainingSeconds;
     if (!hostCountdownShown || hostCountdownLastSeconds != displayedSeconds ||
         hostCountdownLastStatus != hostStatus) {
-      display.showNumberDecEx((uint16_t)displayedSeconds,
-                              hostStatus == HOST_STATUS_ACTIVE ? 0b01000000 : 0,
-                              true);
+      if (hostStatus == HOST_STATUS_COUNTDOWN) showText4("WAIT");
+      else showMinutesSeconds(displayedSeconds);
       hostCountdownLastSeconds = displayedSeconds;
       hostCountdownLastStatus = hostStatus;
       hostCountdownShown = true;
@@ -1270,6 +1307,21 @@ void updateMasterButton() {
   if ((uint32_t)(now - lastButtonChangeMs) < DEBOUNCE_MS || reading == stableButton) return;
   stableButton = reading;
 
+  // Ignore every button gesture while the operator's start audio is playing.
+  // In particular, don't let waiting taps accumulate toward the local score reset.
+  if (gameState == IDLE && hostStatus == HOST_STATUS_COUNTDOWN) {
+    quickTapCount = 0;
+    lastQuickTapMs = 0;
+    masterHoldActive = false;
+    if (reading) {
+      masterStartTriggered = true;
+      masterStartArmed = false;
+    } else {
+      masterStartArmed = true;
+    }
+    return;
+  }
+
   if (reading) {
     // A press that began during a game or ending animation cannot carry over
     // and start a later game. The button must be released and pressed again
@@ -1415,6 +1467,8 @@ void loop() {
     case ERROR_STATE: updateError(); break;
     case IDLE: updateIdleDisplay(); break;
   }
+
+  updateHostStatusLED();
 
   if (gameState != IDLE) hostCountdownShown = false;
   updateLED();

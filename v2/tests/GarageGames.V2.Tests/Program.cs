@@ -7,6 +7,9 @@ var tests = new (string Name, Action Run)[]
     ("automatic event-score cutoffs", ScoreBoundaries),
     ("pause freezes time and timeout precedence", PauseAndTimeout),
     ("physical master protocol validates boot tokens and SPEED interlock", MasterProtocolAndSpeedInterlock),
+    ("countdown freezes time and rejects input and run actions", CountdownFreezesTimeAndRejectsActions),
+    ("countdown completion is durable, idempotent, and run-scoped", CountdownCompletionIsRunScopedAndIdempotent),
+    ("countdown recovery waits for replayed audio", CountdownRecovery),
     ("physical master start is durable, deduplicated, and consumes its on-deck item", PhysicalMasterStartDurabilityAndQueue),
     ("physical master status follows run countdown", PhysicalMasterStatusCountdown),
     ("timeout autosaves and releases next competitor", MvpTimeoutAndNextRun),
@@ -143,7 +146,106 @@ static void MasterProtocolAndSpeedInterlock()
     Assert.Throws<CommandException>(() => speedInterlock.EnsureArmAllowed());
     speedInterlock.ProcessLine("GG1 MODE IDLE", Receive);
     speedInterlock.EnsureArmAllowed();
-    Assert.Equal(RunStatus.Active, h.Service.StartMaster().Status);
+    Assert.Equal(RunStatus.Active, h.StartRun().Status);
+}
+
+static void CountdownFreezesTimeAndRejectsActions()
+{
+    using var h = NewHarness(durationSeconds: 20);
+    h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    var countdown = h.Service.StartMaster();
+    Assert.Equal(RunStatus.Countdown, countdown.Status);
+    Assert.Equal(null, countdown.StartedAt);
+    Assert.Equal(RunStatus.Countdown, h.Service.GetCountdownState().Status);
+    Assert.Equal($"{{\"runId\":\"{countdown.Id}\",\"status\":\"countdown\"}}",
+        JsonSerializer.Serialize(h.Service.GetCountdownState(), JsonDefaults.Options));
+    Assert.True(h.Service.GetOperatorSnapshot().Devices.All(device => device.Led == LedState.Countdown));
+
+    h.Clock.Advance(TimeSpan.FromSeconds(40));
+    var stillCounting = h.Service.GetOperatorSnapshot().CurrentRun!;
+    Assert.Equal(RunStatus.Countdown, stillCounting.Status);
+    Assert.Equal(0L, stillCounting.ActiveElapsedMs);
+    Assert.Equal(null, stillCounting.StartedAt);
+    Assert.Equal(new MasterRunStatus("COUNTDOWN", 20), h.Service.GetMasterStatus());
+    Assert.Equal(MessageDisposition.InvalidSignal, h.Service.PressEvent(countdown.Id, "event-01").Disposition);
+    Assert.Equal(MessageDisposition.InvalidSignal, h.Send(countdown, "station-02", "keypad-success", "countdown-keypad").Disposition);
+    Assert.Equal(MessageDisposition.InvalidSignal, h.Send(countdown, "station-03", "arcade-start", "countdown-arcade").Disposition);
+    Assert.True(h.Service.GetOperatorSnapshot().CurrentRun!.Events.All(result => result.Status == EventStatus.Pending));
+
+    Assert.Throws<CommandException>(() => h.Service.Finish());
+    Assert.Throws<CommandException>(() => h.Service.Record());
+    Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = stillCounting.Revision,
+        Reason = "Must wait until countdown ends",
+        Notes = "Not allowed yet"
+    }));
+    Assert.Equal(RunStatus.Aborted, h.Service.Abort().Status);
+    Assert.Equal("{\"runId\":null,\"status\":null}",
+        JsonSerializer.Serialize(h.Service.GetCountdownState(), JsonDefaults.Options));
+}
+
+static void CountdownCompletionIsRunScopedAndIdempotent()
+{
+    using var h = NewHarness(durationSeconds: 20);
+    h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    var countdown = h.Service.StartMaster();
+    h.Clock.Advance(TimeSpan.FromSeconds(8));
+    Assert.Throws<CommandException>(() => h.Service.CompleteCountdown("another-run"));
+    Assert.Equal(RunStatus.Countdown, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+
+    var active = h.Service.CompleteCountdown(countdown.Id);
+    Assert.Equal(RunStatus.Active, active.Status);
+    Assert.Equal(h.Clock.UtcNow, active.StartedAt);
+    Assert.Equal(0L, active.ActiveElapsedMs);
+    var revision = active.Revision;
+    var repeated = h.Service.CompleteCountdown(countdown.Id);
+    Assert.Equal(RunStatus.Active, repeated.Status);
+    Assert.Equal(revision, repeated.Revision);
+    Assert.Equal(active.StartedAt, repeated.StartedAt);
+    Assert.Throws<CommandException>(() => h.Service.StartMaster());
+
+    h.Clock.Advance(TimeSpan.FromSeconds(2));
+    Assert.Equal(2_000L, h.Service.GetOperatorSnapshot().CurrentRun!.ActiveElapsedMs);
+}
+
+static void CountdownRecovery()
+{
+    var path = NewPath();
+    var edition = MakeEdition();
+    RunStore? firstStore = null;
+    try
+    {
+        var firstClock = new TestClock();
+        firstStore = new RunStore(path);
+        var firstService = new RunService(firstStore, edition, firstClock);
+        var competitor = firstService.AddCompetitor("Countdown recovery competitor");
+        var queue = firstService.AddToQueue(competitor.Id, RunCategory.Official);
+        firstService.Arm(queue.Id);
+        var countdown = firstService.StartMaster();
+        firstClock.Advance(TimeSpan.FromSeconds(37));
+        firstService.Checkpoint();
+        firstStore.Dispose();
+        firstStore = null;
+
+        var recoveredClock = new TestClock();
+        using var recoveredStore = new RunStore(path);
+        var recovered = new RunService(recoveredStore, edition, recoveredClock);
+        var state = recovered.GetCountdownState();
+        Assert.Equal(countdown.Id, state.RunId);
+        Assert.Equal(RunStatus.Countdown, state.Status);
+        var recoveredRun = recovered.GetOperatorSnapshot().CurrentRun!;
+        Assert.Equal(0L, recoveredRun.ActiveElapsedMs);
+        Assert.Equal(null, recoveredRun.StartedAt);
+        Assert.DoesNotContain(recovered.GetOperatorSnapshot().Messages, message => message.Type == "recovery-paused");
+        Assert.Equal(RunStatus.Active, recovered.CompleteCountdown(countdown.Id).Status);
+        Assert.Equal(recoveredClock.UtcNow, recovered.GetOperatorSnapshot().CurrentRun!.StartedAt);
+    }
+    finally
+    {
+        firstStore?.Dispose();
+        Cleanup(path);
+    }
 }
 
 static void PhysicalMasterStartDurabilityAndQueue()
@@ -164,9 +266,12 @@ static void PhysicalMasterStartDurabilityAndQueue()
 
             var accepted = service.ReceivePhysicalMasterStart("boot-token-1", 8, startAllowed: true);
             Assert.Equal(MessageDisposition.Accepted, accepted.Disposition);
-            Assert.Equal(RunStatus.Active, accepted.Run!.Status);
+            Assert.Equal(RunStatus.Countdown, accepted.Run!.Status);
+            Assert.Equal(null, accepted.Run.StartedAt);
+            Assert.Equal(new MasterRunStatus("COUNTDOWN", 300), service.GetMasterStatus());
             Assert.Equal(1, service.GetOperatorSnapshot().Queue.Count);
             Assert.Equal(nextCompetitor.Id, service.GetOperatorSnapshot().Queue.Single().CompetitorId);
+            Assert.Equal(RunStatus.Active, service.CompleteCountdown(accepted.Run.Id).Status);
             service.RemoveFromQueue(queueId); // Existing virtual clients may still issue their post-start cleanup.
 
             Assert.Equal(MessageDisposition.Duplicate,
@@ -198,7 +303,12 @@ static void PhysicalMasterStatusCountdown()
     using var h = NewHarness(durationSeconds: 20);
     h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
     Assert.Equal(new MasterRunStatus("ARMED", 20), h.Service.GetMasterStatus());
-    h.Service.StartMaster();
+    var countdown = h.Service.StartMaster();
+    Assert.Equal(RunStatus.Countdown, countdown.Status);
+    Assert.Equal(new MasterRunStatus("COUNTDOWN", 20), h.Service.GetMasterStatus());
+    h.Clock.Advance(TimeSpan.FromSeconds(12));
+    Assert.Equal(new MasterRunStatus("COUNTDOWN", 20), h.Service.GetMasterStatus());
+    h.Service.CompleteCountdown(countdown.Id);
     h.Clock.Advance(TimeSpan.FromMilliseconds(1_100));
     Assert.Equal(new MasterRunStatus("ACTIVE", 19), h.Service.GetMasterStatus());
     h.Service.Pause();
@@ -212,7 +322,7 @@ static void MvpTimeoutAndNextRun()
 {
     using var h = new TestHarness(MakeMvpEdition(durationSeconds: 2), NewPath());
     var first = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
-    h.Service.StartMaster();
+    h.StartRun();
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(first.Id, "event-01").Disposition);
     h.Clock.Advance(TimeSpan.FromSeconds(2));
 
@@ -225,7 +335,7 @@ static void MvpTimeoutAndNextRun()
     var nextRun = h.Service.ArmCompetitor(nextCompetitor.Id, RunCategory.Official);
     Assert.Equal(RunStatus.Armed, nextRun.Status);
     Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == first.Id).Status);
-    Assert.Equal(nextRun.Id, h.Service.StartMaster().Id);
+    Assert.Equal(nextRun.Id, h.StartRun().Id);
     Assert.Equal(RunStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
 }
 
@@ -247,7 +357,7 @@ static void MvpRosterAndVirtualPresses()
     Assert.True(operatorEvents.Select(e => e.Name).SequenceEqual(edition.Events.Select(e => e.Name)),
         "The operator roster must follow the configured edition event names and order.");
     var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
-    h.Service.StartMaster();
+    h.StartRun();
     h.Clock.Advance(TimeSpan.FromSeconds(2));
     var started = h.Service.PressEvent(run.Id, "event-01");
     Assert.Equal(MessageDisposition.Accepted, started.Disposition);
@@ -265,7 +375,7 @@ static void MvpEditableScorecard()
 {
     using var h = new TestHarness(MakeMvpEdition(durationSeconds: 20), NewPath());
     var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
-    h.Service.StartMaster();
+    h.StartRun();
     h.Clock.Advance(TimeSpan.FromSeconds(4));
     var live = h.Service.GetOperatorSnapshot().CurrentRun!;
     var edited = h.Service.EditCurrentRun(new EditRunRequest
@@ -318,7 +428,7 @@ static void AutomatedScoreAndBonusPersistence()
 {
     using var h = new TestHarness(MakeMvpEdition(), NewPath());
     var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
-    h.Service.StartMaster();
+    h.StartRun();
 
     h.Service.PressEvent(run.Id, "event-01");
     h.Clock.Advance(TimeSpan.FromMilliseconds(4_990));
@@ -403,7 +513,7 @@ static void RecordPromotesNextCompetitor()
 
     var firstQueueItem = h.Service.GetOperatorSnapshot().Queue.First();
     var firstRun = h.Service.Arm(firstQueueItem.Id);
-    h.Service.StartMaster();
+    h.StartRun();
     h.Service.Finish();
 
     using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={h.Store.DatabasePath}"))
@@ -455,7 +565,7 @@ static void RecordPromotesNextCompetitor()
     Assert.True(!reopenedService.IsCurrentRun(firstRun.Id), "Reloading the selected competitor must not start a run.");
 
     var nextRun = reopenedService.ArmCompetitor(nextCompetitor.Id, RunCategory.Playoff);
-    reopenedService.StartMaster();
+    reopenedService.CompleteCountdown(reopenedService.StartMaster().Id);
     reopenedService.Finish();
     reopenedService.Record();
     selected = reopenedService.GetOperatorSnapshot();
@@ -472,7 +582,7 @@ static void FinishIsIdempotent()
 {
     using var h = new TestHarness(MakeMvpEdition(), NewPath());
     var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
-    h.Service.StartMaster();
+    h.StartRun();
     var finished = h.Service.Finish();
     Assert.Equal(RunStatus.Finished, finished.Status);
     Assert.Equal(null, finished.RecordedAt);
@@ -493,7 +603,7 @@ static void MvpAutoFinishAndRecord()
 {
     using var h = new TestHarness(MakeMvpEdition(durationSeconds: 90), NewPath());
     var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
-    h.Service.StartMaster();
+    h.StartRun();
     for (var index = 0; index < run.Events.Count; index++)
     {
         h.Service.PressEvent(run.Id, run.Events[index].EventId);
@@ -527,7 +637,7 @@ static void MvpCorrectionAutoFinish()
 {
     using var h = new TestHarness(MakeMvpEdition(durationSeconds: 90), NewPath());
     h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
-    h.Service.StartMaster();
+    h.StartRun();
     h.Clock.Advance(TimeSpan.FromSeconds(5));
     var live = h.Service.GetOperatorSnapshot().CurrentRun!;
     var corrected = h.Service.EditCurrentRun(new EditRunRequest
@@ -607,7 +717,7 @@ static void ManualOverride()
     var run = h.Service.Arm(item.Id, manualOfflineOverride: true);
     Assert.True(run.ManualOfflineOverride);
     Assert.True(run.Events.Select(e => e.EventId).Contains("event-01"));
-    h.Service.StartMaster();
+    h.StartRun();
     Assert.Equal(MessageDisposition.Offline, h.Send(run, "station-01", "event-press", "offline-packet").Disposition);
 
     var current = h.Service.GetOperatorSnapshot().CurrentRun!;
@@ -693,7 +803,7 @@ static void CategoryAndTieRank()
     var officialOne = h.Service.AddToQueue(h.CompetitorId, RunCategory.Official);
     var officialTwo = h.Service.AddToQueue(second.Id, RunCategory.Official);
     h.Service.Arm(officialOne.Id);
-    h.Service.StartMaster();
+    h.StartRun();
     h.Service.Finish();
     h.Service.Record();
     var promoted = h.Service.GetOperatorSnapshot();
@@ -701,7 +811,7 @@ static void CategoryAndTieRank()
     Assert.Equal(0, promoted.Queue.Count);
     Assert.DoesNotContain(promoted.Queue, item => item.Id == officialTwo.Id);
     h.Service.ArmCompetitor(second.Id, RunCategory.Official);
-    h.Service.StartMaster();
+    h.StartRun();
     h.Service.Finish();
     h.Service.Record();
     var leaderboard = h.Service.GetScoreboard().Leaderboard;
@@ -719,7 +829,7 @@ static void RecoveryAndLock()
     var competitor = service.AddCompetitor("Recovery competitor");
     var queue = service.AddToQueue(competitor.Id, RunCategory.Official);
     service.Arm(queue.Id);
-    service.StartMaster();
+    service.CompleteCountdown(service.StartMaster().Id);
     clock.Advance(TimeSpan.FromSeconds(4));
     service.Checkpoint();
     Assert.Throws<InvalidOperationException>(() => new RunStore(path));
@@ -750,7 +860,7 @@ static void ClearDatabaseSafety()
         service.AddToQueue(competitor.Id, RunCategory.Official);
         service.AddToQueue(queuedCompetitor.Id, RunCategory.Playoff);
         var run = service.ArmCompetitor(competitor.Id, RunCategory.Official);
-        service.StartMaster();
+        service.CompleteCountdown(service.StartMaster().Id);
         service.PressEvent(run.Id, "event-01");
         var liveRun = service.GetOperatorSnapshot().CurrentRun!;
         service.EditCurrentRun(new EditRunRequest
@@ -820,7 +930,7 @@ static void ClearDatabaseSafety()
         var newQueueItem = service.AddToQueue(newCompetitor.Id, RunCategory.Official);
         var newRun = service.Arm(newQueueItem.Id);
         Assert.Equal(RunStatus.Armed, newRun.Status);
-        Assert.Equal(RunStatus.Active, service.StartMaster().Status);
+        Assert.Equal(RunStatus.Active, service.CompleteCountdown(service.StartMaster().Id).Status);
     }
     finally
     {
@@ -870,7 +980,7 @@ static void EditsAndIsolation()
     var second = h.AddCompetitor("Live competitor");
     var liveQueue = h.Service.AddToQueue(second.Id, RunCategory.Playoff);
     h.Service.Arm(liveQueue.Id);
-    h.Service.StartMaster();
+    h.StartRun();
     var liveBeforeTick = h.Service.GetOperatorSnapshot().CurrentRun!;
     h.Clock.Advance(TimeSpan.FromSeconds(2));
     var liveAfterEdit = h.Service.EditCurrentRun(new EditRunRequest
@@ -1030,6 +1140,12 @@ sealed class TestHarness : IDisposable
 
     public CompetitorRecord AddCompetitor(string name) => Service.AddCompetitor(name);
 
+    public RunRecord StartRun()
+    {
+        var countdown = Service.StartMaster();
+        return Service.CompleteCountdown(countdown.Id);
+    }
+
     public RunRecord ArmAndStart(RunCategory category = RunCategory.Official)
     {
         if (category != RunCategory.Official)
@@ -1042,8 +1158,8 @@ sealed class TestHarness : IDisposable
             Service.AddToQueue(CompetitorId, category);
         }
         var itemToArm = Service.GetOperatorSnapshot().Queue.First();
-        var armed = Service.Arm(itemToArm.Id);
-        return Service.StartMaster();
+        Service.Arm(itemToArm.Id);
+        return StartRun();
     }
 
     public InputResult Send(RunRecord run, string deviceId, string type, string messageId, long? elapsed = null, string payload = "{}")

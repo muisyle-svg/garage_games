@@ -111,6 +111,9 @@ select:disabled, input:disabled { opacity: .58; }
 .on-deck-remove { min-height: 30px; padding: .38rem .58rem; font-size: .63rem; }
 .run-state-banner { margin-bottom: .85rem; padding: .72rem .85rem; border: 1px solid rgba(104, 214, 164, .2); border-radius: 9px; background: rgba(104, 214, 164, .055); color: #c4e7d3; font-size: .74rem; line-height: 1.4; }
 .run-state-banner.is-discarded { border-color: rgba(244, 189, 96, .32); background: rgba(244, 189, 96, .08); color: #f5d69c; }
+.countdown-audio-notice:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .55rem; margin: -.35rem 0 .75rem; padding: .6rem .8rem; border: 1px solid rgba(244, 189, 96, .28); border-radius: 9px; background: rgba(244, 189, 96, .07); color: #f5d69c; font-size: .7rem; line-height: 1.4; }
+.countdown-audio-notice [hidden] { display: none !important; }
+.countdown-audio-notice .button { min-height: 32px; padding: .4rem .65rem; font-size: .66rem; }
 .scorekeeper-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: .8rem; align-items: start; }
 .sheet-card { overflow: hidden; }
 .card-heading { display: flex; align-items: center; justify-content: space-between; gap: .8rem; padding: .85rem .95rem .7rem; }

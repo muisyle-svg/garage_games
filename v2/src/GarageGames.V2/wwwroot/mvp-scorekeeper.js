@@ -80,6 +80,9 @@
     progress: $("event-progress"),
     runTotal: $("run-total"),
     banner: $("run-state-banner"),
+    countdownNotice: $("countdown-audio-notice"),
+    countdownMessage: $("countdown-audio-message"),
+    countdownRetry: $("countdown-audio-retry"),
     virtualButtons: $("virtual-event-buttons"),
     virtualNote: $("virtual-note"),
     currentBody: $("current-event-body"),
@@ -111,7 +114,7 @@
   };
 
   function isLiveLock(run) {
-    return Boolean(run && ["armed", "active", "paused", "finished"].includes(run.status));
+    return Boolean(run && ["armed", "countdown", "active", "paused", "finished"].includes(run.status));
   }
 
   function make(tag, className, text) {
@@ -145,10 +148,47 @@
       try { payload = JSON.parse(raw); } catch { payload = null; }
     }
     if (!response.ok) {
-      const message = payload && (payload.detail || payload.title || payload.message);
+      const message = payload && (payload.detail || payload.title || payload.message || payload.error);
       throw new Error(message || raw || `Request failed (${response.status}).`);
     }
     return payload;
+  }
+
+  const countdownCoordinator = window.GarageGamesCountdown.createCountdownCoordinator({
+    readState: () => request("/api/run/countdown-state", { cache: "no-store" }),
+    finish: (runId) => request("/api/run/countdown-finished", { method: "POST", body: JSON.stringify({ runId }) }),
+    createAudio: () => {
+      const audio = new Audio("/sounds/3-seconds-countdown-deep-voice-game.mp3");
+      audio.preload = "auto";
+      return audio;
+    },
+    onChange: handleCountdownUpdate
+  });
+
+  function handleCountdownUpdate(update) {
+    const isCountdown = update.status === "countdown";
+    ui.countdownNotice.hidden = !isCountdown;
+    if (isCountdown) {
+      const retryable = update.playback === "failed" || update.playback === "finishFailed";
+      ui.countdownRetry.hidden = !retryable;
+      ui.countdownRetry.textContent = update.playback === "finishFailed" ? "Retry starting run" : "Retry countdown audio";
+      ui.countdownMessage.textContent = retryable
+        ? `Run remains in Countdown; the timer has not started. ${update.error || ""}`.trim()
+        : update.playback === "finishing"
+          ? "Countdown audio ended. Starting the run…"
+          : "Countdown audio playing. The timer and event buttons unlock when it ends.";
+      const current = state.snapshot?.currentRun;
+      if (current?.id === update.runId && current.status !== "countdown") {
+        current.status = "countdown";
+        render();
+      }
+      return;
+    }
+
+    ui.countdownRetry.hidden = true;
+    if (["active", "aborted", "finished", "timedout", "completed", "idle"].includes(update.status)) {
+      void loadSnapshot(true);
+    }
   }
 
   function setConnection(online) {
@@ -353,9 +393,7 @@
   }
 
   function parsedSeconds(value) {
-    if (value === "") return null;
-    const number = Number(value);
-    return Number.isFinite(number) && number >= 0 ? number : null;
+    return scorekeeperTime.parseClockTimeToSeconds(value);
   }
 
   function runDurationSeconds(run) {
@@ -363,17 +401,12 @@
   }
 
   function formatSeconds(milliseconds) {
-    if (milliseconds === null || milliseconds === undefined) return "";
-    const seconds = Number(milliseconds) / 1000;
-    return Number.isFinite(seconds) ? String(Number(seconds.toFixed(3))) : "";
+    return scorekeeperTime.formatClockMs(milliseconds);
   }
 
   function formatDuration(milliseconds) {
     if (milliseconds === null || milliseconds === undefined || milliseconds < 0) return "—";
-    const tenths = Math.floor(milliseconds / 100);
-    const seconds = Math.floor(tenths / 10) % 60;
-    const minutes = Math.floor(tenths / 600);
-    return `${minutes}:${String(seconds).padStart(2, "0")}.${tenths % 10}`;
+    return scorekeeperTime.formatClockMs(milliseconds);
   }
 
   function displayedValue(run, event, field) {
@@ -465,12 +498,11 @@
 
   function buildTimeInput(run, event, field, editable) {
     const input = make("input", "score-input");
-    input.type = "number";
-    input.min = "0";
-    input.max = String(runDurationSeconds(run));
-    input.step = "0.001";
-    input.inputMode = "decimal";
-    input.setAttribute("aria-label", `${event.name} ${field === "start" ? "start" : "stop"} time in seconds remaining`);
+    input.type = "text";
+    input.placeholder = "M:SS";
+    input.inputMode = "numeric";
+    input.autocomplete = "off";
+    input.setAttribute("aria-label", `${event.name} ${field === "start" ? "start" : "stop"} time, M:SS remaining or seconds`);
     input.dataset.field = field;
     input.dataset.eventId = event.eventId;
     input.dataset.runId = run?.id || "";
@@ -592,6 +624,7 @@
       const competitor = competitorName(run.competitorId);
       const copy = {
         armed: "Run is armed and waiting for a physical Start press, or use Start armed run here.",
+        countdown: "Countdown audio is playing. The run timer and event buttons start when it ends.",
         active: "Run in progress. Event timestamps count down from the run limit.",
         paused: "Run paused. Resume when the competitor is ready.",
         finished: "All events complete. Timer stopped · finished, not recorded.",
@@ -611,6 +644,8 @@
       ? "Start a run to enable the virtual event buttons."
       : run.status === "active"
         ? "Times count down from the run limit. Press once to start an event and again to finish it."
+        : run.status === "countdown"
+          ? "Countdown audio must finish before event buttons become available."
         : run.status === "paused"
           ? "Resume the run before recording event presses."
           : run.status === "armed"
@@ -630,7 +665,7 @@
       let hint = "Start";
       if (event.status === "active") {
         const remainingMs = Math.max(0, runDurationSeconds(run) * 1000 - currentElapsedMs(run));
-        hint = `Stop · ${formatSeconds(remainingMs)}s left`;
+        hint = `Stop · ${formatSeconds(remainingMs)} left`;
       }
       if (event.status === "completed") hint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
       const stateLabel = make("small", "", hint);
@@ -1009,7 +1044,7 @@
     const elapsedMs = run ? currentElapsedMs(run) : 0;
     const remainingMs = Math.max(0, limitMs - elapsedMs);
     const totalSeconds = Math.ceil(remainingMs / 1000);
-    ui.countdown.textContent = `${String(Math.floor(totalSeconds / 60)).padStart(2, "0")}:${String(totalSeconds % 60).padStart(2, "0")}`;
+    ui.countdown.textContent = scorekeeperTime.formatClockMs(totalSeconds * 1000);
     ui.countdown.classList.toggle("is-expired", Boolean(run && remainingMs === 0));
     if (run?.status === "active" && remainingMs === 0 && state.timeoutRefreshRunId !== run.id) {
       state.timeoutRefreshRunId = run.id;
@@ -1095,6 +1130,8 @@
       category: ui.category.value
     }, () => loadSnapshot(true));
     state.discardedRunNotice = null;
+    if (started.run) countdownCoordinator.observe(started.run);
+    else await countdownCoordinator.poll();
     await removeMatchingQueueEntryAfterStart(started.competitorId, started.category);
   }
 
@@ -1180,7 +1217,7 @@
               edit[field === "start" ? "clearStartElapsedMs" : "clearFinishElapsedMs"] = true;
             } else {
               const milliseconds = scorekeeperTime.elapsedMsFromRemainingSeconds(parsedSeconds(value), runDurationSeconds(run));
-              if (milliseconds === null) throw new Error("Event times must be zero or more seconds.");
+              if (milliseconds === null) throw new Error("Enter event times as M:SS remaining or as seconds within the run limit.");
               edit[field === "start" ? "startElapsedMs" : "finishElapsedMs"] = milliseconds;
             }
           } else if (field === "score") {
@@ -1292,6 +1329,7 @@
       });
     });
     ui.refresh.addEventListener("click", () => loadSnapshot(false));
+    ui.countdownRetry.addEventListener("click", () => countdownCoordinator.retry());
     ui.armPhysical.addEventListener("click", () => performAction(armPhysicalRun, "Run armed · waiting for the physical Start button."));
     ui.start.addEventListener("click", () => performAction(startRun, "Run started."));
     ui.masterConnect.addEventListener("click", () => {
@@ -1331,6 +1369,7 @@
           method: "POST",
           body: JSON.stringify({ reason })
         });
+        countdownCoordinator.observe({ runId: run.id, status: "aborted" });
         state.selectedCompetitorAfterRefresh = run.competitorId;
         state.discardedRunNotice = notice;
         state.drafts.delete(run.id);
@@ -1386,7 +1425,9 @@
   bindActions();
   loadSnapshot(false);
   loadMaster(false);
+  void countdownCoordinator.poll();
   window.setInterval(() => loadSnapshot(true), 2000);
   window.setInterval(() => loadMaster(true), 2000);
+  window.setInterval(() => countdownCoordinator.poll(), 250);
   window.setInterval(tickClock, 200);
 })();

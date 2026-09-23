@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { isDiscardableRun } = require("../../src/GarageGames.V2/wwwroot/mvp-scorekeeper-run-actions.js");
 
 test("only unrecorded runs in abortable current states can be discarded", () => {
-  for (const status of ["armed", "active", "paused", "finished"]) {
+  for (const status of ["armed", "countdown", "active", "paused", "finished"]) {
     assert.equal(isDiscardableRun({ status, isRecorded: false }), true, `${status} should be discardable`);
     assert.equal(isDiscardableRun({ status }), true, `${status} with no recorded marker should be discardable`);
   }

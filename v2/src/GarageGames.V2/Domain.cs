@@ -19,7 +19,8 @@ public enum RunStatus
     Completed,
     TimedOut,
     Aborted,
-    Superseded
+    Superseded,
+    Countdown
 }
 
 public enum RunPhase
@@ -58,7 +59,8 @@ public enum LedState
     Bonus,
     Paused,
     OfflineError,
-    RunFinished
+    RunFinished,
+    Countdown
 }
 
 public enum MessageDisposition
