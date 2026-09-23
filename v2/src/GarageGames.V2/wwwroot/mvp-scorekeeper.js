@@ -1331,7 +1331,7 @@
     ui.refresh.addEventListener("click", () => loadSnapshot(false));
     ui.countdownRetry.addEventListener("click", () => countdownCoordinator.retry());
     ui.armPhysical.addEventListener("click", () => performAction(armPhysicalRun, "Run armed · waiting for the physical Start button."));
-    ui.start.addEventListener("click", () => performAction(startRun, "Run started."));
+    ui.start.addEventListener("click", () => performAction(startRun, "Countdown started. Run begins at Go."));
     ui.masterConnect.addEventListener("click", () => {
       const port = ui.masterPort.value;
       if (!port) return;
