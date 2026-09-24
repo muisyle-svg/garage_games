@@ -72,6 +72,31 @@ test("event score preview honors override precedence, manual scoring, and incomp
   assert.equal(previewEventScore({ ...completed, finishElapsedMs: 9_999 }, scoring), 0);
 });
 
+test("legacy snapshots without a non-null event base keep their saved edition base and minimum", () => {
+  const scoring = { basePoints: 83, decayEverySeconds: 10, decayPoints: 7, minimumPoints: 31 };
+  const completed = (durationMs) => ({ status: "completed", startElapsedMs: 0, finishElapsedMs: durationMs });
+
+  assert.equal(previewEventScore(completed(0), scoring, {}), 83);
+  assert.equal(previewEventScore(completed(10_000), scoring, { basePoints: null }), 76);
+  assert.equal(previewEventScore(completed(100_000), scoring, { basePoints: null }), 31);
+});
+
+test("explicit per-event starting points use rounded-up half minimum and saved edition decay", () => {
+  const scoring = { basePoints: 80, decayEverySeconds: 10, decayPoints: 8, minimumPoints: 7 };
+  const completed = (durationMs) => ({ status: "completed", startElapsedMs: 0, finishElapsedMs: durationMs });
+
+  assert.equal(previewEventScore(completed(0), scoring, { basePoints: 51 }), 51);
+  assert.equal(previewEventScore(completed(10_000), scoring, { basePoints: 51 }), 43);
+  assert.equal(previewEventScore(completed(100_000), scoring, { basePoints: 51 }), 26,
+    "an odd starting value clamps at ceil(51 / 2), even if the edition minimum differs");
+  assert.equal(previewEventScore(completed(100_000), scoring, { basePoints: 0 }), 0);
+});
+
+test("score overrides still win when an event definition has its own starting points", () => {
+  const result = { status: "completed", startElapsedMs: 0, finishElapsedMs: 100_000, scoreOverride: 12 };
+  assert.equal(previewEventScore(result, { basePoints: 80, minimumPoints: 40 }, { basePoints: 51 }), 12);
+});
+
 test("blank score draft stays blank while its total uses auto preview; typed points remain editable", () => {
   assert.deepEqual(eventScoreDraftView({ scoreTouched: true, scoreValue: "", timingTouched: true, previewScore: 25, persistedScore: 0 }), {
     inputValue: "",

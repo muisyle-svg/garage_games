@@ -472,6 +472,31 @@
       nameInput.setAttribute("aria-label", `Event ${index + 1} name`);
       nameLabel.appendChild(nameInput);
 
+      const scoring = make("div", "setup-event-scoring-row");
+      const basePointsLabel = make("label", "setup-event-points");
+      basePointsLabel.append(make("span", "", "Starting points"));
+      const basePointsInput = make("input");
+      basePointsInput.type = "number";
+      basePointsInput.min = "0";
+      basePointsInput.max = "1000000";
+      basePointsInput.step = "1";
+      basePointsInput.inputMode = "numeric";
+      basePointsInput.value = event.basePoints ?? "";
+      basePointsInput.dataset.setupField = "basePoints";
+      basePointsInput.dataset.setupEventId = event.eventId;
+      basePointsInput.setAttribute("aria-label", `${event.name} starting points`);
+      basePointsLabel.appendChild(basePointsInput);
+      const minimumLabel = make("div", "setup-event-minimum");
+      minimumLabel.append(make("span", "", "Minimum points"));
+      const basePointsValue = event.basePoints === "" ? NaN : Number(event.basePoints);
+      const minimumOutput = make("output", "", event.basePointsInherited
+        ? "Edition rule"
+        : Number.isInteger(basePointsValue) && basePointsValue >= 0 ? `${Math.ceil(basePointsValue / 2)} points` : "—");
+      minimumOutput.dataset.setupMinimum = "true";
+      minimumOutput.setAttribute("aria-label", `${event.name} computed minimum points`);
+      minimumLabel.appendChild(minimumOutput);
+      scoring.append(basePointsLabel, minimumLabel);
+
       const kind = make("div", "setup-event-kind");
       kind.append(make("span", "", "Event type"), make("strong", "", ({ standard: "Standard", keypad: "Keypad", magneticArcade: "Magnetic arcade" })[event.type] || event.type));
       const remove = make("button", "button button-quiet setup-event-remove", "Remove");
@@ -514,7 +539,7 @@
       deviceRow.append(assignmentLabel, unassign, readiness);
 
       const internalId = make("p", "setup-event-id", `Event ID · ${event.eventId}`);
-      row.append(top, deviceRow, internalId);
+      row.append(top, scoring, deviceRow, internalId);
       ui.setupEventList.appendChild(row);
     });
     renderSetupSelection();
@@ -562,6 +587,13 @@
     if (!target) return;
     if (input.dataset.setupField === "name") target.name = input.value;
     else if (input.dataset.setupField === "assignment") target.assignmentValue = input.value;
+    else if (input.dataset.setupField === "basePoints") {
+      target.basePoints = input.value;
+      target.basePointsInherited = false;
+      const minimum = input.closest(".setup-event-row")?.querySelector("[data-setup-minimum]");
+      const value = input.value.trim() === "" ? NaN : Number(input.value);
+      if (minimum) minimum.textContent = Number.isInteger(value) && value >= 0 ? `${Math.ceil(value / 2)} points` : "—";
+    }
     markSetupChanged();
   }
 
@@ -862,12 +894,13 @@
         ? "completed"
         : startElapsedMs !== null ? "active" : "pending";
     }
+    const eventDefinition = run.edition?.events?.find((item) => item.eventId === event.eventId) || null;
     return scorekeeperTime.previewEventScore({
       status,
       startElapsedMs,
       finishElapsedMs,
       scoreOverride
-    }, run.edition?.scoring);
+    }, run.edition?.scoring, eventDefinition);
   }
 
   function eventScoreDraftView(run, event) {

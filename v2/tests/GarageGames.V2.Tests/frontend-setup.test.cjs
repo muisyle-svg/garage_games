@@ -29,6 +29,8 @@ test("new events receive unique non-MAC placeholders and MAC assignments normali
   const added = setup.addEvent(draft);
   assert.notEqual(added.eventId, draft.events[0].eventId);
   assert.notEqual(added.unassignedDeviceId, draft.events[0].unassignedDeviceId);
+  assert.equal(added.basePoints, 50);
+  assert.equal(added.basePointsInherited, false);
   assert.equal(setup.hardwareId("aa:bb:cc:dd:ee:ff"), "AABBCCDDEEFF");
 
   added.assignmentValue = "aa:bb:cc:dd:ee:ff";
@@ -38,6 +40,47 @@ test("new events receive unique non-MAC placeholders and MAC assignments normali
     draft.events[0].assignmentValue = "AABBCCDDEEFF";
     setup.buildSetupPayload(draft);
   }, /already assigned/);
+});
+
+test("inherited starting points display the default but remain null when unrelated setup fields are saved", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-inherited",
+    name: "Edition",
+    scoring: { basePoints: 63 },
+    events: [
+      { eventId: "event-null", name: "Inherited null", deviceId: "unassigned-null", basePoints: null },
+      { eventId: "event-missing", name: "Inherited missing", deviceId: "unassigned-missing" }
+    ]
+  });
+
+  assert.equal(draft.events[0].basePoints, 63);
+  assert.equal(draft.events[1].basePoints, 63);
+  assert.equal(draft.events[0].basePointsInherited, true);
+  const payload = setup.buildSetupPayload(draft);
+  assert.equal(payload.events[0].basePoints, null);
+  assert.equal(payload.events[1].basePoints, null);
+
+  draft.events[0].name = "Renamed only";
+  draft.events[1].assignmentValue = "AABBCCDDEEFF";
+  assert.equal(setup.buildSetupPayload(draft).events[0].basePoints, null);
+  assert.equal(setup.buildSetupPayload(draft).events[1].basePoints, null);
+});
+
+test("edited starting points, including zero and odd values, save explicitly", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-explicit",
+    name: "Edition",
+    events: [
+      { eventId: "event-zero", name: "Zero", deviceId: "unassigned-zero", basePoints: 0 },
+      { eventId: "event-inherited", name: "Odd", deviceId: "unassigned-odd", basePoints: null }
+    ]
+  });
+  draft.events[1].basePoints = "51";
+  draft.events[1].basePointsInherited = false;
+
+  const payload = setup.buildSetupPayload(draft);
+  assert.equal(payload.events[0].basePoints, 0);
+  assert.equal(payload.events[1].basePoints, 51);
 });
 
 test("save validation rejects malformed MACs, duplicate event IDs, empty names, and an empty roster", () => {
@@ -56,6 +99,27 @@ test("save validation rejects malformed MACs, duplicate event IDs, empty names, 
   assert.throws(() => setup.buildSetupPayload(draft), /unique event ID/);
   draft.events = [];
   assert.throws(() => setup.buildSetupPayload(draft), /at least one event/);
+});
+
+test("save validation requires starting points to be a nonnegative whole number", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-points-validation",
+    name: "Edition",
+    events: [{ eventId: "event-1", name: "Button", deviceId: "unassigned-event-1" }]
+  });
+
+  for (const invalid of ["", "  ", "1.5", "-1", "1000001", "not a number"]) {
+    draft.events[0].basePoints = invalid;
+    draft.events[0].basePointsInherited = false;
+    assert.throws(() => setup.buildSetupPayload(draft), /starting points must be a whole number from 0 to 1,000,000/);
+  }
+  draft.events[0].basePoints = "0";
+  assert.equal(setup.buildSetupPayload(draft).events[0].basePoints, 0);
+});
+
+test("starting-points field exposes the backend maximum", () => {
+  const source = fs.readFileSync(require.resolve("../../src/GarageGames.V2/wwwroot/mvp-scorekeeper.js"), "utf8");
+  assert.match(source, /basePointsInput\.max = "1000000"/);
 });
 
 test("scan results accept canonical and flexible response shapes without claiming disconnected devices", () => {

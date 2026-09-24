@@ -38,6 +38,8 @@
   function normalizeSetup(payload) {
     const source = payload?.setup || payload?.result || payload || {};
     const sourceEvents = Array.isArray(source.events) ? source.events : [];
+    const configuredDefault = source.scoring?.basePoints ?? source.edition?.scoring?.basePoints;
+    const defaultBasePoints = Number.isInteger(configuredDefault) && configuredDefault >= 0 ? configuredDefault : 50;
     const usedEventIds = new Set();
     const sourceWithIds = sourceEvents.map((event, index) => {
       let eventId = String(event?.eventId || "").trim();
@@ -69,6 +71,8 @@
         eventId,
         name: String(event.name || `Event ${index + 1}`),
         type: String(event.type || "standard"),
+        basePoints: event.basePoints === null || event.basePoints === undefined ? defaultBasePoints : event.basePoints,
+        basePointsInherited: event.basePoints === null || event.basePoints === undefined,
         assignmentValue: assignedMac || "",
         unassignedDeviceId: placeholderDeviceId
       };
@@ -94,6 +98,8 @@
       eventId,
       name: `Event ${(draft?.events || []).length + 1}`,
       type: "standard",
+      basePoints: 50,
+      basePointsInherited: false,
       assignmentValue: "",
       unassignedDeviceId: placeholder
     };
@@ -115,6 +121,9 @@
       const eventName = String(event.name || "").trim();
       if (!eventId || eventIds.has(eventId.toLowerCase())) throw new Error("Each event needs a unique event ID.");
       if (!eventName) throw new Error(`Enter a name for event ${index + 1}.`);
+      if (!Number.isInteger(Number(event.basePoints)) || Number(event.basePoints) < 0 || Number(event.basePoints) > 1_000_000 || String(event.basePoints).trim() === "") {
+        throw new Error(`${eventName || `Event ${index + 1}`}: starting points must be a whole number from 0 to 1,000,000.`);
+      }
       eventIds.add(eventId.toLowerCase());
 
       const rawAssignment = String(event.assignmentValue || "").trim();
@@ -127,7 +136,13 @@
         deviceId = uniquePlaceholder(eventId, deviceIds);
       }
       deviceIds.add(deviceId.toLowerCase());
-      return { eventId, name: eventName, deviceId, type: String(event.type || "standard") };
+      return {
+        eventId,
+        name: eventName,
+        deviceId,
+        type: String(event.type || "standard"),
+        basePoints: event.basePointsInherited ? null : Number(event.basePoints)
+      };
     });
 
     return { editionId, name, events: payloadEvents };

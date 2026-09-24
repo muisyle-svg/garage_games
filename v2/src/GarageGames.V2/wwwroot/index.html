@@ -110,7 +110,7 @@
             <div><p class="mvp-kicker">Run scorecard</p><h2 id="scorecard-heading">Times & points</h2></div>
             <span id="scorecard-save-state" class="save-state">No unsaved edits</span>
           </div>
-          <p class="table-help">Times count down from the run limit. Event points are calculated from duration (50 points, minus 5 every 5 seconds, minimum 25); blank points restore automatic scoring.</p>
+          <p class="table-help">Times count down from the run limit. Automatic points follow the scoring rules saved with each run; blank points restore automatic scoring.</p>
           <div class="table-scroll">
             <table class="score-table">
               <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>M:SS remaining</small></th><th scope="col">Stop<br><small>M:SS remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th></tr></thead>
@@ -242,7 +242,7 @@
           <div><p class="mvp-kicker">Edition configuration</p><h2 id="setup-heading">Events & hardware</h2></div>
           <span id="setup-event-count" class="small-note">— events</span>
         </div>
-        <p class="setup-intro">Name the edition and configure its event roster. Physical availability is unverified until a fresh scan completes. Virtual event presses remain available when hardware is missing or unassigned.</p>
+        <p class="setup-intro">Name the edition, set each event’s starting points, and configure its roster. Events that inherit edition scoring retain its global minimum; explicit event values lose 5 points every 5 seconds, down to half the starting value rounded up. Physical availability is unverified until a fresh scan completes; virtual event presses remain available when hardware is missing or unassigned.</p>
         <div id="setup-load-state" class="setup-load-state" role="status" aria-live="polite">Loading setup…</div>
         <button id="setup-retry-load" class="button button-quiet setup-retry" type="button" hidden>Retry loading setup</button>
         <div id="setup-content" hidden>

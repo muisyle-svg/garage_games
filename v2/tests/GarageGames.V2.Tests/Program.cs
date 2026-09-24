@@ -5,6 +5,8 @@ using System.Text.Json;
 var tests = new (string Name, Action Run)[]
 {
     ("automatic event-score cutoffs", ScoreBoundaries),
+    ("per-event base points flow through live scoring, edits, history, and leaderboard", PerEventBasePoints),
+    ("legacy config and snapshots keep their persisted global scoring floors", LegacyScoringFallback),
     ("pause freezes time and timeout precedence", PauseAndTimeout),
     ("physical master protocol validates boot tokens and SPEED interlock", MasterProtocolAndSpeedInterlock),
     ("countdown freezes time and rejects input and run actions", CountdownFreezesTimeAndRejectsActions),
@@ -75,7 +77,26 @@ static void ScoreBoundaries()
     Assert.Equal(40, Score(10_000, rule));
     Assert.Equal(25, Score(25_000, rule));
 
-    static int Score(long duration, ScoringRule rule) => ScoreCalculator.Calculate(new EventRecord
+    Assert.Equal(40, Score(0, rule, 40));
+    Assert.Equal(35, Score(5_000, rule, 40));
+    Assert.Equal(20, Score(30_000, rule, 40));
+    Assert.Equal(26, Score(25_000, rule, 51));
+    Assert.Equal(26, Score(30_000, rule, 51));
+    Assert.Equal(0, Score(30_000, rule, 0));
+
+    var manual = new EventRecord
+    {
+        EventId = "e",
+        Name = "e",
+        DeviceId = "d",
+        Status = EventStatus.Completed,
+        StartElapsedMs = 0,
+        FinishElapsedMs = 30_000,
+        ScoreOverride = 77
+    };
+    Assert.Equal(77, ScoreCalculator.Calculate(manual, rule, 40));
+
+    static int Score(long duration, ScoringRule rule, int? basePoints = null) => ScoreCalculator.Calculate(new EventRecord
     {
         EventId = "e",
         Name = "e",
@@ -83,7 +104,108 @@ static void ScoreBoundaries()
         Status = EventStatus.Completed,
         StartElapsedMs = 0,
         FinishElapsedMs = duration
-    }, rule);
+    }, rule, basePoints);
+}
+
+static void PerEventBasePoints()
+{
+    var edition = MakeMvpEdition();
+    edition.Events[0].BasePoints = 40;
+    edition.Events[1].BasePoints = 51;
+    using var h = new TestHarness(edition, NewPath());
+    var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
+    h.StartRun();
+
+    h.Service.PressEvent(run.Id, "event-01");
+    h.Service.PressEvent(run.Id, "event-02");
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    var completed = h.Service.PressEvent(run.Id, "event-01").Run!;
+    Assert.Equal(35, completed.Events.Single(e => e.EventId == "event-01").Score);
+
+    h.Clock.Advance(TimeSpan.FromSeconds(20));
+    completed = h.Service.PressEvent(run.Id, "event-02").Run!;
+    Assert.Equal(26, completed.Events.Single(e => e.EventId == "event-02").Score);
+    Assert.Equal(40, completed.Edition.Events.Single(e => e.EventId == "event-01").BasePoints);
+    Assert.Equal(51, completed.Edition.Events.Single(e => e.EventId == "event-02").BasePoints);
+
+    var edited = h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = completed.Revision,
+        Reason = "Apply a manual score while correcting timing",
+        Events = [new EventEditRequest { EventId = "event-01", FinishElapsedMs = 15_000, ScoreOverride = 77 }]
+    });
+    Assert.Equal(77, edited.Events.Single(e => e.EventId == "event-01").Score);
+
+    edited = h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = edited.Revision,
+        Reason = "Clear the manual score and correct timing",
+        Events = [new EventEditRequest { EventId = "event-01", FinishElapsedMs = 10_000, ClearScoreOverride = true }]
+    });
+    Assert.Equal(30, edited.Events.Single(e => e.EventId == "event-01").Score);
+
+    var finished = h.Service.Finish();
+    Assert.Equal(30, finished.Events.Single(e => e.EventId == "event-01").Score);
+    Assert.Equal(26, finished.Events.Single(e => e.EventId == "event-02").Score);
+    var recorded = h.Service.Record();
+    Assert.Equal(56, recorded.TotalPoints);
+    Assert.Equal(56, h.Service.GetOperatorSnapshot().Leaderboard.Single().Points);
+    var persistedEditionSnapshot = h.Store.Load().Runs.Single(item => item.Id == recorded.Id).Edition;
+    Assert.Equal(40, persistedEditionSnapshot.Events.Single(e => e.EventId == "event-01").BasePoints);
+    Assert.Equal(51, persistedEditionSnapshot.Events.Single(e => e.EventId == "event-02").BasePoints);
+
+    var setup = h.Service.GetSetup();
+    setup.Events[0].BasePoints = 80;
+    var changedSetup = h.Service.UpdateSetup(setup);
+    Assert.True(changedSetup.EditionId != recorded.EditionId);
+    Assert.Equal(80, changedSetup.Events[0].BasePoints);
+
+    var correctedHistory = h.Service.EditHistoricalRun(recorded.Id, new EditRunRequest
+    {
+        ExpectedRevision = recorded.Revision,
+        Reason = "Correct historical timing using the saved edition rules",
+        Events = [new EventEditRequest { EventId = "event-01", FinishElapsedMs = 5_000 }]
+    });
+    Assert.Equal(35, correctedHistory.Events.Single(e => e.EventId == "event-01").Score);
+    Assert.Equal(40, correctedHistory.Edition.Events.Single(e => e.EventId == "event-01").BasePoints);
+    Assert.Equal(0, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+}
+
+static void LegacyScoringFallback()
+{
+    var oldConfig = JsonSerializer.Deserialize<EditionDefinition>("""
+        {"editionId":"legacy-config","name":"Legacy config","events":[{"eventId":"event-01","name":"Old event","deviceId":"station-01"}]}
+        """, JsonDefaults.Options)!;
+    EditionDefinition.Validate(oldConfig, "legacy test config");
+    var configSnapshot = oldConfig.ToSnapshot();
+    Assert.Equal(null, configSnapshot.Events.Single().BasePoints);
+    Assert.Equal(50, configSnapshot.Scoring.BasePoints);
+    Assert.Equal(25, configSnapshot.Scoring.MinimumPoints);
+    Assert.Equal(25, ScoreCalculator.Calculate(CompletedEvent(30_000), configSnapshot.Scoring,
+        configSnapshot.Events.Single().BasePoints));
+
+    var oldSnapshot = JsonSerializer.Deserialize<EditionSnapshot>("""
+        {"editionId":"legacy-snapshot","name":"Legacy snapshot","durationLimitSeconds":300,"scoring":{"basePoints":43,"decayPoints":5,"decayEverySeconds":5,"minimumPoints":17},"events":[{"eventId":"event-01","name":"Old event","deviceId":"station-01","type":"standard"}]}
+        """, JsonDefaults.Options)!;
+    Assert.Equal(null, oldSnapshot.Events.Single().BasePoints);
+    Assert.Equal(17, ScoreCalculator.Calculate(CompletedEvent(30_000), oldSnapshot.Scoring,
+        oldSnapshot.Events.Single().BasePoints));
+
+    var explicitZero = JsonSerializer.Deserialize<EventDefinition>("""
+        {"eventId":"event-01","name":"Zero event","deviceId":"station-01","basePoints":0}
+        """, JsonDefaults.Options)!;
+    Assert.Equal(0, explicitZero.BasePoints);
+    Assert.True(JsonSerializer.Serialize(explicitZero, JsonDefaults.Options).Contains("\"basePoints\":0", StringComparison.Ordinal));
+
+    static EventRecord CompletedEvent(long duration) => new()
+    {
+        EventId = "event-01",
+        Name = "Old event",
+        DeviceId = "station-01",
+        Status = EventStatus.Completed,
+        StartElapsedMs = 0,
+        FinishElapsedMs = duration
+    };
 }
 
 static void PauseAndTimeout()
@@ -876,21 +998,23 @@ static void SetupPersistenceAndRosterIsolation()
 {
     using var h = NewHarness();
     var run = h.ArmAndStart();
+    h.Service.PressEvent(run.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    h.Service.PressEvent(run.Id, "event-01");
     h.Service.Finish();
     var recorded = h.Service.Record();
     var priorEditionId = recorded.EditionId;
 
     var setup = h.Service.GetSetup();
-    setup.Events[0].Name = "Renamed physical station";
-    setup.Events[0].DeviceId = "aabbccddeeff";
+    setup.Events[0].BasePoints = 40;
     var saved = h.Service.UpdateSetup(setup);
 
-    Assert.True(saved.EditionId != priorEditionId, "Roster changes after recorded runs must start a separate leaderboard edition.");
-    Assert.Equal("AABBCCDDEEFF", saved.Events[0].DeviceId);
-    Assert.Equal("Event 1", h.Service.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Edition.Events[0].Name);
+    Assert.True(saved.EditionId != priorEditionId, "Changing event points after recorded runs must start a separate leaderboard edition.");
+    Assert.Equal(40, saved.Events[0].BasePoints);
+    Assert.Equal(null, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Edition.Events[0].BasePoints);
+    Assert.Equal(45, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Events[0].Score);
     Assert.Equal(saved.EditionId, h.Service.GetOperatorSnapshot().EditionId);
     Assert.Equal(0, h.Service.GetOperatorSnapshot().Leaderboard.Count);
-    Assert.True(h.Service.GetOperatorSnapshot().Devices.All(device => device.Availability == DeviceAvailability.Unverified));
     Assert.True(Directory.GetFiles(System.IO.Path.Combine(h.Path, "backups"), "*.db").Length >= 1,
         "Changing setup should create a pre-change database backup.");
 
@@ -900,9 +1024,10 @@ static void SetupPersistenceAndRosterIsolation()
     var reopened = new RunService(reopenedStore, MakeEdition(), new TestClock());
     var persisted = reopened.GetSetup();
     Assert.Equal(saved.EditionId, persisted.EditionId);
-    Assert.Equal("Renamed physical station", persisted.Events[0].Name);
-    Assert.Equal("Event 1", reopened.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Edition.Events[0].Name);
-    Assert.True(reopened.GetOperatorSnapshot().Devices.All(device => device.Availability == DeviceAvailability.Unverified));
+    Assert.Equal(40, persisted.Events[0].BasePoints);
+    Assert.True(JsonSerializer.Serialize(persisted, JsonDefaults.Options).Contains("\"basePoints\":40", StringComparison.Ordinal));
+    Assert.Equal(null, reopened.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Edition.Events[0].BasePoints);
+    Assert.Equal(45, reopened.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Events[0].Score);
     Assert.True(saved.Events.Select(item => item.DeviceId).SequenceEqual(
         h.Service.GetOperatorSnapshot().Devices.Select(item => item.DeviceId)));
 }
@@ -916,6 +1041,14 @@ static void SetupLockAndValidation()
     Assert.Throws<CommandException>(() => h.Service.UpdateSetup(current));
 
     h.Service.Abort("End setup-lock test run");
+    current = h.Service.GetSetup();
+    current.Events[0].BasePoints = -1;
+    Assert.Throws<CommandException>(() => h.Service.UpdateSetup(current));
+
+    current = h.Service.GetSetup();
+    current.Events[0].BasePoints = EditionDefinition.MaximumEventBasePoints + 1;
+    Assert.Throws<CommandException>(() => h.Service.UpdateSetup(current));
+
     current = h.Service.GetSetup();
     current.Events[1].DeviceId = current.Events[0].DeviceId;
     Assert.Throws<CommandException>(() => h.Service.UpdateSetup(current));

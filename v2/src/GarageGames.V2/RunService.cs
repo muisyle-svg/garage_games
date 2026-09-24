@@ -140,8 +140,8 @@ public sealed class RunService
                 throw new CommandException(exception.Message);
             }
 
-            var rosterChanged = !SameRoster(_edition.Events, candidate.Events);
-            if (rosterChanged && string.Equals(candidate.EditionId, _edition.EditionId, StringComparison.Ordinal) &&
+            var eventSetupChanged = !SameEventSetup(_edition.Events, candidate.Events);
+            if (eventSetupChanged && string.Equals(candidate.EditionId, _edition.EditionId, StringComparison.Ordinal) &&
                 _data.Runs.Any(run => run.EditionId == _edition.EditionId && run.IsRecorded))
             {
                 candidate.EditionId = NewId("edition");
@@ -1435,7 +1435,7 @@ public sealed class RunService
 
                 eventResult.FinishElapsedMs = envelope.ElapsedMilliseconds;
                 eventResult.Status = EventStatus.Completed;
-                eventResult.Score = ScoreCalculator.Calculate(eventResult, run.Edition.Scoring);
+                eventResult.Score = CalculateScore(eventResult, run.Edition);
                 reason = "Event completed.";
                 return MessageDisposition.Accepted;
             }
@@ -1480,7 +1480,7 @@ public sealed class RunService
 
                 eventResult.FinishElapsedMs = envelope.ElapsedMilliseconds;
                 eventResult.Status = EventStatus.Completed;
-                eventResult.Score = ScoreCalculator.Calculate(eventResult, run.Edition.Scoring);
+                eventResult.Score = CalculateScore(eventResult, run.Edition);
                 reason = "Correct keypad response completed the event.";
                 return MessageDisposition.Accepted;
             }
@@ -1495,7 +1495,7 @@ public sealed class RunService
 
                 eventResult.FinishElapsedMs = envelope.ElapsedMilliseconds;
                 eventResult.Status = EventStatus.Completed;
-                eventResult.Score = ScoreCalculator.Calculate(eventResult, run.Edition.Scoring);
+                eventResult.Score = CalculateScore(eventResult, run.Edition);
                 reason = "Keypad success completed the event.";
                 return MessageDisposition.Accepted;
             }
@@ -1524,7 +1524,7 @@ public sealed class RunService
 
             eventResult.FinishElapsedMs = envelope.ElapsedMilliseconds;
             eventResult.Status = EventStatus.Completed;
-            eventResult.Score = ScoreCalculator.Calculate(eventResult, run.Edition.Scoring);
+            eventResult.Score = CalculateScore(eventResult, run.Edition);
             reason = "Arcade completion completed the event.";
             return MessageDisposition.Accepted;
         }
@@ -1757,7 +1757,7 @@ public sealed class RunService
             {
                 result.Notes = edit.Notes;
             }
-            result.Score = ScoreCalculator.Calculate(result, candidate.Edition.Scoring);
+            result.Score = CalculateScore(result, candidate.Edition);
         }
     }
 
@@ -1789,7 +1789,7 @@ public sealed class RunService
             {
                 throw new CommandException($"Completed event '{result.EventId}' requires start and finish times.");
             }
-            result.Score = ScoreCalculator.Calculate(result, candidate.Edition.Scoring);
+            result.Score = CalculateScore(result, candidate.Edition);
         }
     }
 
@@ -1858,7 +1858,7 @@ public sealed class RunService
             {
                 throw new CommandException($"Completed event '{result.EventId}' requires start and finish times.");
             }
-            result.Score = ScoreCalculator.Calculate(result, candidate.Edition.Scoring);
+            result.Score = CalculateScore(result, candidate.Edition);
         }
 
         if (candidate.AllEventsCompleted && candidate.Events.All(e => e.Type == EventKind.Standard))
@@ -2041,8 +2041,14 @@ public sealed class RunService
     {
         foreach (var result in run.Events)
         {
-            result.Score = ScoreCalculator.Calculate(result, run.Edition.Scoring);
+            result.Score = CalculateScore(result, run.Edition);
         }
+    }
+
+    private static int CalculateScore(EventRecord result, EditionSnapshot edition)
+    {
+        var eventBasePoints = edition.Events.Single(eventSnapshot => eventSnapshot.EventId == result.EventId).BasePoints;
+        return ScoreCalculator.Calculate(result, edition.Scoring, eventBasePoints);
     }
 
     private void MarkFinishedUnrecorded(RunRecord run)
@@ -2155,6 +2161,7 @@ public sealed class RunService
         Name = eventDefinition.Name ?? "",
         DeviceId = eventDefinition.DeviceId ?? "",
         Type = eventDefinition.Type,
+        BasePoints = eventDefinition.BasePoints,
         Prompt = eventDefinition.Prompt,
         Answer = eventDefinition.Answer
     };
@@ -2166,12 +2173,13 @@ public sealed class RunService
         Events = edition.Events.Select(CloneEventDefinition).ToList()
     };
 
-    private static bool SameRoster(IReadOnlyList<EventDefinition> left, IReadOnlyList<EventDefinition> right) =>
+    private static bool SameEventSetup(IReadOnlyList<EventDefinition> left, IReadOnlyList<EventDefinition> right) =>
         left.Count == right.Count && left.Zip(right).All(pair =>
             string.Equals(pair.First.EventId, pair.Second.EventId, StringComparison.Ordinal) &&
             string.Equals(pair.First.Name, pair.Second.Name, StringComparison.Ordinal) &&
             string.Equals(pair.First.DeviceId, pair.Second.DeviceId, StringComparison.OrdinalIgnoreCase) &&
             pair.First.Type == pair.Second.Type &&
+            pair.First.BasePoints == pair.Second.BasePoints &&
             string.Equals(pair.First.Prompt, pair.Second.Prompt, StringComparison.Ordinal) &&
             string.Equals(pair.First.Answer, pair.Second.Answer, StringComparison.Ordinal));
 

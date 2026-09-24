@@ -95,23 +95,28 @@ and choose whether to record it. Event times and points remain editable before
 or after recording. When correcting a stopped or recorded run, missing event
 timestamps may be added anywhere within the run limit; the saved elapsed time
 extends through the latest corrected event. Points preview automatically from
-event times using the edition's scoring rules unless manually overridden;
+event times using the run's saved edition rules unless manually overridden;
 clearing a points override restores automatic scoring. Run bonus scoring is
-also editable.
+also editable. An event's optional `basePoints` sets its starting score; it
+loses 5 points every 5 seconds and bottoms out at half its starting score,
+rounded up. Without `basePoints`, the saved edition's global base and minimum
+scores apply unchanged.
 
 ## Setup and device readiness
 
 Use the operator **Setup** tab to change the active edition name and event
 roster, including event names, types, and device assignments. The setup API is
 `GET /api/setup` and `PUT /api/setup` with
-`{ "editionId", "name", "events": [{ "eventId", "name", "deviceId", "type" }] }`.
+`{ "editionId", "name", "events": [{ "eventId", "name", "deviceId", "type", "basePoints" }] }`.
+`basePoints` is optional and must be an integer from 0 through 1,000,000.
 The active setup is stored transactionally in SQLite metadata; a database
 backup is created before a changed setup is saved. Setup is locked while a run
 is in progress or waiting to be recorded. Each run keeps its own edition
-snapshot, so editing setup never rewrites historical results. If a roster
-changes while recorded runs exist in the current edition, the saved setup gets
-a new edition ID and the leaderboard starts a separate edition; earlier scores
-remain in history and are not deleted.
+snapshot, so editing setup never rewrites historical results. If the event
+roster or its base-point settings change while recorded runs exist in the
+current edition, the saved setup gets a new edition ID and the leaderboard
+starts a separate edition; earlier scores remain in history and are not
+deleted.
 
 Use **Scan devices** or arm a run while the physical master is connected. The
 server sends `GG1 STATUS` immediately before `GG1 SCAN <id>`; the master

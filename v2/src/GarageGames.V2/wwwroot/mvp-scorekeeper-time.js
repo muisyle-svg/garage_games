@@ -54,7 +54,7 @@
     return elapsedMsFromRemainingSeconds(value, durationSeconds);
   }
 
-  function previewEventScore(result, scoring = {}) {
+  function previewEventScore(result, scoring = {}, eventDefinition = null) {
     if (result?.scoreOverride !== null && result?.scoreOverride !== undefined) {
       const override = Number(result.scoreOverride);
       return Number.isFinite(override) ? override : 0;
@@ -64,10 +64,11 @@
         result.finishElapsedMs === null || result.finishElapsedMs === undefined) return 0;
 
     const durationMs = Number(result.finishElapsedMs) - Number(result.startElapsedMs);
+    const hasEventStartingPoints = eventDefinition?.basePoints !== null && eventDefinition?.basePoints !== undefined;
+    const basePoints = Number(hasEventStartingPoints ? eventDefinition.basePoints : scoring.basePoints ?? 50);
     const decayEverySeconds = Number(scoring.decayEverySeconds ?? 5);
-    const basePoints = Number(scoring.basePoints ?? 50);
     const decayPoints = Number(scoring.decayPoints ?? 5);
-    const minimumPoints = Number(scoring.minimumPoints ?? 25);
+    const minimumPoints = Number(hasEventStartingPoints ? Math.ceil(basePoints / 2) : scoring.minimumPoints ?? 25);
     if (!Number.isFinite(durationMs) || durationMs < 0 || !Number.isFinite(decayEverySeconds) || decayEverySeconds <= 0 ||
         !Number.isFinite(basePoints) || !Number.isFinite(decayPoints) || !Number.isFinite(minimumPoints)) return 0;
 

@@ -106,12 +106,15 @@ public sealed class EventDefinition
     public required string Name { get; set; }
     public required string DeviceId { get; set; }
     public EventKind Type { get; set; }
+    public int? BasePoints { get; set; }
     public string? Prompt { get; set; }
     public string? Answer { get; set; }
 }
 
 public sealed class EditionDefinition
 {
+    public const int MaximumEventBasePoints = 1_000_000;
+
     public required string EditionId { get; set; }
     public required string Name { get; set; }
     public int DurationLimitSeconds { get; set; } = 300;
@@ -130,6 +133,7 @@ public sealed class EditionDefinition
             Name = e.Name,
             DeviceId = e.DeviceId,
             Type = e.Type,
+            BasePoints = e.BasePoints,
             Prompt = e.Prompt,
             Answer = e.Answer
         }).ToList()
@@ -172,6 +176,11 @@ public sealed class EditionDefinition
                 throw new InvalidDataException($"Edition '{source}' contains an event with a missing identity.");
             }
 
+            if (eventDefinition.BasePoints is < 0 or > MaximumEventBasePoints)
+            {
+                throw new InvalidDataException($"Event '{eventDefinition.EventId}' base points must be between 0 and {MaximumEventBasePoints}.");
+            }
+
             if (eventDefinition.Type == EventKind.Keypad && string.IsNullOrWhiteSpace(eventDefinition.Answer))
             {
                 throw new InvalidDataException($"Keypad event '{eventDefinition.EventId}' requires an answer.");
@@ -207,6 +216,7 @@ public sealed class EventSnapshot
     public required string Name { get; set; }
     public required string DeviceId { get; set; }
     public EventKind Type { get; set; }
+    public int? BasePoints { get; set; }
     public string? Prompt { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Answer { get; set; }
@@ -427,7 +437,7 @@ public static class JsonDefaults
 
 public static class ScoreCalculator
 {
-    public static int Calculate(EventRecord result, ScoringRule rule)
+    public static int Calculate(EventRecord result, ScoringRule rule, int? eventBasePoints = null)
     {
         if (result.ScoreOverride is int manual)
         {
@@ -444,7 +454,12 @@ public static class ScoreCalculator
             return 0;
         }
 
+        var startingPoints = eventBasePoints ?? rule.BasePoints;
+        var minimumPoints = eventBasePoints is int eventStartingPoints
+            ? eventStartingPoints / 2 + eventStartingPoints % 2
+            : rule.MinimumPoints;
         var fullDecaySteps = duration / (rule.DecayEverySeconds * 1000L);
-        return Math.Max(rule.MinimumPoints, rule.BasePoints - (int)fullDecaySteps * rule.DecayPoints);
+        var decayedPoints = (long)startingPoints - fullDecaySteps * rule.DecayPoints;
+        return (int)Math.Max(minimumPoints, decayedPoints);
     }
 }

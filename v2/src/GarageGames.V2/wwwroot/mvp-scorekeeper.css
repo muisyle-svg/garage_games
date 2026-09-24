@@ -225,8 +225,10 @@ select:disabled, input:disabled { opacity: .58; }
 .setup-event-pick { display: flex; min-height: 37px; align-items: center; gap: .4rem; padding: .35rem .45rem; border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 255, 255, .035); color: var(--muted); cursor: pointer; font-size: .61rem; font-weight: 800; white-space: nowrap; }
 .setup-event-pick[aria-pressed="true"] { border-color: rgba(104, 214, 164, .35); color: var(--green); }
 .setup-event-number { display: grid; width: 23px; height: 23px; place-items: center; border-radius: 6px; background: rgba(224, 237, 227, .08); color: var(--ink); font-size: .58rem; }
-.setup-event-name, .setup-event-assignment { display: grid; min-width: 0; gap: .25rem; color: var(--muted); font-size: .58rem; font-weight: 850; letter-spacing: .045em; text-transform: uppercase; }
-.setup-event-name input, .setup-event-assignment input { min-width: 0; min-height: 34px; font-size: .7rem; text-transform: none; }
+.setup-event-name, .setup-event-assignment, .setup-event-points, .setup-event-minimum { display: grid; min-width: 0; gap: .25rem; color: var(--muted); font-size: .58rem; font-weight: 850; letter-spacing: .045em; text-transform: uppercase; }
+.setup-event-name input, .setup-event-assignment input, .setup-event-points input { min-width: 0; min-height: 34px; font-size: .7rem; text-transform: none; }
+.setup-event-scoring-row { display: grid; grid-template-columns: minmax(125px, .4fr) minmax(125px, .4fr); align-items: end; gap: .45rem; max-width: 430px; margin-top: .45rem; }
+.setup-event-minimum output { display: flex; min-height: 34px; align-items: center; padding: .4rem .6rem; border: 1px solid var(--line); border-radius: 7px; background: rgba(7, 15, 13, .2); color: var(--ink); font-size: .7rem; font-variant-numeric: tabular-nums; letter-spacing: 0; text-transform: none; }
 .setup-event-kind { display: grid; min-height: 37px; align-content: center; gap: .1rem; color: var(--dim); font-size: .55rem; text-transform: uppercase; }
 .setup-event-kind strong { color: var(--ink); font-size: .65rem; text-transform: none; }
 .setup-event-remove { min-height: 34px; padding: .4rem .55rem; font-size: .62rem; }
@@ -311,6 +313,7 @@ select:disabled, input:disabled { opacity: .58; }
   .setup-event-kind { grid-column: 2; grid-row: 2; }
   .setup-event-remove { grid-column: 3; grid-row: 2; }
   .setup-event-device-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .setup-event-scoring-row { grid-template-columns: minmax(110px, .45fr) minmax(130px, .55fr); max-width: 100%; }
   .setup-event-readiness { grid-column: 1 / -1; }
   .leaderboard-player-select { grid-template-columns: 1fr; gap: .35rem; }
   .event-leaderboards-grid { grid-template-columns: 1fr; }
