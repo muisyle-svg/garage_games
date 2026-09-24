@@ -30,7 +30,7 @@ test("new events receive unique non-MAC placeholders and MAC assignments normali
   assert.notEqual(added.eventId, draft.events[0].eventId);
   assert.notEqual(added.unassignedDeviceId, draft.events[0].unassignedDeviceId);
   assert.equal(added.basePoints, 50);
-  assert.equal(added.basePointsInherited, false);
+  assert.equal(added.basePointsInherited, true);
   assert.equal(setup.hardwareId("aa:bb:cc:dd:ee:ff"), "AABBCCDDEEFF");
 
   added.assignmentValue = "aa:bb:cc:dd:ee:ff";
@@ -83,6 +83,136 @@ test("edited starting points, including zero and odd values, save explicitly", (
   assert.equal(payload.events[1].basePoints, 51);
 });
 
+test("per-event scoring displays effective defaults while unrelated saves preserve inherited nulls", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-scoring-defaults",
+    name: "Edition",
+    scoring: { basePoints: 63, minimumPoints: 31, decayPoints: 7, decayEverySeconds: 9 },
+    events: [
+      { eventId: "legacy", name: "Legacy", deviceId: "unassigned-legacy" },
+      { eventId: "explicit-base", name: "Explicit base", deviceId: "unassigned-explicit", basePoints: 51 }
+    ]
+  });
+  const [legacy, explicitBase] = draft.events;
+
+  assert.deepEqual(draft.scoringDefaults, {
+    basePoints: 63,
+    minimumPoints: 31,
+    decayPoints: 7,
+    decayEverySeconds: 9,
+    graceSeconds: 0
+  });
+  assert.deepEqual(
+    [legacy.basePoints, legacy.minimumPoints, legacy.decayPoints, legacy.decayEverySeconds, legacy.graceSeconds],
+    [63, 31, 7, 9, 0]
+  );
+  assert.deepEqual(
+    [explicitBase.basePoints, explicitBase.minimumPoints, explicitBase.decayPoints, explicitBase.decayEverySeconds, explicitBase.graceSeconds],
+    [51, 26, 7, 9, 0],
+    "an odd explicit base derives a rounded-up minimum while the other fields inherit"
+  );
+
+  const payload = setup.buildSetupPayload(draft);
+  for (const event of payload.events) {
+    assert.equal(event.minimumPoints, null);
+    assert.equal(event.decayPoints, null);
+    assert.equal(event.decayEverySeconds, null);
+    assert.equal(event.graceSeconds, null);
+  }
+  assert.equal(payload.events[0].basePoints, null, "legacy missing base points remain inherited");
+  assert.equal(payload.events[1].basePoints, 51);
+
+  const roundTrip = setup.normalizeSetup(payload, draft.scoringDefaults);
+  assert.equal(roundTrip.events[0].basePoints, 63);
+  assert.equal(roundTrip.events[0].minimumPoints, 31);
+  assert.equal(roundTrip.events[0].decayPoints, 7);
+  assert.equal(roundTrip.events[0].graceSeconds, 0);
+});
+
+test("editing base points recalculates an inherited minimum but keeps an edited minimum", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-derived-minimum",
+    name: "Edition",
+    scoring: { basePoints: 50, minimumPoints: 20 },
+    events: [{ eventId: "event-1", name: "Button", deviceId: "unassigned-event-1", basePoints: null }]
+  });
+  const event = draft.events[0];
+
+  assert.equal(setup.updateEventScoring(event, "basePoints", "51"), true);
+  assert.equal(event.minimumPoints, 26);
+  assert.equal(event.minimumPointsInherited, true);
+  assert.equal(setup.buildSetupPayload(draft).events[0].minimumPoints, null);
+
+  setup.updateEventScoring(event, "minimumPoints", "17");
+  setup.updateEventScoring(event, "basePoints", "49");
+  assert.equal(event.minimumPoints, "17");
+  assert.equal(event.minimumPointsInherited, false);
+  assert.equal(setup.buildSetupPayload(draft).events[0].minimumPoints, 17);
+});
+
+test("explicit scoring zeros and odd values save without becoming inherited", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-explicit-scoring",
+    name: "Edition",
+    events: [{
+      eventId: "event-1",
+      name: "Button",
+      deviceId: "unassigned-event-1",
+      basePoints: 51,
+      minimumPoints: 0,
+      decayPoints: 0,
+      decayEverySeconds: 1,
+      graceSeconds: 0
+    }]
+  });
+
+  const event = draft.events[0];
+  for (const field of ["minimumPoints", "decayPoints", "decayEverySeconds", "graceSeconds"]) {
+    assert.equal(event[`${field}Inherited`], false);
+  }
+  assert.deepEqual(setup.buildSetupPayload(draft).events[0], {
+    eventId: "event-1",
+    name: "Button",
+    deviceId: "unassigned-event-1",
+    type: "standard",
+    basePoints: 51,
+    minimumPoints: 0,
+    decayPoints: 0,
+    decayEverySeconds: 1,
+    graceSeconds: 0
+  });
+});
+
+test("scoring validation enforces minimum, nonnegative points, and backend caps", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-scoring-validation",
+    name: "Edition",
+    events: [{ eventId: "event-1", name: "Button", deviceId: "unassigned-event-1" }]
+  });
+  const event = draft.events[0];
+
+  event.minimumPoints = "51";
+  assert.throws(() => setup.buildSetupPayload(draft), /minimum points must be a whole number from 0 to the starting points/);
+  event.minimumPoints = "25";
+
+  for (const invalid of ["-1", "1.5", "1000001", ""]) {
+    event.decayPoints = invalid;
+    assert.throws(() => setup.buildSetupPayload(draft), /points lost each step must be a whole number from 0 to 1,000,000/);
+  }
+  event.decayPoints = "1000000";
+  event.decayEverySeconds = "0";
+  assert.throws(() => setup.buildSetupPayload(draft), /seconds per step must be a whole number from 1 to 86,400/);
+  event.decayEverySeconds = "86401";
+  assert.throws(() => setup.buildSetupPayload(draft), /seconds per step must be a whole number from 1 to 86,400/);
+  event.decayEverySeconds = "86400";
+  event.graceSeconds = "-1";
+  assert.throws(() => setup.buildSetupPayload(draft), /initial grace seconds must be a whole number from 0 to 86,400/);
+  event.graceSeconds = "86401";
+  assert.throws(() => setup.buildSetupPayload(draft), /initial grace seconds must be a whole number from 0 to 86,400/);
+  setup.updateEventScoring(event, "graceSeconds", "86400");
+  assert.equal(setup.buildSetupPayload(draft).events[0].graceSeconds, 86400);
+});
+
 test("save validation rejects malformed MACs, duplicate event IDs, empty names, and an empty roster", () => {
   const draft = setup.normalizeSetup({
     editionId: "edition-3",
@@ -113,13 +243,18 @@ test("save validation requires starting points to be a nonnegative whole number"
     draft.events[0].basePointsInherited = false;
     assert.throws(() => setup.buildSetupPayload(draft), /starting points must be a whole number from 0 to 1,000,000/);
   }
-  draft.events[0].basePoints = "0";
+  setup.updateEventScoring(draft.events[0], "basePoints", "0");
   assert.equal(setup.buildSetupPayload(draft).events[0].basePoints, 0);
 });
 
-test("starting-points field exposes the backend maximum", () => {
+test("editable scoring inputs expose the backend maxima and draft handler", () => {
   const source = fs.readFileSync(require.resolve("../../src/GarageGames.V2/wwwroot/mvp-scorekeeper.js"), "utf8");
-  assert.match(source, /basePointsInput\.max = "1000000"/);
+  assert.match(source, /setupScoringField\(event, "basePoints", "Starting points", 0, 1_000_000\)/);
+  assert.match(source, /setupScoringField\(event, "decayPoints", "Points lost \/ step", 0, 1_000_000\)/);
+  assert.match(source, /setupScoringField\(event, "decayEverySeconds", "Seconds \/ step", 1, 86_400\)/);
+  assert.match(source, /setupScoringField\(event, "graceSeconds", "Initial grace seconds", 0, 86_400\)/);
+  assert.match(source, /setupTools\.updateEventScoring\(target, input\.dataset\.setupField, input\.value\)/);
+  assert.match(source, /caption\.dataset\.setupScoringTitle = title/);
 });
 
 test("scan results accept canonical and flexible response shapes without claiming disconnected devices", () => {

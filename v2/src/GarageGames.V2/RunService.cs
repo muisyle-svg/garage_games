@@ -2047,8 +2047,8 @@ public sealed class RunService
 
     private static int CalculateScore(EventRecord result, EditionSnapshot edition)
     {
-        var eventBasePoints = edition.Events.Single(eventSnapshot => eventSnapshot.EventId == result.EventId).BasePoints;
-        return ScoreCalculator.Calculate(result, edition.Scoring, eventBasePoints);
+        var eventSnapshot = edition.Events.Single(eventSnapshot => eventSnapshot.EventId == result.EventId);
+        return ScoreCalculator.CalculateForEvent(result, edition.Scoring, eventSnapshot);
     }
 
     private void MarkFinishedUnrecorded(RunRecord run)
@@ -2162,6 +2162,10 @@ public sealed class RunService
         DeviceId = eventDefinition.DeviceId ?? "",
         Type = eventDefinition.Type,
         BasePoints = eventDefinition.BasePoints,
+        MinimumPoints = eventDefinition.MinimumPoints,
+        DecayPoints = eventDefinition.DecayPoints,
+        DecayEverySeconds = eventDefinition.DecayEverySeconds,
+        GraceSeconds = eventDefinition.GraceSeconds,
         Prompt = eventDefinition.Prompt,
         Answer = eventDefinition.Answer
     };
@@ -2170,7 +2174,8 @@ public sealed class RunService
     {
         EditionId = edition.EditionId,
         Name = edition.Name,
-        Events = edition.Events.Select(CloneEventDefinition).ToList()
+        Events = edition.Events.Select(CloneEventDefinition).ToList(),
+        Scoring = edition.Scoring.Clone()
     };
 
     private static bool SameEventSetup(IReadOnlyList<EventDefinition> left, IReadOnlyList<EventDefinition> right) =>
@@ -2180,6 +2185,10 @@ public sealed class RunService
             string.Equals(pair.First.DeviceId, pair.Second.DeviceId, StringComparison.OrdinalIgnoreCase) &&
             pair.First.Type == pair.Second.Type &&
             pair.First.BasePoints == pair.Second.BasePoints &&
+            pair.First.MinimumPoints == pair.Second.MinimumPoints &&
+            pair.First.DecayPoints == pair.Second.DecayPoints &&
+            pair.First.DecayEverySeconds == pair.Second.DecayEverySeconds &&
+            pair.First.GraceSeconds == pair.Second.GraceSeconds &&
             string.Equals(pair.First.Prompt, pair.Second.Prompt, StringComparison.Ordinal) &&
             string.Equals(pair.First.Answer, pair.Second.Answer, StringComparison.Ordinal));
 

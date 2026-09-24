@@ -242,7 +242,7 @@
           <div><p class="mvp-kicker">Edition configuration</p><h2 id="setup-heading">Events & hardware</h2></div>
           <span id="setup-event-count" class="small-note">— events</span>
         </div>
-        <p class="setup-intro">Name the edition, set each event’s starting points, and configure its roster. Events that inherit edition scoring retain its global minimum; explicit event values lose 5 points every 5 seconds, down to half the starting value rounded up. Physical availability is unverified until a fresh scan completes; virtual event presses remain available when hardware is missing or unassigned.</p>
+        <p class="setup-intro">Set each event’s starting points, minimum, points lost per step, seconds per step, and initial grace period. Fields marked default follow edition scoring; an inherited minimum follows the global minimum, while an event with its own starting points defaults to half that value rounded up. Grace sets the first loss time: with 10 seconds grace and 5 seconds per step, losses occur at 10, 15, 20 seconds, and so on. With zero grace, the first loss remains after one full interval. Points stop decreasing at the minimum. Physical availability is unverified until a fresh scan completes; virtual event presses remain available when hardware is missing or unassigned.</p>
         <div id="setup-load-state" class="setup-load-state" role="status" aria-live="polite">Loading setup…</div>
         <button id="setup-retry-load" class="button button-quiet setup-retry" type="button" hidden>Retry loading setup</button>
         <div id="setup-content" hidden>

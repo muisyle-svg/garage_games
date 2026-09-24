@@ -441,6 +441,41 @@
     });
   }
 
+  function setupScoringField(event, field, title, minimum, maximum) {
+    const label = make("label", "setup-event-points");
+    const caption = make("span", "", title);
+    caption.dataset.setupScoringLabel = field;
+    caption.dataset.setupScoringTitle = title;
+    label.appendChild(caption);
+    const input = make("input");
+    input.type = "number";
+    input.min = String(minimum);
+    input.max = String(maximum);
+    input.step = "1";
+    input.inputMode = "numeric";
+    input.value = event[field] ?? "";
+    input.dataset.setupField = field;
+    input.dataset.setupEventId = event.eventId;
+    input.setAttribute("aria-label", `${event.name} ${title.toLowerCase()}`);
+    label.appendChild(input);
+    updateSetupScoringLabel(event, field, caption);
+    return label;
+  }
+
+  function updateSetupScoringLabel(event, field, caption) {
+    if (!caption) return;
+    const inherited = Boolean(event[`${field}Inherited`]);
+    const derivedMinimum = field === "minimumPoints" && inherited && !event.basePointsInherited;
+    const title = caption.dataset.setupScoringTitle;
+    caption.textContent = `${title}${inherited ? derivedMinimum ? " · derived" : " · default" : ""}`;
+  }
+
+  function refreshSetupScoringLabels(row, event) {
+    row?.querySelectorAll("[data-setup-scoring-label]").forEach((caption) => {
+      updateSetupScoringLabel(event, caption.dataset.setupScoringLabel, caption);
+    });
+  }
+
   function renderSetupEvents() {
     ui.setupEventList.replaceChildren();
     const events = state.setupDraft?.events || [];
@@ -473,29 +508,13 @@
       nameLabel.appendChild(nameInput);
 
       const scoring = make("div", "setup-event-scoring-row");
-      const basePointsLabel = make("label", "setup-event-points");
-      basePointsLabel.append(make("span", "", "Starting points"));
-      const basePointsInput = make("input");
-      basePointsInput.type = "number";
-      basePointsInput.min = "0";
-      basePointsInput.max = "1000000";
-      basePointsInput.step = "1";
-      basePointsInput.inputMode = "numeric";
-      basePointsInput.value = event.basePoints ?? "";
-      basePointsInput.dataset.setupField = "basePoints";
-      basePointsInput.dataset.setupEventId = event.eventId;
-      basePointsInput.setAttribute("aria-label", `${event.name} starting points`);
-      basePointsLabel.appendChild(basePointsInput);
-      const minimumLabel = make("div", "setup-event-minimum");
-      minimumLabel.append(make("span", "", "Minimum points"));
-      const basePointsValue = event.basePoints === "" ? NaN : Number(event.basePoints);
-      const minimumOutput = make("output", "", event.basePointsInherited
-        ? "Edition rule"
-        : Number.isInteger(basePointsValue) && basePointsValue >= 0 ? `${Math.ceil(basePointsValue / 2)} points` : "—");
-      minimumOutput.dataset.setupMinimum = "true";
-      minimumOutput.setAttribute("aria-label", `${event.name} computed minimum points`);
-      minimumLabel.appendChild(minimumOutput);
-      scoring.append(basePointsLabel, minimumLabel);
+      scoring.append(
+        setupScoringField(event, "basePoints", "Starting points", 0, 1_000_000),
+        setupScoringField(event, "minimumPoints", "Minimum points", 0, 1_000_000),
+        setupScoringField(event, "decayPoints", "Points lost / step", 0, 1_000_000),
+        setupScoringField(event, "decayEverySeconds", "Seconds / step", 1, 86_400),
+        setupScoringField(event, "graceSeconds", "Initial grace seconds", 0, 86_400)
+      );
 
       const kind = make("div", "setup-event-kind");
       kind.append(make("span", "", "Event type"), make("strong", "", ({ standard: "Standard", keypad: "Keypad", magneticArcade: "Magnetic arcade" })[event.type] || event.type));
@@ -587,12 +606,14 @@
     if (!target) return;
     if (input.dataset.setupField === "name") target.name = input.value;
     else if (input.dataset.setupField === "assignment") target.assignmentValue = input.value;
-    else if (input.dataset.setupField === "basePoints") {
-      target.basePoints = input.value;
-      target.basePointsInherited = false;
-      const minimum = input.closest(".setup-event-row")?.querySelector("[data-setup-minimum]");
-      const value = input.value.trim() === "" ? NaN : Number(input.value);
-      if (minimum) minimum.textContent = Number.isInteger(value) && value >= 0 ? `${Math.ceil(value / 2)} points` : "—";
+    else if (["basePoints", "minimumPoints", "decayPoints", "decayEverySeconds", "graceSeconds"].includes(input.dataset.setupField)) {
+      setupTools.updateEventScoring(target, input.dataset.setupField, input.value);
+      const row = input.closest(".setup-event-row");
+      if (input.dataset.setupField === "basePoints" && target.minimumPointsInherited) {
+        const minimumInput = row?.querySelector('input[data-setup-field="minimumPoints"]');
+        if (minimumInput) minimumInput.value = target.minimumPoints;
+      }
+      refreshSetupScoringLabels(row, target);
     }
     markSetupChanged();
   }
@@ -681,7 +702,7 @@
     try {
       const response = await request("/api/setup", { method: "PUT", body: JSON.stringify(payload) });
       const effective = response && (Array.isArray(response.events) || Array.isArray(response.setup?.events)) ? response : payload;
-      state.setupDraft = setupTools.normalizeSetup(effective);
+      state.setupDraft = setupTools.normalizeSetup(effective, state.setupDraft.scoringDefaults);
       state.setupDirty = false;
       state.setupScanFresh = false;
       state.setupScanAt = 0;

@@ -1,6 +1,34 @@
 (() => {
   "use strict";
 
+  const MAX_EVENT_BASE_POINTS = 1_000_000;
+  const MAX_SCORING_POINTS = 1_000_000;
+  const MAX_SCORING_SECONDS = 86_400;
+  const SCORE_FIELDS = Object.freeze([
+    "basePoints",
+    "minimumPoints",
+    "decayPoints",
+    "decayEverySeconds",
+    "graceSeconds"
+  ]);
+
+  function integerDefault(value, fallback, { minimum = 0, maximum = Number.MAX_SAFE_INTEGER } = {}) {
+    if (value === null || value === undefined || value === "") return fallback;
+    const number = Number(value);
+    return Number.isInteger(number) && number >= minimum && number <= maximum ? number : fallback;
+  }
+
+  function scoringDefaults(source, payload, inheritedDefaults) {
+    const provided = source.scoring || payload?.scoring || inheritedDefaults || source.edition?.scoring || {};
+    return {
+      basePoints: integerDefault(provided.basePoints, 50, { maximum: MAX_EVENT_BASE_POINTS }),
+      minimumPoints: integerDefault(provided.minimumPoints, 25, { maximum: MAX_EVENT_BASE_POINTS }),
+      decayPoints: integerDefault(provided.decayPoints, 5, { maximum: MAX_SCORING_POINTS }),
+      decayEverySeconds: integerDefault(provided.decayEverySeconds, 5, { minimum: 1, maximum: MAX_SCORING_SECONDS }),
+      graceSeconds: 0
+    };
+  }
+
   function hardwareId(value) {
     if (typeof value !== "string") return null;
     const input = value.trim();
@@ -35,11 +63,10 @@
     return candidate;
   }
 
-  function normalizeSetup(payload) {
+  function normalizeSetup(payload, inheritedDefaults = null) {
     const source = payload?.setup || payload?.result || payload || {};
     const sourceEvents = Array.isArray(source.events) ? source.events : [];
-    const configuredDefault = source.scoring?.basePoints ?? source.edition?.scoring?.basePoints;
-    const defaultBasePoints = Number.isInteger(configuredDefault) && configuredDefault >= 0 ? configuredDefault : 50;
+    const defaults = scoringDefaults(source, payload, inheritedDefaults);
     const usedEventIds = new Set();
     const sourceWithIds = sourceEvents.map((event, index) => {
       let eventId = String(event?.eventId || "").trim();
@@ -67,12 +94,28 @@
       }
       usedDeviceIds.add((assignedMac || placeholderDeviceId).toLowerCase());
       usedDeviceIds.add(placeholderDeviceId.toLowerCase());
+      const hasExplicitBase = event.basePoints !== null && event.basePoints !== undefined;
+      const basePoints = hasExplicitBase ? event.basePoints : defaults.basePoints;
+      const inherited = {};
+      const values = {};
+      SCORE_FIELDS.forEach((field) => {
+        const explicit = event[field] !== null && event[field] !== undefined;
+        inherited[field] = !explicit;
+        if (explicit) values[field] = event[field];
+      });
+      values.basePoints = basePoints;
+      values.minimumPoints = event.minimumPoints !== null && event.minimumPoints !== undefined
+        ? event.minimumPoints
+        : hasExplicitBase ? Math.ceil(Number(basePoints) / 2) : defaults.minimumPoints;
+      values.decayPoints = event.decayPoints ?? defaults.decayPoints;
+      values.decayEverySeconds = event.decayEverySeconds ?? defaults.decayEverySeconds;
+      values.graceSeconds = event.graceSeconds ?? defaults.graceSeconds;
       return {
         eventId,
         name: String(event.name || `Event ${index + 1}`),
         type: String(event.type || "standard"),
-        basePoints: event.basePoints === null || event.basePoints === undefined ? defaultBasePoints : event.basePoints,
-        basePointsInherited: event.basePoints === null || event.basePoints === undefined,
+        ...values,
+        ...Object.fromEntries(SCORE_FIELDS.map((field) => [`${field}Inherited`, inherited[field]])),
         assignmentValue: assignedMac || "",
         unassignedDeviceId: placeholderDeviceId
       };
@@ -81,6 +124,7 @@
     return {
       editionId: String(source.editionId || ""),
       name: String(source.name || ""),
+      scoringDefaults: defaults,
       events
     };
   }
@@ -94,17 +138,39 @@
       if (assigned) usedDeviceIds.add(assigned.toLowerCase());
     });
     const placeholder = uniquePlaceholder(eventId, usedDeviceIds);
+    const defaults = draft?.scoringDefaults || scoringDefaults({}, null, null);
     const event = {
       eventId,
       name: `Event ${(draft?.events || []).length + 1}`,
       type: "standard",
-      basePoints: 50,
-      basePointsInherited: false,
+      basePoints: defaults.basePoints,
+      basePointsInherited: true,
+      minimumPoints: defaults.minimumPoints,
+      minimumPointsInherited: true,
+      decayPoints: defaults.decayPoints,
+      decayPointsInherited: true,
+      decayEverySeconds: defaults.decayEverySeconds,
+      decayEverySecondsInherited: true,
+      graceSeconds: 0,
+      graceSecondsInherited: true,
       assignmentValue: "",
       unassignedDeviceId: placeholder
     };
     draft.events.push(event);
     return event;
+  }
+
+  function updateEventScoring(event, field, value) {
+    if (!event || !SCORE_FIELDS.includes(field)) return false;
+    event[field] = value;
+    event[`${field}Inherited`] = false;
+    if (field === "basePoints" && event.minimumPointsInherited) {
+      const number = value === "" ? NaN : Number(value);
+      event.minimumPoints = Number.isInteger(number) && number >= 0
+        ? Math.ceil(number / 2)
+        : "";
+    }
+    return true;
   }
 
   function buildSetupPayload(draft) {
@@ -121,8 +187,25 @@
       const eventName = String(event.name || "").trim();
       if (!eventId || eventIds.has(eventId.toLowerCase())) throw new Error("Each event needs a unique event ID.");
       if (!eventName) throw new Error(`Enter a name for event ${index + 1}.`);
-      if (!Number.isInteger(Number(event.basePoints)) || Number(event.basePoints) < 0 || Number(event.basePoints) > 1_000_000 || String(event.basePoints).trim() === "") {
+      const basePoints = Number(event.basePoints);
+      const minimumPoints = Number(event.minimumPoints);
+      const decayPoints = Number(event.decayPoints);
+      const decayEverySeconds = Number(event.decayEverySeconds);
+      const graceSeconds = Number(event.graceSeconds);
+      if (!validInteger(event.basePoints, 0, MAX_EVENT_BASE_POINTS)) {
         throw new Error(`${eventName || `Event ${index + 1}`}: starting points must be a whole number from 0 to 1,000,000.`);
+      }
+      if (!validInteger(event.minimumPoints, 0, basePoints)) {
+        throw new Error(`${eventName}: minimum points must be a whole number from 0 to the starting points (${basePoints}).`);
+      }
+      if (!validInteger(event.decayPoints, 0, MAX_SCORING_POINTS)) {
+        throw new Error(`${eventName}: points lost each step must be a whole number from 0 to ${MAX_SCORING_POINTS.toLocaleString("en-US")}.`);
+      }
+      if (!validInteger(event.decayEverySeconds, 1, MAX_SCORING_SECONDS)) {
+        throw new Error(`${eventName}: seconds per step must be a whole number from 1 to ${MAX_SCORING_SECONDS.toLocaleString("en-US")}.`);
+      }
+      if (!validInteger(event.graceSeconds, 0, MAX_SCORING_SECONDS)) {
+        throw new Error(`${eventName}: initial grace seconds must be a whole number from 0 to ${MAX_SCORING_SECONDS.toLocaleString("en-US")}.`);
       }
       eventIds.add(eventId.toLowerCase());
 
@@ -141,7 +224,11 @@
         name: eventName,
         deviceId,
         type: String(event.type || "standard"),
-        basePoints: event.basePointsInherited ? null : Number(event.basePoints)
+        basePoints: event.basePointsInherited ? null : basePoints,
+        minimumPoints: event.minimumPointsInherited ? null : minimumPoints,
+        decayPoints: event.decayPointsInherited ? null : decayPoints,
+        decayEverySeconds: event.decayEverySecondsInherited ? null : decayEverySeconds,
+        graceSeconds: event.graceSecondsInherited ? null : graceSeconds
       };
     });
 
@@ -252,10 +339,17 @@
     return `Fresh scan completed · ${responding} ${responding === 1 ? "device" : "devices"} responding.`;
   }
 
+  function validInteger(value, minimum, maximum) {
+    const text = String(value ?? "").trim();
+    const number = Number(text);
+    return text !== "" && Number.isInteger(number) && number >= minimum && number <= maximum;
+  }
+
   const api = Object.freeze({
     hardwareId,
     normalizeSetup,
     addEvent,
+    updateEventScoring,
     buildSetupPayload,
     normalizeScanResponse,
     readiness,

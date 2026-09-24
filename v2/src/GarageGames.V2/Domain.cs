@@ -107,6 +107,10 @@ public sealed class EventDefinition
     public required string DeviceId { get; set; }
     public EventKind Type { get; set; }
     public int? BasePoints { get; set; }
+    public int? MinimumPoints { get; set; }
+    public int? DecayPoints { get; set; }
+    public int? DecayEverySeconds { get; set; }
+    public int? GraceSeconds { get; set; }
     public string? Prompt { get; set; }
     public string? Answer { get; set; }
 }
@@ -114,6 +118,8 @@ public sealed class EventDefinition
 public sealed class EditionDefinition
 {
     public const int MaximumEventBasePoints = 1_000_000;
+    public const int MaximumScoringPoints = 1_000_000;
+    public const int MaximumScoringSeconds = 86_400;
 
     public required string EditionId { get; set; }
     public required string Name { get; set; }
@@ -134,6 +140,10 @@ public sealed class EditionDefinition
             DeviceId = e.DeviceId,
             Type = e.Type,
             BasePoints = e.BasePoints,
+            MinimumPoints = e.MinimumPoints,
+            DecayPoints = e.DecayPoints,
+            DecayEverySeconds = e.DecayEverySeconds,
+            GraceSeconds = e.GraceSeconds,
             Prompt = e.Prompt,
             Answer = e.Answer
         }).ToList()
@@ -155,8 +165,11 @@ public sealed class EditionDefinition
             throw new InvalidDataException($"Edition '{source}' must have an id and name.");
         }
 
-        if (edition.DurationLimitSeconds <= 0 || edition.Scoring.DecayEverySeconds <= 0 ||
-            edition.Scoring.BasePoints < 0 || edition.Scoring.DecayPoints < 0 || edition.Scoring.MinimumPoints < 0)
+        if (edition.DurationLimitSeconds <= 0 || edition.Scoring.DecayEverySeconds is < 1 or > MaximumScoringSeconds ||
+            edition.Scoring.BasePoints is < 0 or > MaximumScoringPoints ||
+            edition.Scoring.DecayPoints is < 0 or > MaximumScoringPoints ||
+            edition.Scoring.MinimumPoints is < 0 or > MaximumScoringPoints ||
+            edition.Scoring.MinimumPoints > edition.Scoring.BasePoints)
         {
             throw new InvalidDataException($"Edition '{source}' contains an invalid duration or scoring rule.");
         }
@@ -181,6 +194,29 @@ public sealed class EditionDefinition
                 throw new InvalidDataException($"Event '{eventDefinition.EventId}' base points must be between 0 and {MaximumEventBasePoints}.");
             }
 
+            var effectiveBasePoints = eventDefinition.BasePoints ?? edition.Scoring.BasePoints;
+            var effectiveMinimumPoints = eventDefinition.MinimumPoints ??
+                (eventDefinition.BasePoints.HasValue ? effectiveBasePoints / 2 + effectiveBasePoints % 2 : edition.Scoring.MinimumPoints);
+            if (eventDefinition.MinimumPoints is < 0 or > MaximumScoringPoints || effectiveMinimumPoints > effectiveBasePoints)
+            {
+                throw new InvalidDataException($"Event '{eventDefinition.EventId}' minimum points must be between 0 and its effective base points ({effectiveBasePoints}).");
+            }
+
+            if (eventDefinition.DecayPoints is < 0 or > MaximumScoringPoints)
+            {
+                throw new InvalidDataException($"Event '{eventDefinition.EventId}' decay points must be between 0 and {MaximumScoringPoints}.");
+            }
+
+            if (eventDefinition.DecayEverySeconds is < 1 or > MaximumScoringSeconds)
+            {
+                throw new InvalidDataException($"Event '{eventDefinition.EventId}' decay interval must be between 1 and {MaximumScoringSeconds} seconds.");
+            }
+
+            if (eventDefinition.GraceSeconds is < 0 or > MaximumScoringSeconds)
+            {
+                throw new InvalidDataException($"Event '{eventDefinition.EventId}' grace period must be between 0 and {MaximumScoringSeconds} seconds.");
+            }
+
             if (eventDefinition.Type == EventKind.Keypad && string.IsNullOrWhiteSpace(eventDefinition.Answer))
             {
                 throw new InvalidDataException($"Keypad event '{eventDefinition.EventId}' requires an answer.");
@@ -199,6 +235,7 @@ public sealed class EditionSetup
     public required string EditionId { get; set; }
     public required string Name { get; set; }
     public List<EventDefinition> Events { get; set; } = [];
+    public ScoringRule? Scoring { get; set; }
 }
 
 public sealed class EditionSnapshot
@@ -217,6 +254,10 @@ public sealed class EventSnapshot
     public required string DeviceId { get; set; }
     public EventKind Type { get; set; }
     public int? BasePoints { get; set; }
+    public int? MinimumPoints { get; set; }
+    public int? DecayPoints { get; set; }
+    public int? DecayEverySeconds { get; set; }
+    public int? GraceSeconds { get; set; }
     public string? Prompt { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Answer { get; set; }
@@ -439,6 +480,27 @@ public static class ScoreCalculator
 {
     public static int Calculate(EventRecord result, ScoringRule rule, int? eventBasePoints = null)
     {
+        var startingPoints = eventBasePoints ?? rule.BasePoints;
+        var minimumPoints = eventBasePoints is int eventStartingPoints
+            ? eventStartingPoints / 2 + eventStartingPoints % 2
+            : rule.MinimumPoints;
+        return Calculate(result, rule, startingPoints, minimumPoints, rule.DecayPoints, rule.DecayEverySeconds, 0);
+    }
+
+    public static int CalculateForEvent(EventRecord result, ScoringRule rule, EventSnapshot eventSnapshot)
+    {
+        var startingPoints = eventSnapshot.BasePoints ?? rule.BasePoints;
+        var minimumPoints = eventSnapshot.MinimumPoints ??
+            (eventSnapshot.BasePoints.HasValue ? startingPoints / 2 + startingPoints % 2 : rule.MinimumPoints);
+        var decayPoints = eventSnapshot.DecayPoints ?? rule.DecayPoints;
+        var decayEverySeconds = eventSnapshot.DecayEverySeconds ?? rule.DecayEverySeconds;
+        var graceSeconds = eventSnapshot.GraceSeconds ?? 0;
+        return Calculate(result, rule, startingPoints, minimumPoints, decayPoints, decayEverySeconds, graceSeconds);
+    }
+
+    private static int Calculate(EventRecord result, ScoringRule rule, int startingPoints, int minimumPoints,
+        int decayPoints, int decayEverySeconds, int graceSeconds)
+    {
         if (result.ScoreOverride is int manual)
         {
             return manual;
@@ -454,12 +516,22 @@ public static class ScoreCalculator
             return 0;
         }
 
-        var startingPoints = eventBasePoints ?? rule.BasePoints;
-        var minimumPoints = eventBasePoints is int eventStartingPoints
-            ? eventStartingPoints / 2 + eventStartingPoints % 2
-            : rule.MinimumPoints;
-        var fullDecaySteps = duration / (rule.DecayEverySeconds * 1000L);
-        var decayedPoints = (long)startingPoints - fullDecaySteps * rule.DecayPoints;
-        return (int)Math.Max(minimumPoints, decayedPoints);
+        var graceMilliseconds = graceSeconds * 1_000L;
+        var intervalMilliseconds = decayEverySeconds * 1_000L;
+        var fullDecaySteps = graceSeconds > 0
+            ? duration < graceMilliseconds ? 0 : 1 + (duration - graceMilliseconds) / intervalMilliseconds
+            : duration / intervalMilliseconds;
+        if (decayPoints == 0 || startingPoints == minimumPoints)
+        {
+            return startingPoints;
+        }
+
+        var stepsUntilMinimum = (startingPoints - minimumPoints + (long)decayPoints - 1) / decayPoints;
+        if (fullDecaySteps >= stepsUntilMinimum)
+        {
+            return minimumPoints;
+        }
+
+        return startingPoints - (int)(fullDecaySteps * decayPoints);
     }
 }

@@ -62,6 +62,27 @@ test("event score preview follows the edition rule and full decay steps", () => 
   assert.equal(previewEventScore(completed(20_000), { basePoints: 80, decayEverySeconds: 10, decayPoints: 8, minimumPoints: 32 }), 64);
 });
 
+test("positive grace sets the first loss boundary, then repeats by interval", () => {
+  const scoring = { basePoints: 50, minimumPoints: 0, decayPoints: 5, decayEverySeconds: 5 };
+  const event = { graceSeconds: 10 };
+  const completed = (durationMs) => ({ status: "completed", startElapsedMs: 0, finishElapsedMs: durationMs });
+
+  assert.equal(previewEventScore(completed(9_999), scoring, event), 50);
+  assert.equal(previewEventScore(completed(10_000), scoring, event), 45, "the first loss occurs exactly at grace");
+  assert.equal(previewEventScore(completed(14_999), scoring, event), 45);
+  assert.equal(previewEventScore(completed(15_000), scoring, event), 40);
+  assert.equal(previewEventScore(completed(20_000), scoring, event), 35);
+});
+
+test("zero grace preserves the legacy first loss at one full interval", () => {
+  const scoring = { basePoints: 50, minimumPoints: 0, decayPoints: 5, decayEverySeconds: 5 };
+  const completed = (durationMs) => ({ status: "completed", startElapsedMs: 0, finishElapsedMs: durationMs });
+
+  assert.equal(previewEventScore(completed(0), scoring, { graceSeconds: 0 }), 50);
+  assert.equal(previewEventScore(completed(4_999), scoring, { graceSeconds: 0 }), 50);
+  assert.equal(previewEventScore(completed(5_000), scoring, { graceSeconds: 0 }), 45);
+});
+
 test("event score preview honors override precedence, manual scoring, and incomplete events", () => {
   const completed = { status: "completed", startElapsedMs: 10_000, finishElapsedMs: 40_000 };
   const scoring = { basePoints: 50, decayEverySeconds: 5, decayPoints: 5, minimumPoints: 25 };
@@ -90,6 +111,27 @@ test("explicit per-event starting points use rounded-up half minimum and saved e
   assert.equal(previewEventScore(completed(100_000), scoring, { basePoints: 51 }), 26,
     "an odd starting value clamps at ceil(51 / 2), even if the edition minimum differs");
   assert.equal(previewEventScore(completed(100_000), scoring, { basePoints: 0 }), 0);
+});
+
+test("event snapshot scoring overrides every matching global rule and honors explicit zero", () => {
+  const scoring = { basePoints: 80, minimumPoints: 25, decayPoints: 5, decayEverySeconds: 5 };
+  const completed = (durationMs) => ({ status: "completed", startElapsedMs: 0, finishElapsedMs: durationMs });
+  const event = {
+    basePoints: 51,
+    minimumPoints: 11,
+    decayPoints: 7,
+    decayEverySeconds: 10,
+    graceSeconds: 5
+  };
+
+  assert.equal(previewEventScore(completed(4_999), scoring, event), 51);
+  assert.equal(previewEventScore(completed(5_000), scoring, event), 44);
+  assert.equal(previewEventScore(completed(14_999), scoring, event), 44);
+  assert.equal(previewEventScore(completed(15_000), scoring, event), 37);
+  assert.equal(previewEventScore(completed(100_000), scoring, event), 11);
+
+  const zeroEvent = { basePoints: 0, minimumPoints: 0, decayPoints: 0, decayEverySeconds: 1, graceSeconds: 0 };
+  assert.equal(previewEventScore(completed(50_000), scoring, zeroEvent), 0);
 });
 
 test("score overrides still win when an event definition has its own starting points", () => {

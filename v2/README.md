@@ -97,24 +97,36 @@ timestamps may be added anywhere within the run limit; the saved elapsed time
 extends through the latest corrected event. Points preview automatically from
 event times using the run's saved edition rules unless manually overridden;
 clearing a points override restores automatic scoring. Run bonus scoring is
-also editable. An event's optional `basePoints` sets its starting score; it
-loses 5 points every 5 seconds and bottoms out at half its starting score,
-rounded up. Without `basePoints`, the saved edition's global base and minimum
-scores apply unchanged.
+also editable. Each event may override `basePoints`, `minimumPoints`,
+`decayPoints`, `decayEverySeconds`, and `graceSeconds`. Missing values inherit
+the edition's global base, decay amount, and interval, and grace defaults to
+zero. When an event sets `basePoints` without `minimumPoints`, its floor is half
+that base rounded up; otherwise the global minimum is inherited. Decay starts
+after the grace period, with the first drop at the grace boundary: 10 seconds
+of grace with a 5 second interval drops at 10, 15, 20 seconds, and so on. With
+zero grace, the first drop remains at one full interval. Automatic scores never
+fall below their effective minimum. Manual point overrides remain in place
+until cleared.
 
 ## Setup and device readiness
 
 Use the operator **Setup** tab to change the active edition name and event
 roster, including event names, types, and device assignments. The setup API is
-`GET /api/setup` and `PUT /api/setup` with
-`{ "editionId", "name", "events": [{ "eventId", "name", "deviceId", "type", "basePoints" }] }`.
-`basePoints` is optional and must be an integer from 0 through 1,000,000.
+`GET /api/setup` and `PUT /api/setup`. Each event may include `basePoints`,
+`minimumPoints`, `decayPoints`, `decayEverySeconds`, and `graceSeconds`. These
+fields are optional nullable integers. Effective base, minimum, and decay
+values must be within 0–1,000,000 points; intervals and grace periods must be
+within 1–86,400 and 0–86,400 seconds respectively. The minimum cannot exceed
+the effective base. `GET /api/setup` and the `PUT` response include `scoring`
+with the actual edition-wide defaults. For compatibility, `scoring` is optional
+in a PUT request and any submitted value is ignored; only per-event fields are
+editable through setup.
 The active setup is stored transactionally in SQLite metadata; a database
 backup is created before a changed setup is saved. Setup is locked while a run
 is in progress or waiting to be recorded. Each run keeps its own edition
 snapshot, so editing setup never rewrites historical results. If the event
-roster or its base-point settings change while recorded runs exist in the
-current edition, the saved setup gets a new edition ID and the leaderboard
+roster or any per-event scoring setting changes while recorded runs exist in
+the current edition, the saved setup gets a new edition ID and the leaderboard
 starts a separate edition; earlier scores remain in history and are not
 deleted.
 

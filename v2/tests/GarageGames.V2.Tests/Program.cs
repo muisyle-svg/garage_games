@@ -5,7 +5,10 @@ using System.Text.Json;
 var tests = new (string Name, Action Run)[]
 {
     ("automatic event-score cutoffs", ScoreBoundaries),
+    ("per-event scoring parameters and grace boundaries", PerEventScoringBoundaries),
     ("per-event base points flow through live scoring, edits, history, and leaderboard", PerEventBasePoints),
+    ("per-event scoring snapshots persist and version editions", PerEventScoringPersistenceAndVersioning),
+    ("each per-event scoring parameter versions recorded editions", PerEventScoringVersioning),
     ("legacy config and snapshots keep their persisted global scoring floors", LegacyScoringFallback),
     ("pause freezes time and timeout precedence", PauseAndTimeout),
     ("physical master protocol validates boot tokens and SPEED interlock", MasterProtocolAndSpeedInterlock),
@@ -107,6 +110,68 @@ static void ScoreBoundaries()
     }, rule, basePoints);
 }
 
+static void PerEventScoringBoundaries()
+{
+    var rule = new ScoringRule();
+    var eventSnapshot = new EventSnapshot
+    {
+        EventId = "e",
+        Name = "e",
+        DeviceId = "d",
+        BasePoints = 100,
+        DecayPoints = 10,
+        DecayEverySeconds = 5,
+        GraceSeconds = 10
+    };
+
+    Assert.Equal(100, Score(9_999, eventSnapshot));
+    Assert.Equal(90, Score(10_000, eventSnapshot));
+    Assert.Equal(90, Score(14_999, eventSnapshot));
+    Assert.Equal(80, Score(15_000, eventSnapshot));
+    Assert.Equal(70, Score(20_000, eventSnapshot));
+    Assert.Equal(60, Score(25_000, eventSnapshot));
+    Assert.Equal(50, Score(long.MaxValue, eventSnapshot));
+
+    eventSnapshot.MinimumPoints = 0;
+    Assert.Equal(0, Score(long.MaxValue, eventSnapshot));
+    eventSnapshot.BasePoints = 51;
+    eventSnapshot.MinimumPoints = null;
+    Assert.Equal(26, Score(long.MaxValue, eventSnapshot));
+    eventSnapshot.BasePoints = 0;
+    eventSnapshot.MinimumPoints = 0;
+    eventSnapshot.DecayPoints = 0;
+    eventSnapshot.DecayEverySeconds = 1;
+    eventSnapshot.GraceSeconds = 0;
+    Assert.Equal(0, Score(long.MaxValue, eventSnapshot));
+
+    var inherited = new EventSnapshot { EventId = "e", Name = "e", DeviceId = "d" };
+    Assert.Equal(45, Score(5_000, inherited));
+    Assert.Equal(25, Score(30_000, inherited));
+    var zeroGrace = new EventSnapshot
+    {
+        EventId = "e",
+        Name = "e",
+        DeviceId = "d",
+        BasePoints = 100,
+        DecayPoints = 10,
+        DecayEverySeconds = 5,
+        GraceSeconds = 0
+    };
+    Assert.Equal(100, Score(0, zeroGrace));
+    Assert.Equal(100, Score(4_999, zeroGrace));
+    Assert.Equal(90, Score(5_000, zeroGrace));
+
+    int Score(long duration, EventSnapshot snapshot) => ScoreCalculator.CalculateForEvent(new EventRecord
+    {
+        EventId = "e",
+        Name = "e",
+        DeviceId = "d",
+        Status = EventStatus.Completed,
+        StartElapsedMs = 0,
+        FinishElapsedMs = duration
+    }, rule, snapshot);
+}
+
 static void PerEventBasePoints()
 {
     var edition = MakeMvpEdition();
@@ -169,6 +234,102 @@ static void PerEventBasePoints()
     Assert.Equal(35, correctedHistory.Events.Single(e => e.EventId == "event-01").Score);
     Assert.Equal(40, correctedHistory.Edition.Events.Single(e => e.EventId == "event-01").BasePoints);
     Assert.Equal(0, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+}
+
+static void PerEventScoringPersistenceAndVersioning()
+{
+    var edition = MakeEdition();
+    edition.Events[0].BasePoints = 60;
+    edition.Events[0].MinimumPoints = 11;
+    edition.Events[0].DecayPoints = 7;
+    edition.Events[0].DecayEverySeconds = 2;
+    edition.Events[0].GraceSeconds = 3;
+    using var h = new TestHarness(edition, NewPath());
+    var run = h.ArmAndStart();
+    h.Service.PressEvent(run.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromSeconds(7));
+    var completed = h.Service.PressEvent(run.Id, "event-01").Run!;
+    Assert.Equal(39, completed.Events.Single(item => item.EventId == "event-01").Score);
+    Assert.Equal(11, completed.Edition.Events[0].MinimumPoints);
+    Assert.Equal(7, completed.Edition.Events[0].DecayPoints);
+    Assert.Equal(2, completed.Edition.Events[0].DecayEverySeconds);
+    Assert.Equal(3, completed.Edition.Events[0].GraceSeconds);
+
+    var edited = h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = completed.Revision,
+        Reason = "Check event-specific grace and decay after a timing correction",
+        Events = [new EventEditRequest { EventId = "event-01", FinishElapsedMs = 5_000 }]
+    });
+    Assert.Equal(46, edited.Events.Single(item => item.EventId == "event-01").Score);
+    h.Service.Finish();
+    var recorded = h.Service.Record();
+    var savedRun = h.Store.Load().Runs.Single(item => item.Id == recorded.Id);
+    Assert.Equal(60, savedRun.Edition.Events[0].BasePoints);
+    Assert.Equal(11, savedRun.Edition.Events[0].MinimumPoints);
+    Assert.Equal(7, savedRun.Edition.Events[0].DecayPoints);
+    Assert.Equal(2, savedRun.Edition.Events[0].DecayEverySeconds);
+    Assert.Equal(3, savedRun.Edition.Events[0].GraceSeconds);
+
+    var setup = h.Service.GetSetup();
+    var priorEditionId = setup.EditionId;
+    setup.Events[0].MinimumPoints = 10;
+    var changed = h.Service.UpdateSetup(setup);
+    Assert.True(changed.EditionId != priorEditionId, "Changing one event scoring field after a result must create a new edition.");
+    var historical = h.Service.GetOperatorSnapshot().History.Single(item => item.Id == recorded.Id);
+    Assert.Equal(11, historical.Edition.Events[0].MinimumPoints);
+    Assert.Equal(46, historical.Events.Single(item => item.EventId == "event-01").Score);
+    var correctedHistory = h.Service.EditHistoricalRun(recorded.Id, new EditRunRequest
+    {
+        ExpectedRevision = historical.Revision,
+        Reason = "Verify historical correction keeps the original event scoring parameters",
+        Events = [new EventEditRequest { EventId = "event-01", FinishElapsedMs = 7_000 }]
+    });
+    Assert.Equal(39, correctedHistory.Events.Single(item => item.EventId == "event-01").Score);
+    Assert.Equal(11, correctedHistory.Edition.Events[0].MinimumPoints);
+
+    var setupJsonWithoutScoring = JsonSerializer.Deserialize<EditionSetup>("""
+        {"editionId":"compat","name":"Compatibility","events":[]}
+        """, JsonDefaults.Options)!;
+    Assert.Equal(null, setupJsonWithoutScoring.Scoring);
+    Assert.Equal(50, changed.Scoring!.BasePoints);
+    Assert.Equal(25, changed.Scoring.MinimumPoints);
+    var requestWithGlobalScoring = h.Service.GetSetup();
+    requestWithGlobalScoring.Scoring = new ScoringRule { BasePoints = 900, MinimumPoints = 1, DecayPoints = 0, DecayEverySeconds = 1 };
+    var ignoredGlobalScoring = h.Service.UpdateSetup(requestWithGlobalScoring);
+    Assert.Equal(50, ignoredGlobalScoring.Scoring!.BasePoints);
+    Assert.Equal(25, ignoredGlobalScoring.Scoring.MinimumPoints);
+    Assert.Equal(5, ignoredGlobalScoring.Scoring.DecayPoints);
+    Assert.Equal(5, ignoredGlobalScoring.Scoring.DecayEverySeconds);
+}
+
+static void PerEventScoringVersioning()
+{
+    var changes = new (string Name, Action<EventDefinition> Apply)[]
+    {
+        ("base points", item => item.BasePoints = 55),
+        ("minimum points", item => item.MinimumPoints = 20),
+        ("decay points", item => item.DecayPoints = 4),
+        ("decay interval", item => item.DecayEverySeconds = 3),
+        ("grace period", item => item.GraceSeconds = 2)
+    };
+
+    foreach (var change in changes)
+    {
+        using var h = NewHarness();
+        var run = h.ArmAndStart();
+        h.Service.PressEvent(run.Id, "event-01");
+        h.Service.PressEvent(run.Id, "event-01");
+        h.Service.Finish();
+        var recorded = h.Service.Record();
+
+        var setup = h.Service.GetSetup();
+        change.Apply(setup.Events[0]);
+        var updated = h.Service.UpdateSetup(setup);
+        Assert.True(updated.EditionId != recorded.EditionId,
+            $"Changing event {change.Name} after a recorded run must create a new edition.");
+        Assert.Equal(recorded.EditionId, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == recorded.Id).EditionId);
+    }
 }
 
 static void LegacyScoringFallback()
@@ -1007,6 +1168,10 @@ static void SetupPersistenceAndRosterIsolation()
 
     var setup = h.Service.GetSetup();
     setup.Events[0].BasePoints = 40;
+    setup.Events[0].MinimumPoints = 15;
+    setup.Events[0].DecayPoints = 0;
+    setup.Events[0].DecayEverySeconds = 1;
+    setup.Events[0].GraceSeconds = 0;
     var saved = h.Service.UpdateSetup(setup);
 
     Assert.True(saved.EditionId != priorEditionId, "Changing event points after recorded runs must start a separate leaderboard edition.");
@@ -1025,6 +1190,10 @@ static void SetupPersistenceAndRosterIsolation()
     var persisted = reopened.GetSetup();
     Assert.Equal(saved.EditionId, persisted.EditionId);
     Assert.Equal(40, persisted.Events[0].BasePoints);
+    Assert.Equal(15, persisted.Events[0].MinimumPoints);
+    Assert.Equal(0, persisted.Events[0].DecayPoints);
+    Assert.Equal(1, persisted.Events[0].DecayEverySeconds);
+    Assert.Equal(0, persisted.Events[0].GraceSeconds);
     Assert.True(JsonSerializer.Serialize(persisted, JsonDefaults.Options).Contains("\"basePoints\":40", StringComparison.Ordinal));
     Assert.Equal(null, reopened.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Edition.Events[0].BasePoints);
     Assert.Equal(45, reopened.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Events[0].Score);
@@ -1056,6 +1225,38 @@ static void SetupLockAndValidation()
     current = h.Service.GetSetup();
     current.Events[1].EventId = current.Events[0].EventId;
     Assert.Throws<CommandException>(() => h.Service.UpdateSetup(current));
+
+    var invalidEventScoring = new Action<EventDefinition>[]
+    {
+        item => item.MinimumPoints = -1,
+        item => item.MinimumPoints = 51,
+        item => { item.BasePoints = 10; item.MinimumPoints = 11; },
+        item => item.DecayPoints = -1,
+        item => item.DecayPoints = EditionDefinition.MaximumScoringPoints + 1,
+        item => item.DecayEverySeconds = 0,
+        item => item.DecayEverySeconds = EditionDefinition.MaximumScoringSeconds + 1,
+        item => item.GraceSeconds = -1,
+        item => item.GraceSeconds = EditionDefinition.MaximumScoringSeconds + 1
+    };
+    foreach (var setInvalidScoring in invalidEventScoring)
+    {
+        current = h.Service.GetSetup();
+        setInvalidScoring(current.Events[0]);
+        Assert.Throws<CommandException>(() => h.Service.UpdateSetup(current));
+    }
+
+    current = h.Service.GetSetup();
+    current.Events[0].BasePoints = 0;
+    current.Events[0].MinimumPoints = 0;
+    current.Events[0].DecayPoints = 0;
+    current.Events[0].DecayEverySeconds = 1;
+    current.Events[0].GraceSeconds = 0;
+    var explicitZeros = h.Service.UpdateSetup(current).Events[0];
+    Assert.Equal(0, explicitZeros.BasePoints);
+    Assert.Equal(0, explicitZeros.MinimumPoints);
+    Assert.Equal(0, explicitZeros.DecayPoints);
+    Assert.Equal(1, explicitZeros.DecayEverySeconds);
+    Assert.Equal(0, explicitZeros.GraceSeconds);
 }
 
 static void DeviceScanReadiness()

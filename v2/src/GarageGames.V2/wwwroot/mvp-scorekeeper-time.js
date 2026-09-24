@@ -66,13 +66,20 @@
     const durationMs = Number(result.finishElapsedMs) - Number(result.startElapsedMs);
     const hasEventStartingPoints = eventDefinition?.basePoints !== null && eventDefinition?.basePoints !== undefined;
     const basePoints = Number(hasEventStartingPoints ? eventDefinition.basePoints : scoring.basePoints ?? 50);
-    const decayEverySeconds = Number(scoring.decayEverySeconds ?? 5);
-    const decayPoints = Number(scoring.decayPoints ?? 5);
-    const minimumPoints = Number(hasEventStartingPoints ? Math.ceil(basePoints / 2) : scoring.minimumPoints ?? 25);
+    const minimumPoints = Number(eventDefinition?.minimumPoints !== null && eventDefinition?.minimumPoints !== undefined
+      ? eventDefinition.minimumPoints
+      : hasEventStartingPoints ? Math.ceil(basePoints / 2) : scoring.minimumPoints ?? 25);
+    const decayEverySeconds = Number(eventDefinition?.decayEverySeconds ?? scoring.decayEverySeconds ?? 5);
+    const decayPoints = Number(eventDefinition?.decayPoints ?? scoring.decayPoints ?? 5);
+    const graceSeconds = Number(eventDefinition?.graceSeconds ?? 0);
     if (!Number.isFinite(durationMs) || durationMs < 0 || !Number.isFinite(decayEverySeconds) || decayEverySeconds <= 0 ||
-        !Number.isFinite(basePoints) || !Number.isFinite(decayPoints) || !Number.isFinite(minimumPoints)) return 0;
+        !Number.isFinite(basePoints) || !Number.isFinite(decayPoints) || decayPoints < 0 ||
+        !Number.isFinite(minimumPoints) || !Number.isFinite(graceSeconds) || graceSeconds < 0) return 0;
 
-    const fullDecaySteps = Math.floor(durationMs / (decayEverySeconds * 1000));
+    const intervalMs = decayEverySeconds * 1000;
+    const fullDecaySteps = graceSeconds > 0
+      ? durationMs < graceSeconds * 1000 ? 0 : 1 + Math.floor((durationMs - graceSeconds * 1000) / intervalMs)
+      : Math.floor(durationMs / intervalMs);
     return Math.max(minimumPoints, basePoints - fullDecaySteps * decayPoints);
   }
 
