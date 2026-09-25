@@ -1,23 +1,32 @@
 /*
-  SPEED BUTTON - MASTER
+  GARAGE GAMES - MASTER
   ---------------------
-  Standalone reaction game for a master XIAO ESP32 and up to 13 spoke buttons.
+  Combined master firmware for the local Garage Games scorekeeper and the
+  Speed Button game. Designed for a XIAO ESP32-C3 master and spoke buttons.
+
+  GARAGE GAMES MODE:
+    - The master connects to the local scorekeeper app over USB serial.
+    - A short press of the master button sends a start request to the app.
+      The app manages the five-minute Garage Games run and its countdown.
+    - Spoke buttons communicate with the master over ESP-NOW. The master
+      relays their event presses and device status to the scorekeeper.
+    - Holding the master button for 5 seconds starts Speed Button discovery
+      only when the scorekeeper is not reporting a Garage Games countdown,
+      active run, or paused run.
 
   Hardware:
     Button : D2 (active LOW)
     RGB LED: D3/D4/D5 (common anode, active LOW)
     TM1637: D0 = CLK, D1 = DIO
 
-  Radio:
-    ESP-NOW only. There is no Wi-Fi association, password, scan, or AP.
-    All devices must use the same fixed channel below.
-
-  Game:
-    - On boot, the master displays RDY until the first start attempt.
-    - Hold the master button for 5 seconds to begin discovery.
+  SPEED BUTTON MODE:
+    - Hold the master button for 5 seconds to begin spoke discovery, provided
+      the scorekeeper is not reporting a Garage Games countdown, active run,
+      or paused run.
     - Five quick master-button taps while idle clear the saved high score.
-    - A configurable minimum number of the expected 13 spokes must be visible
-      to start (set below; currently 3 for testing).
+    - A configurable minimum number of the expected 13 spokes must be
+      visible to start (set below; currently 3 for testing).
+    - On boot, the master displays RDY until the first start attempt.
     - Spokes flash red, yellow, green while the master displays 3, 2, 1.
     - After GO, one random live spoke blinks green, then yellow, then red;
       its blink rate accelerates as its deadline approaches.
@@ -31,6 +40,11 @@
 
   Spoke identity is its ESP-NOW station MAC address. This means the same spoke
   sketch can be flashed to every button; no per-button numeric ID is required.
+
+  Radio:
+    ESP-NOW uses the fixed channel below for communication with the spokes.
+    The master-to-scorekeeper connection is USB serial; the radio does not
+    join a Wi-Fi network or create an access point.
 
   IMPORTANT POWER NOTE:
     A completely deep-sleeping ESP32 cannot receive an arbitrary wireless
