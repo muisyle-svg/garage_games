@@ -39,11 +39,11 @@
         <div>
           <p class="mvp-kicker">Scorekeeper desk</p>
           <h1 id="run-heading">Current run</h1>
-          <p id="run-caption" class="muted">Choose a competitor, then start the five-minute clock.</p>
+          <p id="run-caption" class="muted">Choose a competitor and set the run length before starting.</p>
         </div>
         <div class="run-controls">
           <button id="arm-physical-button" class="button button-secondary" type="button" disabled>Arm for physical Start</button>
-          <button id="start-run-button" class="button button-primary" type="button" disabled>Start 5-minute run</button>
+          <button id="start-run-button" class="button button-primary" type="button" disabled>Start 5:00 run</button>
           <button id="pause-run-button" class="button button-secondary" type="button" disabled>Pause</button>
           <button id="finish-run-button" class="button button-secondary" type="button" disabled>Finish run</button>
           <button id="record-run-button" class="button button-record" type="button" disabled>Record result</button>
@@ -62,6 +62,11 @@
               <option value="exhibition">Exhibition</option>
             </select>
           </div>
+        </div>
+        <div class="summary-stat summary-run-length">
+          <label for="run-duration-input">Run length (M:SS)</label>
+          <input id="run-duration-input" type="text" inputmode="numeric" autocomplete="off" maxlength="5" pattern="[0-9]{1,2}:[0-5][0-9]" value="5:00" aria-describedby="run-duration-help">
+          <small id="run-duration-help" class="run-duration-help" aria-live="polite">Default 5:00 · change before arming or starting.</small>
         </div>
         <div class="summary-stat summary-clock"><span>Time remaining</span><strong id="run-countdown">5:00</strong></div>
         <div class="summary-stat"><span>Competitor</span><strong id="run-competitor">—</strong></div>

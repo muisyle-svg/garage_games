@@ -6,6 +6,29 @@
   "use strict";
 
   const liveStatuses = new Set(["armed", "countdown", "active", "paused", "finished"]);
+  const DEFAULT_DURATION_SECONDS = 300;
+  const MAX_DURATION_SECONDS = 5999;
+
+  function parseRunDuration(value) {
+    const match = String(value ?? "").trim().match(/^(\d{1,2}):([0-5]\d)$/);
+    if (!match) return null;
+    const seconds = Number(match[1]) * 60 + Number(match[2]);
+    return seconds > 0 && seconds <= MAX_DURATION_SECONDS ? seconds : null;
+  }
+
+  function formatRunDuration(value) {
+    const seconds = Number(value);
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > MAX_DURATION_SECONDS) return "5:00";
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+
+  function validatedDuration(value = DEFAULT_DURATION_SECONDS) {
+    const seconds = Number(value);
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > MAX_DURATION_SECONDS) {
+      throw new Error("Run length must be a whole number of seconds from 1 to 5,999.");
+    }
+    return seconds;
+  }
 
   function isSpeedMode(master) {
     return String(master?.mode || "").toUpperCase() === "SPEED";
@@ -13,6 +36,14 @@
 
   function isLiveRun(run) {
     return Boolean(run && liveStatuses.has(run.status));
+  }
+
+  function isRunDurationLocked(run) {
+    return isLiveRun(run);
+  }
+
+  function shouldResetRunDuration(run, lastResetRunId) {
+    return Boolean(run?.id && !isRunDurationLocked(run) && run.id !== lastResetRunId);
   }
 
   function handshakeGuidance(master) {
@@ -47,7 +78,7 @@
     return request("/api/master/disconnect", { method: "POST" });
   }
 
-  async function armForPhysicalStart(request, { master, currentRun, competitorId, category }) {
+  async function armForPhysicalStart(request, { master, currentRun, competitorId, category, durationLimitSeconds = DEFAULT_DURATION_SECONDS }) {
     assertStartAllowed(master);
     if (!master?.connected) throw new Error("Connect the physical master before arming a physical Start.");
     const guidance = handshakeGuidance(master);
@@ -56,11 +87,11 @@
     if (!competitorId) throw new Error("Choose a competitor before arming a physical Start.");
     return request("/api/run/arm", {
       method: "POST",
-      body: JSON.stringify({ competitorId, category })
+      body: JSON.stringify({ competitorId, category, durationLimitSeconds: validatedDuration(durationLimitSeconds) })
     });
   }
 
-  async function startVirtually(request, { master, currentRun, competitorId, category }, afterArm = async () => {}) {
+  async function startVirtually(request, { master, currentRun, competitorId, category, durationLimitSeconds = DEFAULT_DURATION_SECONDS }, afterArm = async () => {}) {
     assertStartAllowed(master);
     if (currentRun?.status === "armed") {
       competitorId = currentRun.competitorId;
@@ -70,7 +101,7 @@
       if (!competitorId) throw new Error("Choose a competitor before starting a run.");
       await request("/api/run/arm", {
         method: "POST",
-        body: JSON.stringify({ competitorId, category })
+        body: JSON.stringify({ competitorId, category, durationLimitSeconds: validatedDuration(durationLimitSeconds) })
       });
       await afterArm();
     }
@@ -81,6 +112,10 @@
 
   return Object.freeze({
     isSpeedMode,
+    isRunDurationLocked,
+    shouldResetRunDuration,
+    parseRunDuration,
+    formatRunDuration,
     handshakeGuidance,
     canArmPhysical,
     canStartVirtual,

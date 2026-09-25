@@ -43,7 +43,14 @@
     setupScanAt: 0,
     setupScanError: "",
     setupLoadError: "",
-    setupSelectedEventId: null
+    setupSelectedEventId: null,
+    durationRunId: null,
+    durationResetRunId: null,
+    snapshotRequestId: 0,
+    appliedSnapshotRequestId: 0,
+    armScanPending: false,
+    armScanAfterSnapshotRequestId: null,
+    armScanRequestVersion: 0
   };
 
   const clearDatabasePhrase = "CLEAR ALL DATA";
@@ -75,6 +82,8 @@
     newCompetitor: $("new-competitor-name"),
     start: $("start-run-button"),
     armPhysical: $("arm-physical-button"),
+    durationInput: $("run-duration-input"),
+    durationHelp: $("run-duration-help"),
     masterPort: $("master-port-select"),
     masterConnect: $("master-connect-button"),
     masterDisconnect: $("master-disconnect-button"),
@@ -141,7 +150,7 @@
   };
 
   function isLiveLock(run) {
-    return Boolean(run && ["armed", "countdown", "active", "paused", "finished"].includes(run.status));
+    return masterActions.isRunDurationLocked(run);
   }
 
   function make(tag, className, text) {
@@ -297,10 +306,18 @@
   }
 
   async function loadSnapshot(silent = false) {
+    const requestId = ++state.snapshotRequestId;
     try {
       const snapshot = await request("/api/operator");
+      if (requestId < state.appliedSnapshotRequestId) return true;
+      state.appliedSnapshotRequestId = requestId;
       state.snapshot = snapshot;
       state.receivedAt = Date.now();
+      if (state.armScanPending && state.armScanAfterSnapshotRequestId !== null && requestId > state.armScanAfterSnapshotRequestId) {
+        state.armScanPending = false;
+        state.armScanAfterSnapshotRequestId = null;
+        state.virtualKey = null;
+      }
       state.timeoutRefreshRunId = null;
       setConnection(true);
       ui.lastUpdated.textContent = new Date(state.receivedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
@@ -662,6 +679,7 @@
       if (state.setupDirty) ui.setupValidation.textContent = "Save setup changes before scanning the current event assignments.";
       return;
     }
+    const armRequestVersionAtStart = state.armScanRequestVersion;
     state.setupScanLoading = true;
     state.setupScanError = "";
     renderSetupControls();
@@ -678,6 +696,13 @@
       state.setupScanError = `Scan failed: ${error.message || "the master scan could not be completed."}`;
     } finally {
       state.setupScanLoading = false;
+      if (armRequestVersionAtStart !== state.armScanRequestVersion) {
+        state.setupScanFresh = false;
+        state.setupScanAt = 0;
+      } else if (state.setupScanFresh) {
+        state.armScanPending = false;
+        state.armScanAfterSnapshotRequestId = null;
+      }
       state.virtualKey = null;
       renderSetupControls();
       renderSetupDiscovery();
@@ -830,7 +855,38 @@
   }
 
   function runDurationSeconds(run) {
-    return Number(run?.edition?.durationLimitSeconds || state.snapshot?.durationLimitSeconds || 300);
+    const seconds = Number(run?.edition?.durationLimitSeconds);
+    return Number.isInteger(seconds) && seconds > 0 && seconds <= 5999 ? seconds : 300;
+  }
+
+  function selectedRunDurationSeconds() {
+    return masterActions.parseRunDuration(ui.durationInput.value);
+  }
+
+  function syncRunDurationControl(run) {
+    if (masterActions.isRunDurationLocked(run)) {
+      ui.durationInput.value = masterActions.formatRunDuration(runDurationSeconds(run));
+      state.durationRunId = run.id;
+      state.durationResetRunId = null;
+      ui.durationInput.disabled = true;
+      ui.durationInput.removeAttribute("aria-invalid");
+      ui.durationHelp.textContent = "Actual run length · locked for this run.";
+      return;
+    }
+
+    if (run && masterActions.shouldResetRunDuration(run, state.durationResetRunId)) {
+      ui.durationInput.value = "5:00";
+      state.durationResetRunId = run.id;
+    } else if (!run && state.durationRunId !== null) {
+      ui.durationInput.value = "5:00";
+    }
+    state.durationRunId = null;
+    ui.durationInput.disabled = state.busy || state.masterBusy;
+    const valid = selectedRunDurationSeconds() !== null;
+    ui.durationInput.setAttribute("aria-invalid", String(!valid));
+    ui.durationHelp.textContent = valid
+      ? "Default 5:00 · change before arming or starting."
+      : "Enter a positive run length as M:SS, from 0:01 to 99:59.";
   }
 
   function formatSeconds(milliseconds) {
@@ -1104,7 +1160,12 @@
     if (!run) {
       ui.banner.textContent = state.discardedRunNotice || "No run is active. Select a competitor to begin.";
       ui.banner.classList.toggle("is-discarded", Boolean(state.discardedRunNotice));
-      ui.caption.textContent = state.discardedRunNotice ? "Discarded run · not recorded" : "Choose a competitor, then start the five-minute clock.";
+      const selectedDuration = selectedRunDurationSeconds();
+      ui.caption.textContent = state.discardedRunNotice
+        ? "Discarded run · not recorded"
+        : selectedDuration === null
+          ? "Enter a positive run length as M:SS, from 0:01 to 99:59."
+          : `Choose a competitor, then start the ${masterActions.formatRunDuration(selectedDuration)} clock.`;
     } else {
       ui.banner.classList.remove("is-discarded");
       const label = categoryLabel(run.category);
@@ -1121,7 +1182,7 @@
         superseded: "Run replaced by a newer result."
       }[run.status] || `Run status: ${titleCase(run.status)}.`;
       ui.banner.textContent = `${copy} ${competitor} · ${label}`;
-      ui.caption.textContent = `${competitor} · ${label} · ${titleCase(run.status)}`;
+      ui.caption.textContent = `${competitor} · ${label} · ${titleCase(run.status)} · ${masterActions.formatRunDuration(runDurationSeconds(run))} run`;
     }
     renderVirtualButtons(run);
   }
@@ -1151,19 +1212,27 @@
       const button = make("button", "virtual-button");
       button.type = "button";
       button.disabled = !canPress || event.status === "completed";
-      const useVirtual = !isPhysicalEventResponding(event);
       const actionLabel = event.status === "active" ? "finish event" : event.status === "completed" ? "complete" : "start event";
-      button.setAttribute("aria-label", `${event.name}: ${useVirtual && event.status !== "completed" ? "use virtual press to " : ""}${actionLabel}`);
-      const name = make("strong", "", `${String(index + 1).padStart(2, "0")} · ${event.name}`);
-      let hint = "Start";
+      const readiness = physicalReadiness(event);
+      const status = virtualDeviceStatus(readiness);
+      const useVirtual = readiness.key !== "responding" && readiness.key !== "unassigned";
+      button.classList.add(`device-${status.key}`);
+      let actionHint = "Start";
       if (event.status === "active") {
         const remainingMs = Math.max(0, runDurationSeconds(run) * 1000 - currentElapsedMs(run));
-        hint = `Stop · ${formatSeconds(remainingMs)} left`;
+        actionHint = `Stop · ${formatSeconds(remainingMs)} left`;
+      } else if (event.status === "completed") {
+        actionHint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
       }
-      if (event.status === "completed") hint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
-      else if (useVirtual) hint = `Use virtual · ${hint}`;
-      const stateLabel = make("small", "", hint);
-      button.append(name, stateLabel);
+      if (useVirtual && event.status !== "completed") actionHint = `Use virtual · ${actionHint}`;
+      button.setAttribute("aria-label", `${event.name}: physical button ${status.label}. ${actionHint}. Press to ${actionLabel}.`);
+      button.title = `${event.name} · ${status.label} · ${actionHint}`;
+      const name = make("strong", "", `${String(index + 1).padStart(2, "0")} · ${event.name}`);
+      const stateLabel = make("small", "virtual-device-status", status.label);
+      const action = make("small", "virtual-action-hint", actionHint);
+      const metadata = make("span", "virtual-button-meta");
+      metadata.append(stateLabel, action);
+      button.append(name, metadata);
       button.addEventListener("click", () => pressEvent(run, event));
       ui.virtualButtons.appendChild(button);
     });
@@ -1179,6 +1248,10 @@
       eventId: event?.eventId || "",
       assignmentValue: event?.deviceId || ""
     };
+    if (!setupTools.hardwareId(configured.assignmentValue || configured.deviceId || "")) {
+      return { key: "unassigned", label: "Unassigned" };
+    }
+    if (state.armScanPending) return { key: "unverified", label: "Unverified" };
     return setupTools.currentReadiness(configured, {
       snapshot: state.snapshot,
       scan: state.setupScan,
@@ -1189,6 +1262,13 @@
       dirty: state.setupDirty && Boolean(setupEvent(event?.eventId)),
       scanLoading: state.setupScanLoading
     });
+  }
+
+  function virtualDeviceStatus(readiness) {
+    if (readiness.key === "unassigned") return { key: "virtual", label: "Virtual" };
+    if (readiness.key === "responding") return { key: "responding", label: "Responding" };
+    if (["not-responding", "not-seen"].includes(readiness.key)) return { key: "not-responding", label: "Not responding" };
+    return { key: "unverified", label: "Unverified" };
   }
 
   function physicalAvailabilitySummary(events) {
@@ -1321,7 +1401,7 @@
 
   function runEventTimestamp(run, elapsedMs) {
     if (!Number.isFinite(elapsedMs)) return "—";
-    const durationSeconds = Number(run.edition?.durationLimitSeconds || state.snapshot?.durationLimitSeconds || 300);
+    const durationSeconds = runDurationSeconds(run);
     const remaining = scorekeeperTime.remainingSecondsFromElapsedMs(elapsedMs, durationSeconds);
     return remaining === null ? "—" : formatSeconds(remaining * 1000);
   }
@@ -1532,12 +1612,18 @@
     const run = snapshot?.currentRun || null;
     const locked = isLiveLock(run);
     const selectedId = ui.competitor.value;
+    syncRunDurationControl(run);
+    const durationSeconds = selectedRunDurationSeconds();
     ui.competitor.disabled = state.busy || locked;
     ui.category.disabled = state.busy || locked;
-    ui.start.disabled = state.busy || state.masterBusy || !masterActions.canStartVirtual(state.master, run, selectedId);
-    ui.start.textContent = run?.status === "armed" ? "Start armed run" : "Start 5-minute run";
-    ui.armPhysical.disabled = state.busy || state.masterBusy || !masterActions.canArmPhysical(state.master, run, selectedId);
-    ui.armPhysical.textContent = run?.status === "armed" ? "Waiting for physical Start" : "Arm for physical Start";
+    ui.start.disabled = state.busy || state.masterBusy || !masterActions.canStartVirtual(state.master, run, selectedId) || (!locked && durationSeconds === null);
+    ui.start.textContent = run?.status === "armed"
+      ? "Start armed run"
+      : `Start ${masterActions.formatRunDuration(durationSeconds || 300)} run`;
+    ui.armPhysical.disabled = state.busy || state.masterBusy || !masterActions.canArmPhysical(state.master, run, selectedId) || (!locked && durationSeconds === null);
+    ui.armPhysical.textContent = run?.status === "armed"
+      ? "Waiting for physical Start"
+      : `Arm ${masterActions.formatRunDuration(durationSeconds || 300)} run`;
     ui.pause.disabled = state.busy || !run || !["active", "paused"].includes(run.status);
     ui.pause.textContent = run?.status === "paused" ? "Resume" : "Pause";
     ui.finish.disabled = state.busy || !run || !["armed", "active", "paused"].includes(run.status);
@@ -1572,14 +1658,16 @@
   function tickClock() {
     const snapshot = state.snapshot;
     const run = snapshot?.currentRun;
-    const limitMs = Number(snapshot?.durationLimitSeconds || 300) * 1000;
-    const elapsedMs = run ? currentElapsedMs(run) : 0;
+    const liveRun = masterActions.isRunDurationLocked(run) ? run : null;
+    const idleDuration = selectedRunDurationSeconds();
+    const limitMs = (liveRun ? runDurationSeconds(liveRun) : idleDuration || 300) * 1000;
+    const elapsedMs = liveRun ? currentElapsedMs(liveRun) : 0;
     const remainingMs = Math.max(0, limitMs - elapsedMs);
     const totalSeconds = Math.ceil(remainingMs / 1000);
-    ui.countdown.textContent = scorekeeperTime.formatClockMs(totalSeconds * 1000);
-    ui.countdown.classList.toggle("is-expired", Boolean(run && remainingMs === 0));
-    if (run?.status === "active" && remainingMs === 0 && state.timeoutRefreshRunId !== run.id) {
-      state.timeoutRefreshRunId = run.id;
+    ui.countdown.textContent = !liveRun && idleDuration === null ? "—" : scorekeeperTime.formatClockMs(totalSeconds * 1000);
+    ui.countdown.classList.toggle("is-expired", Boolean(liveRun && remainingMs === 0));
+    if (liveRun?.status === "active" && remainingMs === 0 && state.timeoutRefreshRunId !== liveRun.id) {
+      state.timeoutRefreshRunId = liveRun.id;
       loadSnapshot(true);
     }
     if (run) {
@@ -1659,7 +1747,8 @@
       master: state.master,
       currentRun: current,
       competitorId: ui.competitor.value,
-      category: ui.category.value
+      category: ui.category.value,
+      durationLimitSeconds: selectedRunDurationSeconds()
     }, () => loadSnapshot(true));
     state.discardedRunNotice = null;
     if (started.run) countdownCoordinator.observe(started.run);
@@ -1668,13 +1757,26 @@
   }
 
   async function armPhysicalRun() {
-    await masterActions.armForPhysicalStart(request, {
-      master: state.master,
-      currentRun: state.snapshot?.currentRun || null,
-      competitorId: ui.competitor.value,
-      category: ui.category.value
-    });
-    state.discardedRunNotice = null;
+    state.armScanRequestVersion += 1;
+    state.armScanPending = true;
+    state.armScanAfterSnapshotRequestId = null;
+    state.setupScanFresh = false;
+    state.setupScanAt = 0;
+    state.virtualKey = null;
+    if (state.snapshot) renderVirtualButtons(state.snapshot.currentRun);
+    try {
+      await masterActions.armForPhysicalStart(request, {
+        master: state.master,
+        currentRun: state.snapshot?.currentRun || null,
+        competitorId: ui.competitor.value,
+        category: ui.category.value,
+        durationLimitSeconds: selectedRunDurationSeconds()
+      });
+      state.discardedRunNotice = null;
+    } finally {
+      state.armScanAfterSnapshotRequestId = state.snapshotRequestId;
+      await loadSnapshot(true);
+    }
   }
 
   async function removeMatchingQueueEntryAfterStart(competitorId, category) {
@@ -1979,6 +2081,10 @@
       );
     });
     ui.competitor.addEventListener("change", updateControls);
+    ui.durationInput.addEventListener("input", () => {
+      updateControls();
+      tickClock();
+    });
     ui.queueCompetitor.addEventListener("change", updateControls);
     ui.leaderboardPlayerSelect.addEventListener("change", () => {
       state.selectedLeaderboardCompetitorId = ui.leaderboardPlayerSelect.value;

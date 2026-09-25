@@ -3,6 +3,10 @@ const assert = require("node:assert/strict");
 const {
   canArmPhysical,
   canStartVirtual,
+  isRunDurationLocked,
+  shouldResetRunDuration,
+  parseRunDuration,
+  formatRunDuration,
   handshakeGuidance,
   connectMaster,
   disconnectMaster,
@@ -38,8 +42,57 @@ test("physical arming posts the selected competitor and category without startin
 
   assert.deepEqual(calls, [["/api/run/arm", {
     method: "POST",
-    body: JSON.stringify({ competitorId: "competitor-1", category: "playoff" })
+    body: JSON.stringify({ competitorId: "competitor-1", category: "playoff", durationLimitSeconds: 300 })
   }]]);
+});
+
+test("run length accepts positive M:SS values through 99:59 and formats seconds for display", () => {
+  assert.equal(parseRunDuration("0:01"), 1);
+  assert.equal(parseRunDuration("5:00"), 300);
+  assert.equal(parseRunDuration("99:59"), 5999);
+  assert.equal(parseRunDuration(" 05:07 "), 307);
+  for (const value of ["0:00", "100:00", "5:60", "5:0", "", "1:99"]) {
+    assert.equal(parseRunDuration(value), null, `${value} should be rejected`);
+  }
+  assert.equal(formatRunDuration(307), "5:07");
+  assert.equal(formatRunDuration(5999), "99:59");
+});
+
+test("run duration locks only during armed or live statuses and resets once for terminal runs", () => {
+  for (const status of ["armed", "countdown", "active", "paused", "finished"]) {
+    const run = { id: "run-live", status };
+    assert.equal(isRunDurationLocked(run), true, `${status} locks run length`);
+    assert.equal(shouldResetRunDuration(run, null), false);
+  }
+
+  for (const status of ["completed", "timedOut", "aborted", "superseded"]) {
+    const run = { id: `run-${status}`, status };
+    assert.equal(isRunDurationLocked(run), false, `${status} permits a next run length`);
+    assert.equal(shouldResetRunDuration(run, null), true, `${status} resets for the next run`);
+    assert.equal(shouldResetRunDuration(run, run.id), false, `${status} only resets once per run`);
+  }
+  assert.equal(shouldResetRunDuration(null, null), false);
+});
+
+test("physical arming sends a selected duration and rejects invalid limits before calling the API", async () => {
+  const calls = [];
+  const request = async (...args) => calls.push(args);
+  const options = {
+    master: { connected: true, mode: "IDLE" },
+    currentRun: null,
+    competitorId: "competitor-1",
+    category: "official",
+    durationLimitSeconds: 425
+  };
+
+  await armForPhysicalStart(request, options);
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    competitorId: "competitor-1",
+    category: "official",
+    durationLimitSeconds: 425
+  });
+  await assert.rejects(armForPhysicalStart(request, { ...options, durationLimitSeconds: 0 }), /whole number of seconds/);
+  assert.equal(calls.length, 1);
 });
 
 test("an open COM port waits for the master handshake before physical arming", async () => {
@@ -56,6 +109,11 @@ test("an open COM port waits for the master handshake before physical arming", a
   assert.equal(canStartVirtual(master, null, "competitor-1"), true);
   await startVirtually(request, options);
   assert.deepEqual(calls.map(([path]) => path), ["/api/run/arm", "/api/run/start"]);
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    competitorId: "competitor-1",
+    category: "official",
+    durationLimitSeconds: 300
+  });
 });
 
 test("virtual Start arms and starts without a connected physical master", async () => {
@@ -72,7 +130,30 @@ test("virtual Start arms and starts without a connected physical master", async 
   }, afterArm);
 
   assert.deepEqual(calls.map(([path]) => path), ["/api/run/arm", "snapshot-refresh", "/api/run/start"]);
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    competitorId: "competitor-2",
+    category: "official",
+    durationLimitSeconds: 300
+  });
   assert.deepEqual(started, { competitorId: "competitor-2", category: "official" });
+});
+
+test("virtual Start sends the selected duration when it arms a new run", async () => {
+  const calls = [];
+  const request = async (...args) => calls.push(args);
+  await startVirtually(request, {
+    master: { connected: false },
+    currentRun: null,
+    competitorId: "competitor-custom",
+    category: "exhibition",
+    durationLimitSeconds: 73
+  });
+
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    competitorId: "competitor-custom",
+    category: "exhibition",
+    durationLimitSeconds: 73
+  });
 });
 
 test("virtual Start can start a previously armed physical run", async () => {

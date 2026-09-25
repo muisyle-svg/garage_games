@@ -147,7 +147,8 @@ app.MapPost("/api/run/countdown-finished", (CountdownFinishedRequest request, Ru
     Results.Ok(runs.CompleteCountdown(request.RunId)));
 app.MapPost("/api/run/arm", async (StartCompetitorRunRequest request, RunService runs,
     PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
-    Results.Ok(await master.ArmCompetitorAsync(runs, request.CompetitorId, request.Category, cancellationToken)));
+    Results.Ok(await master.ArmCompetitorAsync(runs, request.CompetitorId, request.Category,
+        cancellationToken, request.DurationLimitSeconds)));
 app.MapPost("/api/run/pause", (RunService runs) => Results.Ok(runs.Pause()));
 app.MapPost("/api/run/resume", (RunService runs) => Results.Ok(runs.Resume()));
 app.MapPost("/api/run/finish", (RunService runs) => Results.Ok(runs.Finish()));

@@ -52,6 +52,8 @@ public sealed class EventEditRequest
 
 public sealed class RunService
 {
+    public const int MaximumRunDurationSeconds = 5_999;
+
     public const string DatabaseClearConfirmationPhrase = "CLEAR ALL DATA";
 
     private readonly object _gate = new();
@@ -415,7 +417,7 @@ public sealed class RunService
             return new ScoreboardSnapshot
             {
                 EditionName = _edition.Name,
-                DurationLimitSeconds = _edition.DurationLimitSeconds,
+                DurationLimitSeconds = displayedRun?.Edition.DurationLimitSeconds ?? _edition.DurationLimitSeconds,
                 SimulationMode = simulationMode,
                 CurrentRun = current,
                 OnDeckName = next is null ? null : competitorNames.GetValueOrDefault(next.CompetitorId),
@@ -481,8 +483,9 @@ public sealed class RunService
         }
     }
 
-    public RunRecord ArmCompetitor(string competitorId, RunCategory category)
+    public RunRecord ArmCompetitor(string competitorId, RunCategory category, int? durationLimitSeconds = null)
     {
+        ValidateRunDuration(durationLimitSeconds);
         lock (_gate)
         {
             RefreshActiveClock();
@@ -505,7 +508,7 @@ public sealed class RunService
                 Id = NewId("direct"),
                 CompetitorId = competitorId,
                 Category = category
-            }, manualOfflineOverride: false);
+            }, manualOfflineOverride: false, durationLimitSeconds: durationLimitSeconds);
             try
             {
                 _store.SaveRunsAndQueue([run], _data.Queue, selectedCompetitorId: null, selectedRunCategory: null);
@@ -522,6 +525,14 @@ public sealed class RunService
             _lastDisplayedRun = run;
             UpdateDeviceLeds();
             return Clone(run);
+        }
+    }
+
+    internal static void ValidateRunDuration(int? durationLimitSeconds)
+    {
+        if (durationLimitSeconds is int seconds && seconds is < 1 or > MaximumRunDurationSeconds)
+        {
+            throw new CommandException($"Run duration must be between 1 and {MaximumRunDurationSeconds} seconds.");
         }
     }
 
@@ -2139,9 +2150,13 @@ public sealed class RunService
         _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
     }
 
-    private RunRecord CreateRun(QueueItemRecord queueItem, bool manualOfflineOverride)
+    private RunRecord CreateRun(QueueItemRecord queueItem, bool manualOfflineOverride, int? durationLimitSeconds = null)
     {
         var snapshot = _edition.ToSnapshot();
+        if (durationLimitSeconds is int duration)
+        {
+            snapshot.DurationLimitSeconds = duration;
+        }
         return new RunRecord
         {
             Id = NewId("run"),

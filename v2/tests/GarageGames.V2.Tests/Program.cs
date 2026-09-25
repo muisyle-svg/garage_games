@@ -20,6 +20,7 @@ var tests = new (string Name, Action Run)[]
     ("physical master start is durable, deduplicated, and consumes its on-deck item", PhysicalMasterStartDurabilityAndQueue),
     ("physical master status follows run countdown", PhysicalMasterStatusCountdown),
     ("timeout autosaves and releases next competitor", MvpTimeoutAndNextRun),
+    ("custom run duration snapshots timeout and preserves edition leaderboard identity", PerRunDurationSnapshot),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
     ("MVP timing fields clear and manual score overrides add to total", MvpEditableScorecard),
     ("recorded exhibition correction extends timeline and can be undone", RecordedExhibitionCorrectionTimeline),
@@ -782,6 +783,67 @@ static void MvpTimeoutAndNextRun()
     Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == first.Id).Status);
     Assert.Equal(nextRun.Id, h.StartRun().Id);
     Assert.Equal(RunStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+}
+
+static void PerRunDurationSnapshot()
+{
+    var edition = MakeMvpEdition(durationSeconds: 300);
+    using var h = new TestHarness(edition, NewPath());
+    var nextCompetitor = h.AddCompetitor("Default duration competitor");
+
+    Assert.Throws<CommandException>(() => h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 0));
+    Assert.Throws<CommandException>(() => h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, -1));
+    Assert.Throws<CommandException>(() => h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 6_000));
+    Assert.Equal(0, h.Store.Load().Runs.Count);
+
+    var customRun = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 2);
+    Assert.Equal(2, customRun.Edition.DurationLimitSeconds);
+    Assert.Equal(edition.EditionId, customRun.EditionId);
+    Assert.Equal(edition.EditionId, customRun.Edition.EditionId);
+    Assert.Equal(300, edition.DurationLimitSeconds);
+    Assert.Equal(new MasterRunStatus("ARMED", 2), h.Service.GetMasterStatus());
+
+    var armedScoreboard = h.Service.GetScoreboard();
+    Assert.Equal(2, armedScoreboard.DurationLimitSeconds);
+    Assert.Equal(2_000L, armedScoreboard.CurrentRun!.RemainingMilliseconds);
+
+    h.StartRun();
+    h.Clock.Advance(TimeSpan.FromSeconds(2));
+    var timedOut = h.Service.GetOperatorSnapshot().History.Single(run => run.Id == customRun.Id);
+    Assert.Equal(RunStatus.TimedOut, timedOut.Status);
+    Assert.Equal(2, timedOut.Edition.DurationLimitSeconds);
+    Assert.Equal(edition.EditionId, timedOut.EditionId);
+    Assert.Equal(300, h.Service.GetOperatorSnapshot().DurationLimitSeconds);
+    Assert.Equal(2, h.Service.GetScoreboard().DurationLimitSeconds);
+    Assert.Equal(0L, h.Service.GetScoreboard().CurrentRun!.RemainingMilliseconds);
+
+    var persistedCustomRun = h.Store.Load().Runs.Single(run => run.Id == customRun.Id);
+    Assert.Equal(RunStatus.TimedOut, persistedCustomRun.Status);
+    Assert.Equal(2, persistedCustomRun.Edition.DurationLimitSeconds);
+    Assert.Equal(edition.EditionId, persistedCustomRun.EditionId);
+
+    var defaultRun = h.Service.ArmCompetitor(nextCompetitor.Id, RunCategory.Official);
+    Assert.Equal(300, defaultRun.Edition.DurationLimitSeconds);
+    Assert.Equal(edition.EditionId, defaultRun.EditionId);
+    Assert.Equal(new MasterRunStatus("ARMED", 300), h.Service.GetMasterStatus());
+    Assert.Equal(300, h.Service.GetScoreboard().DurationLimitSeconds);
+    h.StartRun();
+    h.Service.Finish();
+    var recorded = h.Service.Record();
+
+    Assert.Equal(defaultRun.Id, recorded.Id);
+    Assert.Equal(edition.EditionId, recorded.EditionId);
+    var leaderboard = h.Service.GetScoreboard().Leaderboard;
+    Assert.Equal(1, leaderboard.Count);
+    Assert.Equal(defaultRun.Id, leaderboard.Single().RunId);
+    Assert.Equal(2, h.Service.GetOperatorSnapshot().History.Count);
+    Assert.Equal(2, h.Service.GetOperatorSnapshot().History.Single(run => run.Id == customRun.Id).Edition.DurationLimitSeconds);
+    Assert.Equal(300, h.Store.Load().Runs.Single(run => run.Id == defaultRun.Id).Edition.DurationLimitSeconds);
+
+    var maximumDurationRun = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Exhibition, 5_999);
+    Assert.Equal(5_999, maximumDurationRun.Edition.DurationLimitSeconds);
+    Assert.Equal(edition.EditionId, maximumDurationRun.EditionId);
+    h.Service.Abort("Clean up maximum-duration test run");
 }
 
 static void MvpRosterAndVirtualPresses()
