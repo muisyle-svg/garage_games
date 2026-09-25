@@ -515,7 +515,8 @@ enum GarageStatus : uint8_t {
   GARAGE_STATUS_COUNTDOWN,
   GARAGE_STATUS_ACTIVE,
   GARAGE_STATUS_PAUSED,
-  GARAGE_STATUS_FINISHED
+  GARAGE_STATUS_FINISHED,
+  GARAGE_STATUS_TIMED_OUT
 };
 
 enum FirmwareMode { FIRMWARE_MODE_IDLE, FIRMWARE_MODE_SPEED };
@@ -697,6 +698,7 @@ bool parseGarageStatusName(const char* text, GarageStatus& status) {
   else if (strcmp(text, "ACTIVE") == 0) status = GARAGE_STATUS_ACTIVE;
   else if (strcmp(text, "PAUSED") == 0) status = GARAGE_STATUS_PAUSED;
   else if (strcmp(text, "FINISHED") == 0) status = GARAGE_STATUS_FINISHED;
+  else if (strcmp(text, "TIMED_OUT") == 0) status = GARAGE_STATUS_TIMED_OUT;
   else return false;
   return true;
 }
@@ -800,6 +802,7 @@ bool sendGarageState(const char* token, GarageStatus status) {
     case GARAGE_STATUS_ACTIVE: stateText = "ACTIVE"; break;
     case GARAGE_STATUS_PAUSED: stateText = "PAUSED"; break;
     case GARAGE_STATUS_FINISHED: stateText = "FINISHED"; break;
+    case GARAGE_STATUS_TIMED_OUT: stateText = "TIMED_OUT"; break;
     default: break;
   }
   char message[40];

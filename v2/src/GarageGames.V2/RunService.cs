@@ -340,7 +340,8 @@ public sealed class RunService
             RunStatus.Countdown => "COUNTDOWN",
             RunStatus.Active => "ACTIVE",
             RunStatus.Paused => "PAUSED",
-            RunStatus.Finished or RunStatus.Completed or RunStatus.TimedOut => "FINISHED",
+            RunStatus.Finished or RunStatus.Completed => "FINISHED",
+            RunStatus.TimedOut => "TIMED_OUT",
             _ => "NONE"
         };
         if (state == "NONE")

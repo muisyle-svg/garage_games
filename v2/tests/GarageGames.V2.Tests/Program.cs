@@ -748,6 +748,11 @@ static void PhysicalMasterStatusCountdown()
     Assert.Equal(new MasterRunStatus("PAUSED", 19), h.Service.GetMasterStatus());
     h.Service.Finish();
     Assert.Equal(new MasterRunStatus("FINISHED", 0), h.Service.GetMasterStatus());
+    var finishedStatuses = h.Service.GetMasterStatuses();
+    Assert.Equal("FINISHED", finishedStatuses.GarageStatus.State);
+    Assert.Equal($"GG1 GARAGE {finishedStatuses.GarageStatus.Token} FINISHED",
+        MasterProtocolCodec.FormatGarageStatus(finishedStatuses.GarageStatus));
+    Assert.Equal("GG1 STATUS FINISHED 0", MasterProtocolCodec.FormatStatus(finishedStatuses.Status));
     Assert.Equal(RunStatus.Finished, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
 }
 
@@ -761,6 +766,13 @@ static void MvpTimeoutAndNextRun()
 
     var timedOut = h.Service.GetOperatorSnapshot().CurrentRun!;
     Assert.Equal(RunStatus.TimedOut, timedOut.Status);
+    var timeoutStatuses = h.Service.GetMasterStatuses();
+    Assert.Equal(new MasterRunStatus("FINISHED", 0), timeoutStatuses.Status);
+    Assert.Equal("TIMED_OUT", timeoutStatuses.GarageStatus.State);
+    Assert.Equal(MasterProtocolCodec.GetGarageRunToken(first.Id), timeoutStatuses.GarageStatus.Token);
+    Assert.Equal($"GG1 GARAGE {timeoutStatuses.GarageStatus.Token} TIMED_OUT",
+        MasterProtocolCodec.FormatGarageStatus(timeoutStatuses.GarageStatus));
+    Assert.Equal("GG1 STATUS FINISHED 0", MasterProtocolCodec.FormatStatus(timeoutStatuses.Status));
     Assert.Equal(1, h.Service.GetOperatorSnapshot().History.Count(r => r.Id == first.Id));
     Assert.Equal(MessageDisposition.TimedOut, h.Service.PressEvent(first.Id, "event-01").Disposition);
 

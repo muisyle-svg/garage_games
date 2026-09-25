@@ -54,6 +54,7 @@ constexpr uint32_t END_FLASH_MS = 5000;
 constexpr uint32_t HIT_RESEND_INTERVAL_MS = 100;
 constexpr uint8_t HIT_RESENDS = 5;
 constexpr uint32_t GARAGE_STATUS_TIMEOUT_MS = 1800;
+constexpr uint32_t GARAGE_TERMINAL_LED_MS = 5000;
 constexpr uint32_t GARAGE_PRESS_RESEND_INTERVAL_MS = 250;
 constexpr uint8_t GARAGE_PRESS_MAX_RETRIES = 24;
 
@@ -254,7 +255,8 @@ enum GarageModeState : uint8_t {
   GARAGE_MODE_COUNTDOWN,
   GARAGE_MODE_ACTIVE,
   GARAGE_MODE_PAUSED,
-  GARAGE_MODE_FINISHED
+  GARAGE_MODE_FINISHED,
+  GARAGE_MODE_TIMED_OUT
 };
 
 GarageModeState garageModeState = GARAGE_MODE_NONE;
@@ -272,7 +274,13 @@ char pendingGaragePressMessage[48] = {};
 char garageResultState[10] = {};
 bool garageCompleted = false;
 bool garageAckUnknown = false;
+uint32_t garageTerminalAtMs = 0;
+bool garageTerminalTimerStarted = false;
 int garageVisualAppliedKey = -100;
+
+bool isGarageTerminalState(GarageModeState state) {
+  return state == GARAGE_MODE_FINISHED || state == GARAGE_MODE_TIMED_OUT;
+}
 
 bool macEqual(const uint8_t* a, const uint8_t* b) {
   return memcmp(a, b, 6) == 0;
@@ -321,6 +329,7 @@ bool parseGarageModeName(const char* text, GarageModeState& state) {
   else if (strcmp(text, "ACTIVE") == 0) state = GARAGE_MODE_ACTIVE;
   else if (strcmp(text, "PAUSED") == 0) state = GARAGE_MODE_PAUSED;
   else if (strcmp(text, "FINISHED") == 0) state = GARAGE_MODE_FINISHED;
+  else if (strcmp(text, "TIMED_OUT") == 0) state = GARAGE_MODE_TIMED_OUT;
   else return false;
   return true;
 }
@@ -403,6 +412,8 @@ void clearGarageMode(bool clearVisual) {
   garageResultState[0] = '\0';
   garageCompleted = false;
   garageAckUnknown = false;
+  garageTerminalAtMs = 0;
+  garageTerminalTimerStarted = false;
   garageVisualAppliedKey = -100;
   if (clearVisual && !gameActive) stopPattern();
 }
@@ -459,6 +470,13 @@ void handleGarageMode(const RxPacket& packet) {
     garageResultState[0] = '\0';
     garageCompleted = false;
     garageAckUnknown = false;
+    garageTerminalAtMs = 0;
+    garageTerminalTimerStarted = false;
+  }
+  if (isGarageTerminalState(newState) &&
+      (!sameSession || !isGarageTerminalState(garageModeState))) {
+    garageTerminalAtMs = packet.receivedAtMs;
+    garageTerminalTimerStarted = true;
   }
   strcpy(garageToken, newToken);
   garageModeState = newState;
@@ -493,6 +511,8 @@ void handleGarageResult(const RxPacket& packet) {
 
 void updateGarageWatchdog() {
   if (gameActive || !garageStatusSeen || garageModeState == GARAGE_MODE_NONE) return;
+  if (isGarageTerminalState(garageModeState) && garageTerminalTimerStarted &&
+      (uint32_t)(millis() - garageTerminalAtMs) < GARAGE_TERMINAL_LED_MS) return;
   if ((uint32_t)(millis() - lastGarageStateMs) > GARAGE_STATUS_TIMEOUT_MS) {
     clearGarageMode(true);
   }
@@ -500,9 +520,16 @@ void updateGarageWatchdog() {
 
 void updateGarageVisual() {
   if (gameActive) return;
-  bool fresh = garageStateFresh(millis()) && garageModeState != GARAGE_MODE_NONE;
+  uint32_t now = millis();
+  uint32_t terminalElapsedMs = (uint32_t)(now - garageTerminalAtMs);
+  bool terminalIndicatorActive = garageStatusSeen &&
+      isGarageTerminalState(garageModeState) && garageTerminalTimerStarted &&
+      terminalElapsedMs < GARAGE_TERMINAL_LED_MS;
+  bool fresh = garageStateFresh(now) && garageModeState != GARAGE_MODE_NONE;
   int key = 0;
-  if (fresh && garageAckUnknown) {
+  if (terminalIndicatorActive) {
+    key = garageModeState == GARAGE_MODE_TIMED_OUT ? 12 : 9;
+  } else if (fresh && garageAckUnknown) {
     key = 11;
   } else if (fresh) {
     switch (garageModeState) {
@@ -517,7 +544,8 @@ void updateGarageVisual() {
         else key = 7;
         break;
       case GARAGE_MODE_PAUSED: key = 8; break;
-      case GARAGE_MODE_FINISHED: key = 9; break;
+      case GARAGE_MODE_FINISHED: break;
+      case GARAGE_MODE_TIMED_OUT: break;
       default: break;
     }
   }
@@ -531,10 +559,15 @@ void updateGarageVisual() {
   else if (key == 4) setSolid(false, true, false);
   else if (key == 5) startBlink(true, false, false, 220);
   else if (key == 8) startBlink(false, false, true, 700);
-  else if (key == 9) setSolid(true, false, false);
+  else if (key == 9) {
+    setSolid(true, false, false, GARAGE_TERMINAL_LED_MS - terminalElapsedMs);
+  }
   else if (key == 10) setSolid(true, true, false);
-  else if (key == 7) setSolid(false, true, true);
+  else if (key == 7) setSolid(true, false, false);
   else if (key == 11) startBlink(true, false, false, 100);
+  else if (key == 12) {
+    startBlink(true, false, false, 220, GARAGE_TERMINAL_LED_MS - terminalElapsedMs);
+  }
 }
 
 void clearActiveGame(bool clearVisual) {
