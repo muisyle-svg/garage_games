@@ -1583,19 +1583,41 @@ void handleReady(const RxPacket& packet) {
                 (unsigned long)(activeTargetWindowMs - elapsedMs));
 }
 
-void handleGaragePress(const RxPacket& packet) {
+bool parseGaragePressPacket(const RxPacket& packet, char* parsedToken,
+                            uint32_t& sequence) {
   static const char prefix[] = "GPRESS:3:";
-  if (packet.len == 0 || memchr(packet.data, '\0', packet.len) != nullptr ||
-      strncmp(packet.data, prefix, sizeof(prefix) - 1) != 0) return;
-  const char* cursor = packet.data + sizeof(prefix) - 1;
+  const size_t prefixLength = sizeof(prefix) - 1;
+  if (!parsedToken || packet.len <= prefixLength ||
+      memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, prefixLength) != 0) return false;
+
+  // Spoke packets use colon separators. Keep this parser length-bounded and
+  // separate from readProtocolToken(), which handles host serial's spaces.
+  const char* tokenStart = packet.data + prefixLength;
+  const char* packetEnd = packet.data + packet.len;
+  const char* tokenEnd = static_cast<const char*>(
+      memchr(tokenStart, ':', (size_t)(packetEnd - tokenStart)));
+  if (!tokenEnd || tokenEnd - tokenStart != 16) return false;
+
   char packetToken[17];
-  char parsedToken[17];
+  memcpy(packetToken, tokenStart, 16);
+  packetToken[16] = '\0';
+  if (!parseGarageToken(packetToken, parsedToken) ||
+      strcmp(parsedToken, "-") == 0) return false;
+
+  const char* sequenceStart = tokenEnd + 1;
+  size_t sequenceLength = (size_t)(packetEnd - sequenceStart);
+  if (sequenceLength == 0 || sequenceLength >= 11) return false;
   char sequenceText[11];
+  memcpy(sequenceText, sequenceStart, sequenceLength);
+  sequenceText[sequenceLength] = '\0';
+  return parseUint32Token(sequenceText, sequence) && sequence != 0;
+}
+
+void handleGaragePress(const RxPacket& packet) {
+  char parsedToken[17];
   uint32_t sequence = 0;
-  if (!readProtocolToken(cursor, packetToken, sizeof(packetToken)) ||
-      !readProtocolToken(cursor, sequenceText, sizeof(sequenceText)) || *cursor != '\0' ||
-      !parseGarageToken(packetToken, parsedToken) || strcmp(parsedToken, "-") == 0 ||
-      !parseUint32Token(sequenceText, sequence) || sequence == 0 ||
+  if (!parseGaragePressPacket(packet, parsedToken, sequence) ||
       !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0) return;
 
   uint32_t now = millis();
