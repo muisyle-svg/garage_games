@@ -45,14 +45,13 @@ and [USB serial default](https://wiki.seeedstudio.com/XIAO_ESP32C3_Pin_Multiplex
   the compatible version-3 `DISCOVER`/`HELLO` exchange and keeps its responders
   out of the Speed game's discovery registry. Its separate table holds 64 MACs;
   overflow ends with BUSY rather than reporting a partial count as complete.
-- Pair with the existing Speed spokes and confirm discovery/game operation on
-  ESP-NOW channel 1.
+- Pair with the combined Garage spoke or the standalone Speed spokes and
+  confirm discovery/game operation on ESP-NOW channel 1.
 
 ## Spoke compatibility
 
-This first pass adds Garage events at the master only; it does not add Garage
-event handling or output to the spoke. The versioned
-`../speed_button_spoke/speed_button_spoke.ino` is an untouched copy of the
-existing Speed spoke sketch. It retains ESP-NOW protocol version 3 and channel
-1 and should interoperate with the combined master. Hardware interoperability
-has not been tested.
+For Garage event testing, use the combined
+`../garage_games_spoke/garage_games_spoke.ino`. It supports Garage event presses
+and retains Speed Button gameplay. The standalone Speed-only spoke is
+`../speed_button_spoke/speed_button_spoke.ino`. Both use ESP-NOW channel 1.
+Hardware interoperability has not been tested.

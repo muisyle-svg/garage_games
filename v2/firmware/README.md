@@ -1,11 +1,11 @@
 # Garage Games V2 firmware
 
-The current combined master is
-`garage_games_master/garage_games_master.ino`. It retains the Speed Button
-ESP-NOW protocol (version 3, channel 1) and adds the Garage Games USB serial
-bridge. `speed_button_master/speed_button_master.ino` is the untouched original
-Speed master source copy; `speed_button_spoke/speed_button_spoke.ino` is the
-untouched original spoke source copy.
+The combined Garage Games/Speed Button sketches are
+`garage_games_master/garage_games_master.ino` and
+`garage_games_spoke/garage_games_spoke.ino`. The combined spoke supports Garage
+event presses and retains Speed Button gameplay. The standalone Speed Button
+sketches are `speed_button_master/speed_button_master.ino` and
+`speed_button_spoke/speed_button_spoke.ino`.
 
 ## Flash
 
@@ -27,17 +27,10 @@ Speed hold. A short debounced release emits one `GG1 START <bootToken> <seq>`
 unless the last status is ACTIVE or PAUSED. Five quick idle taps still clear
 the saved high score; a host may reject those START lines when no run is armed.
 
-For the radio check, use the untouched versioned spoke copy above, start Speed
-with a five-second hold, and confirm discovery, countdown, hits, and timeout.
+For Garage button testing, flash `garage_games_spoke/garage_games_spoke.ino` to
+each event button. For a standalone Speed Button setup, flash
+`speed_button_spoke/speed_button_spoke.ino`. Either spoke sketch can join the
+combined master's Speed game; start it with a five-second hold and confirm
+discovery, countdown, hits, and timeout.
 
-## Spoke source
-
-The first pass adds Garage events at the master only; it does not add Garage
-event handling or output to the spoke. The versioned
-`speed_button_spoke/speed_button_spoke.ino` is an untouched copy of the existing
-Speed spoke sketch. It keeps ESP-NOW protocol version 3 and channel 1 and should
-interoperate with the combined master at
-`garage_games_master/garage_games_master.ino`. Hardware interoperability has
-not been tested.
-
-No hardware test has been performed for this versioned copy.
+No hardware test has been performed for the combined Garage spoke yet.

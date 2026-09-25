@@ -1,7 +1,8 @@
 /*
-  SPEED BUTTON - SPOKE
-  --------------------
-  Standalone companion sketch for every non-master XIAO ESP32 button.
+  GARAGE GAMES / SPEED BUTTON - SPOKE
+  ----------------------------------
+  Combined companion sketch for every non-master XIAO ESP32 button. It supports
+  Garage event presses and retains the Speed Button game functionality.
 
   Hardware:
     Button : D2 (active LOW)
@@ -28,6 +29,7 @@
 // Keep Arduino's generated function prototypes valid when they reference the
 // packet type declared later in this file.
 struct RxPacket;
+enum GarageModeState : uint8_t;
 
 // --------------------------- Configuration ---------------------------
 constexpr uint8_t PROTOCOL_VERSION = 3;
@@ -51,6 +53,9 @@ constexpr uint32_t TARGET_WINDOW_MAX_MS = 60000;
 constexpr uint32_t END_FLASH_MS = 5000;
 constexpr uint32_t HIT_RESEND_INTERVAL_MS = 100;
 constexpr uint8_t HIT_RESENDS = 5;
+constexpr uint32_t GARAGE_STATUS_TIMEOUT_MS = 1800;
+constexpr uint32_t GARAGE_PRESS_RESEND_INTERVAL_MS = 250;
+constexpr uint8_t GARAGE_PRESS_MAX_RETRIES = 24;
 
 #define BTN_PIN D2
 #define LED_R   D3
@@ -243,12 +248,293 @@ bool buttonLastRead = true;
 bool buttonStable = true;
 uint32_t buttonLastChangeMs = 0;
 
+enum GarageModeState : uint8_t {
+  GARAGE_MODE_NONE,
+  GARAGE_MODE_ARMED,
+  GARAGE_MODE_COUNTDOWN,
+  GARAGE_MODE_ACTIVE,
+  GARAGE_MODE_PAUSED,
+  GARAGE_MODE_FINISHED
+};
+
+GarageModeState garageModeState = GARAGE_MODE_NONE;
+char garageToken[17] = "-";
+bool garageStatusSeen = false;
+uint32_t lastGarageStateMs = 0;
+uint8_t garageMasterMac[6] = {};
+bool garageMasterLocked = false;
+uint32_t garagePressSequence = 0;
+uint32_t pendingGarageSequence = 0;
+bool garagePressAwaitingResult = false;
+uint8_t garagePressRetriesLeft = 0;
+uint32_t nextGaragePressRetryMs = 0;
+char pendingGaragePressMessage[48] = {};
+char garageResultState[10] = {};
+bool garageCompleted = false;
+bool garageAckUnknown = false;
+int garageVisualAppliedKey = -100;
+
 bool macEqual(const uint8_t* a, const uint8_t* b) {
   return memcmp(a, b, 6) == 0;
 }
 
 bool fromReservedMaster(const RxPacket& packet) {
   return masterReserved && macEqual(packet.source, reservedMasterMac);
+}
+
+bool readGarageTokenField(const char*& cursor, char* output, size_t outputSize) {
+  if (!cursor || !output || outputSize < 2 || *cursor == '\0' || *cursor == ':') return false;
+  size_t length = 0;
+  while (*cursor != '\0' && *cursor != ':') {
+    if (length + 1 >= outputSize) return false;
+    output[length++] = *cursor++;
+  }
+  output[length] = '\0';
+  if (*cursor == ':') {
+    ++cursor;
+    if (*cursor == '\0' || *cursor == ':') return false;
+  }
+  return length > 0;
+}
+
+bool parseGarageToken(const char* text, char* output) {
+  if (!text || !output) return false;
+  if (strcmp(text, "-") == 0) {
+    strcpy(output, "-");
+    return true;
+  }
+  if (strlen(text) != 16) return false;
+  for (uint8_t i = 0; i < 16; ++i) {
+    char value = text[i];
+    if (!((value >= '0' && value <= '9') ||
+          (value >= 'A' && value <= 'F'))) return false;
+    output[i] = value;
+  }
+  output[16] = '\0';
+  return true;
+}
+
+bool parseGarageModeName(const char* text, GarageModeState& state) {
+  if (strcmp(text, "NONE") == 0) state = GARAGE_MODE_NONE;
+  else if (strcmp(text, "ARMED") == 0) state = GARAGE_MODE_ARMED;
+  else if (strcmp(text, "COUNTDOWN") == 0) state = GARAGE_MODE_COUNTDOWN;
+  else if (strcmp(text, "ACTIVE") == 0) state = GARAGE_MODE_ACTIVE;
+  else if (strcmp(text, "PAUSED") == 0) state = GARAGE_MODE_PAUSED;
+  else if (strcmp(text, "FINISHED") == 0) state = GARAGE_MODE_FINISHED;
+  else return false;
+  return true;
+}
+
+bool parseGarageModePacket(const char* message, char* token, GarageModeState& state) {
+  static const char prefix[] = "GARAGE:3:";
+  if (!message || !token || strncmp(message, prefix, sizeof(prefix) - 1) != 0) return false;
+  const char* cursor = message + sizeof(prefix) - 1;
+  char tokenText[17];
+  char stateText[10];
+  if (!readGarageTokenField(cursor, tokenText, sizeof(tokenText)) ||
+      !readGarageTokenField(cursor, stateText, sizeof(stateText)) || *cursor != '\0' ||
+      !parseGarageToken(tokenText, token) || !parseGarageModeName(stateText, state)) {
+    return false;
+  }
+  if ((state == GARAGE_MODE_NONE) != (strcmp(token, "-") == 0)) return false;
+  return true;
+}
+
+bool parseGarageSequence(const char* text, uint32_t& sequence) {
+  if (!text || *text == '\0') return false;
+  uint32_t value = 0;
+  for (const char* cursor = text; *cursor != '\0'; ++cursor) {
+    if (*cursor < '0' || *cursor > '9') return false;
+    uint32_t digit = (uint32_t)(*cursor - '0');
+    if (value > (UINT32_MAX - digit) / 10) return false;
+    value = value * 10 + digit;
+  }
+  sequence = value;
+  return true;
+}
+
+bool parseGarageResultState(const char* text) {
+  return strcmp(text, "PENDING") == 0 || strcmp(text, "ACTIVE") == 0 ||
+         strcmp(text, "COMPLETED") == 0 || strcmp(text, "REJECTED") == 0;
+}
+
+bool parseGarageResultPacket(const char* message, char* token, uint32_t& sequence,
+                             char* resultState, size_t resultStateSize, uint8_t* resultMac) {
+  static const char prefix[] = "GRESULT:3:";
+  if (!message || !token || !resultState || !resultMac ||
+      strncmp(message, prefix, sizeof(prefix) - 1) != 0) return false;
+  const char* cursor = message + sizeof(prefix) - 1;
+  char tokenText[17];
+  char sequenceText[11];
+  char macText[13];
+  if (!readGarageTokenField(cursor, tokenText, sizeof(tokenText)) ||
+      !readGarageTokenField(cursor, sequenceText, sizeof(sequenceText)) ||
+      !readGarageTokenField(cursor, resultState, resultStateSize) ||
+      !readGarageTokenField(cursor, macText, sizeof(macText)) || *cursor != '\0' ||
+      !parseGarageToken(tokenText, token) || strcmp(token, "-") == 0 ||
+      !parseGarageSequence(sequenceText, sequence) || sequence == 0 ||
+      strlen(macText) != 12 || !parseGarageResultState(resultState)) return false;
+  for (uint8_t i = 0; i < 6; ++i) {
+    uint8_t value = 0;
+    for (uint8_t digit = 0; digit < 2; ++digit) {
+      char c = macText[i * 2 + digit];
+      uint8_t nibble;
+      if (c >= '0' && c <= '9') nibble = (uint8_t)(c - '0');
+      else if (c >= 'A' && c <= 'F') nibble = (uint8_t)(c - 'A' + 10);
+      else return false;
+      value = (uint8_t)((value << 4) | nibble);
+    }
+    resultMac[i] = value;
+  }
+  return validStationMac(resultMac);
+}
+
+void clearGarageMode(bool clearVisual) {
+  garageModeState = GARAGE_MODE_NONE;
+  strcpy(garageToken, "-");
+  garageStatusSeen = false;
+  lastGarageStateMs = 0;
+  garagePressSequence = 0;
+  pendingGarageSequence = 0;
+  garagePressAwaitingResult = false;
+  garagePressRetriesLeft = 0;
+  nextGaragePressRetryMs = 0;
+  pendingGaragePressMessage[0] = '\0';
+  garageResultState[0] = '\0';
+  garageCompleted = false;
+  garageAckUnknown = false;
+  garageVisualAppliedKey = -100;
+  if (clearVisual && !gameActive) stopPattern();
+}
+
+bool garageStateFresh(uint32_t now) {
+  return garageStatusSeen &&
+         (uint32_t)(now - lastGarageStateMs) <= GARAGE_STATUS_TIMEOUT_MS;
+}
+
+bool acceptGarageMasterSource(const RxPacket& packet) {
+  if (!validStationMac(packet.source) || macEqual(packet.source, ownMac)) return false;
+  if (masterReserved) return fromReservedMaster(packet);
+  if (garageMasterLocked && garageStatusSeen) {
+    int32_t ageMs = (int32_t)(packet.receivedAtMs - lastGarageStateMs);
+    if (ageMs < 0 || (uint32_t)ageMs <= GARAGE_STATUS_TIMEOUT_MS) {
+      return macEqual(packet.source, garageMasterMac);
+    }
+  }
+  memcpy(garageMasterMac, packet.source, sizeof(garageMasterMac));
+  garageMasterLocked = true;
+  return true;
+}
+
+void handleGarageMode(const RxPacket& packet) {
+  char newToken[17];
+  GarageModeState newState;
+  if (packet.len == 0 || memchr(packet.data, '\0', packet.len) != nullptr || gameActive ||
+      !parseGarageModePacket(packet.data, newToken, newState) ||
+      !acceptGarageMasterSource(packet)) return;
+  if (garageStatusSeen &&
+      (int32_t)(packet.receivedAtMs - lastGarageStateMs) < 0) return;
+
+  bool sameSession = garageStatusSeen && strcmp(garageToken, newToken) == 0;
+  bool visualChanged = !garageStatusSeen || !sameSession ||
+                       garageModeState != newState;
+  if (newState == GARAGE_MODE_NONE) {
+    if (visualChanged || garagePressAwaitingResult || garageCompleted) {
+      clearGarageMode(false);
+    }
+    garageStatusSeen = true;
+    garageModeState = GARAGE_MODE_NONE;
+    strcpy(garageToken, "-");
+    lastGarageStateMs = packet.receivedAtMs;
+    if (visualChanged) garageVisualAppliedKey = -100;
+    return;
+  }
+
+  if (!sameSession) {
+    garagePressSequence = 0;
+    pendingGarageSequence = 0;
+    garagePressAwaitingResult = false;
+    garagePressRetriesLeft = 0;
+    pendingGaragePressMessage[0] = '\0';
+    garageResultState[0] = '\0';
+    garageCompleted = false;
+    garageAckUnknown = false;
+  }
+  strcpy(garageToken, newToken);
+  garageModeState = newState;
+  garageStatusSeen = true;
+  lastGarageStateMs = packet.receivedAtMs;
+  if (visualChanged) garageVisualAppliedKey = -100;
+}
+
+void handleGarageResult(const RxPacket& packet) {
+  char resultToken[17];
+  uint32_t sequence = 0;
+  char resultState[10];
+  uint8_t resultMac[6];
+  if (packet.len == 0 || memchr(packet.data, '\0', packet.len) != nullptr || gameActive ||
+      !garageStateFresh(millis()) || !garageMasterLocked ||
+      !parseGarageResultPacket(packet.data, resultToken, sequence, resultState,
+                               sizeof(resultState), resultMac) ||
+      !macEqual(resultMac, ownMac) || !macEqual(packet.source, garageMasterMac) ||
+      (masterReserved && !fromReservedMaster(packet)) ||
+      strcmp(resultToken, garageToken) != 0 ||
+      (!garagePressAwaitingResult && !garageAckUnknown) ||
+      sequence != pendingGarageSequence) return;
+
+  garagePressAwaitingResult = false;
+  garagePressRetriesLeft = 0;
+  pendingGaragePressMessage[0] = '\0';
+  garageAckUnknown = false;
+  strcpy(garageResultState, resultState);
+  if (strcmp(resultState, "COMPLETED") == 0) garageCompleted = true;
+  garageVisualAppliedKey = -100;
+}
+
+void updateGarageWatchdog() {
+  if (gameActive || !garageStatusSeen || garageModeState == GARAGE_MODE_NONE) return;
+  if ((uint32_t)(millis() - lastGarageStateMs) > GARAGE_STATUS_TIMEOUT_MS) {
+    clearGarageMode(true);
+  }
+}
+
+void updateGarageVisual() {
+  if (gameActive) return;
+  bool fresh = garageStateFresh(millis()) && garageModeState != GARAGE_MODE_NONE;
+  int key = 0;
+  if (fresh && garageAckUnknown) {
+    key = 11;
+  } else if (fresh) {
+    switch (garageModeState) {
+      case GARAGE_MODE_ARMED: key = 1; break;
+      case GARAGE_MODE_COUNTDOWN: key = 2; break;
+      case GARAGE_MODE_ACTIVE:
+        if (garagePressAwaitingResult) key = 3;
+        else if (garageCompleted) key = 4;
+        else if (strcmp(garageResultState, "REJECTED") == 0) key = 5;
+        else if (strcmp(garageResultState, "PENDING") == 0) key = 6;
+        else if (strcmp(garageResultState, "ACTIVE") == 0) key = 10;
+        else key = 7;
+        break;
+      case GARAGE_MODE_PAUSED: key = 8; break;
+      case GARAGE_MODE_FINISHED: key = 9; break;
+      default: break;
+    }
+  }
+  if (key == garageVisualAppliedKey) return;
+  garageVisualAppliedKey = key;
+
+  if (key == 0) stopPattern();
+  else if (key == 1) setSolid(false, false, true);
+  else if (key == 2) startBlink(true, true, false, 500);
+  else if (key == 3 || key == 6) startBlink(true, true, false, 220);
+  else if (key == 4) setSolid(false, true, false);
+  else if (key == 5) startBlink(true, false, false, 220);
+  else if (key == 8) startBlink(false, false, true, 700);
+  else if (key == 9) setSolid(true, false, false);
+  else if (key == 10) setSolid(true, true, false);
+  else if (key == 7) setSolid(false, true, true);
+  else if (key == 11) startBlink(true, false, false, 100);
 }
 
 void clearActiveGame(bool clearVisual) {
@@ -331,6 +617,9 @@ void handleDiscover(const RxPacket& packet) {
   masterReserved = true;
   reservationUntilMs = now + MASTER_RESERVATION_MS;
   lastMasterCommandMs = now;
+  clearGarageMode(true);
+  memcpy(garageMasterMac, packet.source, sizeof(garageMasterMac));
+  garageMasterLocked = true;
   scheduleHello(reservedDiscoveryToken,
                 DISCOVERY_RESPONSE_MIN_MS, DISCOVERY_RESPONSE_MAX_MS);
 }
@@ -499,6 +788,7 @@ void handleEnd(const RxPacket& packet) {
       !validateActiveRun(packet, version, run)) return;
   clearActiveGame(false);
   clearMasterReservation();
+  garageVisualAppliedKey = 0;
   setSolid(true, false, false, END_FLASH_MS);
 }
 
@@ -515,6 +805,14 @@ void handleAbort(const RxPacket& packet) {
 void processRx() {
   RxPacket packet;
   while (rxQueue && xQueueReceive(rxQueue, &packet, 0) == pdTRUE) {
+    if (strncmp(packet.data, "GARAGE:", 7) == 0) {
+      handleGarageMode(packet);
+      continue;
+    }
+    if (strncmp(packet.data, "GRESULT:", 8) == 0) {
+      handleGarageResult(packet);
+      continue;
+    }
     if (strncmp(packet.data, "DISCOVER:", 9) == 0) {
       handleDiscover(packet);
     } else if (strncmp(packet.data, "RUN:", 4) == 0) {
@@ -538,6 +836,28 @@ void processRx() {
 }
 
 void handlePress() {
+  uint32_t now = millis();
+  if (!gameActive && garageStateFresh(now) && garageModeState != GARAGE_MODE_NONE) {
+    if (garageModeState != GARAGE_MODE_ACTIVE || garageCompleted || garageAckUnknown ||
+        garagePressAwaitingResult) return;
+
+    ++garagePressSequence;
+    if (garagePressSequence == 0) ++garagePressSequence;
+    pendingGarageSequence = garagePressSequence;
+    char message[48];
+    int length = snprintf(message, sizeof(message), "GPRESS:3:%s:%lu",
+                          garageToken, (unsigned long)pendingGarageSequence);
+    if (length <= 0 || (size_t)length >= sizeof(pendingGaragePressMessage)) return;
+    memcpy(pendingGaragePressMessage, message, (size_t)length + 1);
+    garagePressAwaitingResult = true;
+    garagePressRetriesLeft = GARAGE_PRESS_MAX_RETRIES;
+    nextGaragePressRetryMs = now + GARAGE_PRESS_RESEND_INTERVAL_MS;
+    garageResultState[0] = '\0';
+    garageVisualAppliedKey = -100;
+    sendBroadcast(pendingGaragePressMessage);
+    return;
+  }
+
   // Every non-target press is deliberately ignored.
   if (!gameActive || !targetActive) return;
 
@@ -562,6 +882,27 @@ void handlePress() {
   sendBroadcast(pendingHitMessage);
   hitResendsLeft = HIT_RESENDS;
   nextHitResendMs = millis() + HIT_RESEND_INTERVAL_MS;
+}
+
+void updateGaragePressResend() {
+  if (!garagePressAwaitingResult ||
+      (int32_t)(millis() - nextGaragePressRetryMs) < 0) return;
+  if (garagePressRetriesLeft == 0) {
+    garagePressAwaitingResult = false;
+    pendingGaragePressMessage[0] = '\0';
+    garageAckUnknown = true;
+    garageVisualAppliedKey = -100;
+    return;
+  }
+  sendBroadcast(pendingGaragePressMessage);
+  --garagePressRetriesLeft;
+  nextGaragePressRetryMs = millis() + GARAGE_PRESS_RESEND_INTERVAL_MS;
+  if (garagePressRetriesLeft == 0) {
+    garagePressAwaitingResult = false;
+    pendingGaragePressMessage[0] = '\0';
+    garageAckUnknown = true;
+    garageVisualAppliedKey = -100;
+  }
 }
 
 void updateButton() {
@@ -709,13 +1050,16 @@ void setup() {
 
 void loop() {
   processRx();
+  updateGarageWatchdog();
   updateButton();
   updateHelloResponse();
   updateHeartbeat();
   updateHitResend();
+  updateGaragePressResend();
   updateMasterWatchdog();
   updateRadioDiagnostics();
   updateTargetVisual();
   updatePattern();
+  updateGarageVisual();
   delay(2);
 }

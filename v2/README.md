@@ -19,12 +19,12 @@ ESP-NOW; keypad and magnetic special events and bonus rounds remain future
 work. The app runs locally and has no Google Sheets or other network-service
 dependency.
 
-The combined master and spoke sketches are in
-`v2\firmware\garage_games_master` and `v2\firmware\speed_button_spoke`;
-the spoke retains Speed gameplay while adding Garage mode. The original Speed
-master remains as a reference in `v2\firmware\speed_button_master`. The Garage
-spoke protocol uses ESP-NOW channel 1. Firmware, the Garage serial bridge, and
-physical spoke events have not yet been verified on hardware.
+The combined Garage Games/Speed Button master and spoke sketches are in
+`v2\firmware\garage_games_master` and `v2\firmware\garage_games_spoke`.
+The standalone Speed Button sketches remain in
+`v2\firmware\speed_button_master` and `v2\firmware\speed_button_spoke`.
+The Garage spoke protocol uses ESP-NOW channel 1. Firmware, the Garage serial
+bridge, and physical spoke events have not yet been verified on hardware.
 
 ## Launch
 
@@ -165,16 +165,16 @@ operation.
    Garage Games, select the master's COM port, choose **Connect**, and wait for
    the master status to show `IDLE`. The serial protocol is `GG1` at 115200 baud.
 4. For each physical event button, flash
-   `v2\firmware\speed_button_spoke\speed_button_spoke.ino` to a XIAO ESP32-C3.
-   The same sketch is used on every spoke. Read its 12-hex MAC from the startup
-   serial message, then assign that MAC to the matching event in the app's
-   **Setup** tab. Use one physical spoke and leave other events on their virtual
-   controls if desired. Spokes use ESP-NOW channel 1 and do not connect to the
-   Windows app over USB. If a press exhausts retries without receiving a result,
-   that spoke fast-blinks red and blocks further physical presses for that event
-   until a matching late result arrives or a new Garage session begins; use its
-   virtual event control as fallback. An explicit `REJECTED` result allows
-   another physical attempt.
+   `v2\firmware\garage_games_spoke\garage_games_spoke.ino` to a XIAO ESP32-C3.
+   This combined sketch is used on every Garage spoke and retains Speed Button
+   gameplay. Read its 12-hex MAC from the startup serial message, then assign
+   that MAC to the matching event in the app's **Setup** tab. Use one physical
+   spoke and leave other events on their virtual controls if desired. Spokes use
+   ESP-NOW channel 1 and do not connect to the Windows app over USB. If a press
+   exhausts retries without receiving a result, that spoke fast-blinks red and
+   blocks further physical presses for that event until a matching late result
+   arrives or a new Garage session begins; use its virtual event control as
+   fallback. An explicit `REJECTED` result allows another physical attempt.
 5. Choose a competitor and use **Arm for physical Start**. A short press and
    release of the master button starts that competitor's run. The on-screen
    virtual **Start** remains available with no master connected.
