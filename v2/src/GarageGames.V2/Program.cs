@@ -65,7 +65,17 @@ app.UseExceptionHandler(errorApp =>
     });
 });
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = context =>
+    {
+        // The desktop shell can keep a page open across app updates; force the next
+        // navigation to fetch matching HTML and scripts instead of stale controls.
+        context.Context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+        context.Context.Response.Headers.Pragma = "no-cache";
+        context.Context.Response.Headers.Expires = "0";
+    }
+});
 
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok", simulationMode }));
 app.MapGet("/api/master", (PhysicalMasterSerialService master) => Results.Ok(master.GetSnapshot()));
@@ -142,13 +152,29 @@ app.MapPost("/api/queue/{queueId}/arm", async (string queueId, ArmRequest reques
     PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
     Results.Ok(await master.ArmQueueAsync(runs, queueId, request.ManualOfflineOverride, cancellationToken)));
 
-app.MapPost("/api/run/start", (RunService runs, PhysicalMasterSerialService master) => Results.Ok(master.StartVirtual(runs)));
-app.MapPost("/api/run/countdown-finished", (CountdownFinishedRequest request, RunService runs) =>
-    Results.Ok(runs.CompleteCountdown(request.RunId)));
+app.MapPost("/api/run/start", async (RunService runs, PhysicalMasterSerialService master,
+    CancellationToken cancellationToken) =>
+{
+    var run = master.StartVirtual(runs);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
+app.MapPost("/api/run/countdown-finished", async (CountdownFinishedRequest request, RunService runs,
+    PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.CompleteCountdown(request.RunId);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
 app.MapPost("/api/run/arm", async (StartCompetitorRunRequest request, RunService runs,
     PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
-    Results.Ok(await master.ArmCompetitorAsync(runs, request.CompetitorId, request.Category,
-        cancellationToken, request.DurationLimitSeconds)));
+{
+    var durationLimitSeconds = RunService.RequireRequestedRunDuration(request.DurationLimitSeconds);
+    var run = await master.ArmCompetitorAsync(runs, request.CompetitorId, request.Category,
+        cancellationToken, durationLimitSeconds);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
 app.MapPost("/api/run/pause", (RunService runs) => Results.Ok(runs.Pause()));
 app.MapPost("/api/run/resume", (RunService runs) => Results.Ok(runs.Resume()));
 app.MapPost("/api/run/finish", (RunService runs) => Results.Ok(runs.Finish()));

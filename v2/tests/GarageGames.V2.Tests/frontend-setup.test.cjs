@@ -306,6 +306,7 @@ test("operator UI derives arm-time readiness from operator snapshot and requires
   assert.match(source, /currentReadiness\(configured, \{/);
   assert.match(source, /scanIsNewer: state\.setupScanAt > state\.receivedAt/);
   assert.match(source, /masterConnected: state\.master\?\.connected/);
-  assert.match(source, /Latest device status:/);
-  assert.match(source, /Physical availability is unverified while the master is disconnected or unavailable/);
+  assert.match(source, /physicalAvailabilitySummary\(events\)/);
+  assert.match(source, /not responding · \$\{unverified\} unverified/);
+  assert.match(source, /virtual event buttons remain available/);
 });

@@ -90,6 +90,7 @@ constexpr uint32_t HOST_SCAN_DURATION_MS = 2000;
 constexpr uint32_t HOST_SCAN_PING_MS = 500;
 constexpr uint32_t HOST_STATUS_STALE_MS = 3000;
 constexpr uint32_t GARAGE_BROADCAST_INTERVAL_MS = 250;
+constexpr uint32_t GARAGE_COUNTDOWN_BROADCAST_INTERVAL_MS = 75;
 constexpr uint8_t HOST_SCAN_MAX_RESPONDERS = 64;
 constexpr size_t HOST_SCAN_ID_MAX_LENGTH = 32;
 constexpr uint8_t HOST_RX_BYTES_PER_LOOP = 32;
@@ -648,7 +649,7 @@ void updateHostStatusLED() {
 
   if (hostStatusFresh(millis()) && hostStatus == HOST_STATUS_COUNTDOWN) {
     if (!hostWaitingLedActive) {
-      startLEDBlink(true, true, false, 700);
+      startLEDBlink(true, true, false, 500);
       hostWaitingLedActive = true;
     }
   } else if (hostWaitingLedActive) {
@@ -814,7 +815,10 @@ bool sendGarageState(const char* token, GarageStatus status) {
 void updateGarageBroadcast() {
   uint32_t now = millis();
   if ((int32_t)(now - nextGarageBroadcastMs) < 0) return;
-  nextGarageBroadcastMs = now + GARAGE_BROADCAST_INTERVAL_MS;
+  const uint32_t intervalMs = garageStatus == GARAGE_STATUS_COUNTDOWN
+      ? GARAGE_COUNTDOWN_BROADCAST_INTERVAL_MS
+      : GARAGE_BROADCAST_INTERVAL_MS;
+  nextGarageBroadcastMs = now + intervalMs;
   if (gameState != IDLE) return;
   if (!garageStatusFresh(now) || !hostStatusFresh(now)) {
     sendGarageState("-", GARAGE_STATUS_NONE);
@@ -917,10 +921,13 @@ void processHostSerialLine(const char* line) {
   char parsedGarageToken[17];
   GarageStatus parsedGarageStatus;
   if (parseGarageStatusLine(line, parsedGarageToken, parsedGarageStatus)) {
+    const bool changed = strcmp(garageToken, parsedGarageToken) != 0 ||
+        garageStatus != parsedGarageStatus;
     memcpy(garageToken, parsedGarageToken, sizeof(garageToken));
     garageStatus = parsedGarageStatus;
     garageStatusReceived = true;
     lastGarageStatusMs = millis();
+    if (changed) nextGarageBroadcastMs = millis();
     return;
   }
 

@@ -18,5 +18,6 @@ public sealed record ActionReasonRequest(string? Reason = null);
 public sealed record CountdownFinishedRequest(string RunId);
 public sealed record RunCountdownState(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? RunId,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] RunStatus? Status);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] RunStatus? Status,
+    long ElapsedMilliseconds = 0);
 public sealed record ClearDatabaseRequest(string ConfirmationPhrase);

@@ -6,6 +6,7 @@ const wwwroot = "../../src/GarageGames.V2/wwwroot/";
 const html = fs.readFileSync(require.resolve(`${wwwroot}index.html`), "utf8");
 const app = fs.readFileSync(require.resolve(`${wwwroot}mvp-scorekeeper.js`), "utf8");
 const css = fs.readFileSync(require.resolve(`${wwwroot}mvp-scorekeeper.css`), "utf8");
+const program = fs.readFileSync(require.resolve("../../src/GarageGames.V2/Program.cs"), "utf8");
 
 test("scorekeeping has a labeled 5:00 M:SS field with a 99:59 input limit", () => {
   assert.match(html, /label for="run-duration-input">Run length \(M:SS\)/);
@@ -53,4 +54,18 @@ test("physical arming hides old readiness until a post-arm snapshot is received"
   assert.match(app, /requestId > state\.armScanAfterSnapshotRequestId/);
   assert.match(app, /const armRequestVersionAtStart = state\.armScanRequestVersion/);
   assert.match(app, /armRequestVersionAtStart !== state\.armScanRequestVersion[\s\S]*?state\.setupScanFresh = false/);
+});
+
+test("scorekeeper has a prominent per-button arm-scan panel and refreshes static app files", () => {
+  assert.match(html, /id="physical-readiness-summary"/);
+  assert.match(html, /id="physical-readiness-list"/);
+  assert.match(app, /function renderPhysicalReadiness\(events\)/);
+  assert.match(app, /make\("strong", "physical-readiness-label", status\.label\)/);
+  assert.match(app, /Checking assigned physical buttons/);
+  assert.match(app, /responding · \$\{missing\} not responding · \$\{unverified\} unverified/);
+  assert.match(app, /virtual event buttons remain available/);
+  for (const state of ["responding", "not-responding", "unverified"]) {
+    assert.match(css, new RegExp(`physical-readiness-item\\.status-${state}`));
+  }
+  assert.match(program, /CacheControl = "no-store, no-cache, must-revalidate"/);
 });

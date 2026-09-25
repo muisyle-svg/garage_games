@@ -93,6 +93,15 @@
       </div>
 
       <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
+      <section class="physical-readiness-panel" aria-labelledby="physical-readiness-heading" aria-live="polite">
+        <div class="physical-readiness-heading">
+          <div><p class="mvp-kicker">Hardware check</p><h2 id="physical-readiness-heading">Physical event buttons</h2></div>
+          <strong id="physical-readiness-summary">Unverified until a physical scan.</strong>
+        </div>
+        <ul id="physical-readiness-list" class="physical-readiness-list">
+          <li class="physical-readiness-empty">Assigned physical buttons will be listed here; virtual presses stay available.</li>
+        </ul>
+      </section>
       <div id="countdown-audio-notice" class="countdown-audio-notice" role="status" aria-live="polite" hidden>
         <span id="countdown-audio-message"></span>
         <button id="countdown-audio-retry" class="button button-secondary" type="button" hidden>Retry countdown audio</button>

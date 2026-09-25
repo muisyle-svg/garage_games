@@ -7,12 +7,15 @@ const {
   shouldResetRunDuration,
   parseRunDuration,
   formatRunDuration,
+  confirmArmedDuration,
   handshakeGuidance,
   connectMaster,
   disconnectMaster,
   armForPhysicalStart,
   startVirtually
 } = require("../../src/GarageGames.V2/wwwroot/mvp-scorekeeper-master.js");
+
+const armedRun = (durationLimitSeconds) => ({ id: "run-armed", edition: { durationLimitSeconds } });
 
 test("master connection actions use the selected port and the expected endpoints", async () => {
   const calls = [];
@@ -30,7 +33,10 @@ test("master connection actions use the selected port and the expected endpoints
 
 test("physical arming posts the selected competitor and category without starting the timer", async () => {
   const calls = [];
-  const request = async (...args) => calls.push(args);
+  const request = async (...args) => {
+    calls.push(args);
+    return armedRun(JSON.parse(args[1].body).durationLimitSeconds);
+  };
 
   assert.equal(canArmPhysical({ connected: true, mode: "IDLE" }, null, "competitor-1"), true);
   await armForPhysicalStart(request, {
@@ -76,7 +82,10 @@ test("run duration locks only during armed or live statuses and resets once for 
 
 test("physical arming sends a selected duration and rejects invalid limits before calling the API", async () => {
   const calls = [];
-  const request = async (...args) => calls.push(args);
+  const request = async (...args) => {
+    calls.push(args);
+    return armedRun(JSON.parse(args[1].body).durationLimitSeconds);
+  };
   const options = {
     master: { connected: true, mode: "IDLE" },
     currentRun: null,
@@ -95,10 +104,34 @@ test("physical arming sends a selected duration and rejects invalid limits befor
   assert.equal(calls.length, 1);
 });
 
+test("physical arming sends 0:10 as ten seconds and rejects a server response with the wrong saved limit", async () => {
+  const calls = [];
+  const request = async (...args) => {
+    calls.push(args);
+    return armedRun(10);
+  };
+  const armed = await armForPhysicalStart(request, {
+    master: { connected: true, mode: "IDLE" },
+    currentRun: null,
+    competitorId: "competitor-10s",
+    category: "exhibition",
+    durationLimitSeconds: parseRunDuration("0:10")
+  });
+
+  assert.equal(JSON.parse(calls[0][1].body).durationLimitSeconds, 10);
+  assert.equal(armed.edition.durationLimitSeconds, 10);
+  assert.throws(() => confirmArmedDuration(armedRun(300), 10), /selected 0:10, but the scorekeeper armed 5:00/);
+  assert.throws(() => confirmArmedDuration(null, 10), /did not confirm the saved run length/);
+});
+
 test("an open COM port waits for the master handshake before physical arming", async () => {
   const master = { connected: true, port: "COM7", mode: null };
   const calls = [];
-  const request = async (...args) => calls.push(args);
+  const request = async (...args) => {
+    calls.push(args);
+    if (args[0] === "/api/run/arm") return armedRun(JSON.parse(args[1].body).durationLimitSeconds);
+    return null;
+  };
   const options = { master, currentRun: null, competitorId: "competitor-1", category: "official" };
 
   assert.equal(canArmPhysical(master, null, "competitor-1"), false);
@@ -118,7 +151,10 @@ test("an open COM port waits for the master handshake before physical arming", a
 
 test("virtual Start arms and starts without a connected physical master", async () => {
   const calls = [];
-  const request = async (...args) => calls.push(args);
+  const request = async (...args) => {
+    calls.push(args);
+    if (args[0] === "/api/run/arm") return armedRun(JSON.parse(args[1].body).durationLimitSeconds);
+  };
   const afterArm = async () => calls.push(["snapshot-refresh"]);
 
   assert.equal(canStartVirtual({ connected: false }, null, "competitor-2"), true);
@@ -140,7 +176,10 @@ test("virtual Start arms and starts without a connected physical master", async 
 
 test("virtual Start sends the selected duration when it arms a new run", async () => {
   const calls = [];
-  const request = async (...args) => calls.push(args);
+  const request = async (...args) => {
+    calls.push(args);
+    return args[0] === "/api/run/arm" ? armedRun(JSON.parse(args[1].body).durationLimitSeconds) : null;
+  };
   await startVirtually(request, {
     master: { connected: false },
     currentRun: null,

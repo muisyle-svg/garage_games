@@ -101,6 +101,8 @@
     progress: $("event-progress"),
     runTotal: $("run-total"),
     banner: $("run-state-banner"),
+    physicalReadinessSummary: $("physical-readiness-summary"),
+    physicalReadinessList: $("physical-readiness-list"),
     countdownNotice: $("countdown-audio-notice"),
     countdownMessage: $("countdown-audio-message"),
     countdownRetry: $("countdown-audio-retry"),
@@ -209,10 +211,12 @@
       ui.countdownRetry.hidden = !retryable;
       ui.countdownRetry.textContent = update.playback === "finishFailed" ? "Retry starting run" : "Retry countdown audio";
       ui.countdownMessage.textContent = retryable
-        ? `Run remains in Countdown; the timer has not started. ${update.error || ""}`.trim()
+        ? update.playback === "finishFailed"
+          ? `Go was reached, but the run could not be activated. ${update.error || ""}`.trim()
+          : `Countdown audio is unavailable; the run will still start on schedule. ${update.error || ""}`.trim()
         : update.playback === "finishing"
-          ? "Countdown audio ended. Starting the run…"
-          : "Countdown audio playing. The timer and event buttons unlock when it ends.";
+          ? "Go · starting the run…"
+          : "Countdown playing. The timer starts just before the track ends.";
       const current = state.snapshot?.currentRun;
       if (current?.id === update.runId && current.status !== "countdown") {
         current.status = "countdown";
@@ -1192,18 +1196,20 @@
       .map((event) => `${event.eventId}:${physicalReadinessKey(event)}`)
       .join("|");
     const events = currentEditionEvents(run);
+    const physicalSummary = physicalAvailabilitySummary(events);
+    renderPhysicalReadiness(events);
     const note = !run
       ? "Start a run to enable virtual presses. They remain available independently of physical hardware readiness."
       : run.status === "active"
         ? "Times count down from the run limit. Virtual presses remain available even when physical hardware is unassigned or unverified. Press once to start an event and again to finish it."
         : run.status === "countdown"
-          ? "Countdown audio must finish before event buttons become available."
+          ? "The fixed countdown is in progress; events unlock at Go whether or not audio plays."
         : run.status === "paused"
           ? "Resume the run before recording event presses."
         : run.status === "armed"
             ? "Start the run to enable event presses."
             : "This run no longer accepts event presses. Review or correct it in history.";
-    ui.virtualNote.textContent = `${note} ${physicalAvailabilitySummary(events)}`;
+    ui.virtualNote.textContent = `${note} ${physicalSummary.text}`;
     const key = run ? `${run.id}:${run.revision}:${run.status}:${state.busy}:${physicalSignature}` : `no-run:${eventRosterSignature()}:${state.busy}:${physicalSignature}`;
     if (key === state.virtualKey) return;
     ui.virtualButtons.replaceChildren();
@@ -1244,10 +1250,7 @@
   }
 
   function physicalReadiness(event) {
-    const configured = setupEvent(event?.eventId) || {
-      eventId: event?.eventId || "",
-      assignmentValue: event?.deviceId || ""
-    };
+    const configured = physicalConfiguration(event);
     if (!setupTools.hardwareId(configured.assignmentValue || configured.deviceId || "")) {
       return { key: "unassigned", label: "Unassigned" };
     }
@@ -1264,6 +1267,18 @@
     });
   }
 
+  function physicalConfiguration(event) {
+    const activeRun = state.snapshot?.currentRun;
+    const runEvent = activeRun?.events?.find((item) => item.eventId === event?.eventId);
+    if (runEvent && masterActions.isRunDurationLocked(activeRun)) {
+      return { eventId: runEvent.eventId, assignmentValue: runEvent.deviceId, deviceId: runEvent.deviceId };
+    }
+    return setupEvent(event?.eventId) || {
+      eventId: event?.eventId || "",
+      assignmentValue: event?.deviceId || ""
+    };
+  }
+
   function virtualDeviceStatus(readiness) {
     if (readiness.key === "unassigned") return { key: "virtual", label: "Virtual" };
     if (readiness.key === "responding") return { key: "responding", label: "Responding" };
@@ -1272,15 +1287,48 @@
   }
 
   function physicalAvailabilitySummary(events) {
-    if (state.master?.connected !== true) return "Physical availability is unverified while the master is disconnected or unavailable; virtual event presses remain available.";
-    const readiness = events.map((event) => physicalReadiness(event));
-    const assigned = readiness.filter((item) => item.key !== "unassigned");
-    if (!assigned.length) return "No physical devices are assigned. Virtual event presses remain available.";
-    const responding = readiness.filter((item) => item.key === "responding").length;
-    const missing = assigned.filter((item) => item.key === "not-responding" || item.key === "not-seen").length;
-    const assignedUnverified = assigned.filter((item) => item.key === "unverified" || item.key === "not-scanned").length;
-    if (!responding && !missing) return "Physical availability is unverified until a fresh scan completes; virtual event presses remain available.";
-    return `Latest device status: ${responding} responding, ${missing} not responding, ${assignedUnverified} unverified. See Setup for each event; virtual presses remain available.`;
+    const assigned = events.filter((event) => {
+      const configured = physicalConfiguration(event);
+      return setupTools.hardwareId(configured.assignmentValue || configured.deviceId || event.deviceId || "");
+    });
+    if (!assigned.length) {
+      return { text: "No assigned physical buttons · virtual event buttons remain available.", entries: [] };
+    }
+
+    const entries = assigned.map((event) => {
+      const configured = physicalConfiguration(event);
+      const deviceId = setupTools.hardwareId(configured.assignmentValue || configured.deviceId || event.deviceId || "");
+      return { event, deviceId, status: virtualDeviceStatus(physicalReadiness(event)) };
+    });
+    const responding = entries.filter((item) => item.status.key === "responding").length;
+    const missing = entries.filter((item) => item.status.key === "not-responding").length;
+    const unverified = entries.filter((item) => item.status.key === "unverified").length;
+    const checking = state.armScanPending || state.setupScanLoading;
+    const prefix = checking
+      ? "Checking assigned physical buttons…"
+      : `${responding} responding · ${missing} not responding · ${unverified} unverified`;
+    return { text: `${prefix} · virtual event buttons remain available.`, entries };
+  }
+
+  function renderPhysicalReadiness(events) {
+    const summary = physicalAvailabilitySummary(events);
+    ui.physicalReadinessSummary.textContent = summary.text;
+    ui.physicalReadinessList.replaceChildren();
+    if (!summary.entries.length) {
+      ui.physicalReadinessList.appendChild(make("li", "physical-readiness-empty", summary.text));
+      return;
+    }
+
+    summary.entries.forEach(({ event, deviceId, status }) => {
+      const item = make("li", `physical-readiness-item status-${status.key}`);
+      const identity = make("span", "physical-readiness-identity");
+      identity.append(
+        make("strong", "physical-readiness-event", event.name),
+        make("small", "physical-readiness-device", `Button ${deviceId}`)
+      );
+      item.append(identity, make("strong", "physical-readiness-label", status.label));
+      ui.physicalReadinessList.appendChild(item);
+    });
   }
 
   function isPhysicalEventResponding(event) {
@@ -2102,6 +2150,8 @@
   void countdownCoordinator.poll();
   window.setInterval(() => loadSnapshot(true), 2000);
   window.setInterval(() => loadMaster(true), 2000);
-  window.setInterval(() => countdownCoordinator.poll(), 250);
+  // The master reports physical START immediately; short local polling keeps the
+  // browser cue aligned with that hardware countdown instead of adding 250ms skew.
+  window.setInterval(() => countdownCoordinator.poll(), 50);
   window.setInterval(tickClock, 200);
 })();

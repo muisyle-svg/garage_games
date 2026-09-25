@@ -30,6 +30,17 @@
     return seconds;
   }
 
+  function confirmArmedDuration(run, requestedSeconds) {
+    const actualSeconds = Number(run?.edition?.durationLimitSeconds);
+    if (!run || !Number.isInteger(actualSeconds) || actualSeconds < 1) {
+      throw new Error("The scorekeeper did not confirm the saved run length. Reload the app before starting this run.");
+    }
+    if (actualSeconds !== requestedSeconds) {
+      throw new Error(`Run length mismatch: you selected ${formatRunDuration(requestedSeconds)}, but the scorekeeper armed ${formatRunDuration(actualSeconds)}. Do not start it; discard this armed run, reload the app, and try again.`);
+    }
+    return run;
+  }
+
   function isSpeedMode(master) {
     return String(master?.mode || "").toUpperCase() === "SPEED";
   }
@@ -85,10 +96,12 @@
     if (guidance) throw new Error(guidance);
     if (isLiveRun(currentRun)) throw new Error("Finish or discard the current run before arming another.");
     if (!competitorId) throw new Error("Choose a competitor before arming a physical Start.");
-    return request("/api/run/arm", {
+    const selectedDuration = validatedDuration(durationLimitSeconds);
+    const armed = await request("/api/run/arm", {
       method: "POST",
-      body: JSON.stringify({ competitorId, category, durationLimitSeconds: validatedDuration(durationLimitSeconds) })
+      body: JSON.stringify({ competitorId, category, durationLimitSeconds: selectedDuration })
     });
+    return confirmArmedDuration(armed, selectedDuration);
   }
 
   async function startVirtually(request, { master, currentRun, competitorId, category, durationLimitSeconds = DEFAULT_DURATION_SECONDS }, afterArm = async () => {}) {
@@ -99,10 +112,12 @@
     } else {
       if (isLiveRun(currentRun)) throw new Error("Finish or discard the current run before starting another.");
       if (!competitorId) throw new Error("Choose a competitor before starting a run.");
-      await request("/api/run/arm", {
+      const selectedDuration = validatedDuration(durationLimitSeconds);
+      const armed = await request("/api/run/arm", {
         method: "POST",
-        body: JSON.stringify({ competitorId, category, durationLimitSeconds: validatedDuration(durationLimitSeconds) })
+        body: JSON.stringify({ competitorId, category, durationLimitSeconds: selectedDuration })
       });
+      confirmArmedDuration(armed, selectedDuration);
       await afterArm();
     }
 
@@ -116,6 +131,7 @@
     shouldResetRunDuration,
     parseRunDuration,
     formatRunDuration,
+    confirmArmedDuration,
     handshakeGuidance,
     canArmPhysical,
     canStartVirtual,

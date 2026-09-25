@@ -64,6 +64,7 @@ public sealed class RunService
     private RunRecord? _current;
     private RunRecord? _lastDisplayedRun;
     private long _clockAnchorMilliseconds;
+    private long _countdownAnchorMilliseconds;
 
     public RunService(RunStore store, EditionDefinition edition, IMonotonicClock clock)
     {
@@ -96,6 +97,7 @@ public sealed class RunService
         }
 
         _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+        _countdownAnchorMilliseconds = _clock.MonotonicMilliseconds;
         UpdateDeviceLeds();
     }
 
@@ -272,9 +274,15 @@ public sealed class RunService
     {
         lock (_gate)
         {
-            return _current is null
-                ? new RunCountdownState(null, null)
-                : new RunCountdownState(_current.Id, _current.Status);
+            if (_current is null)
+            {
+                return new RunCountdownState(null, null);
+            }
+
+            var elapsed = _current.Status == RunStatus.Countdown
+                ? Math.Max(0, _clock.MonotonicMilliseconds - _countdownAnchorMilliseconds)
+                : 0;
+            return new RunCountdownState(_current.Id, _current.Status, elapsed);
         }
     }
 
@@ -534,6 +542,17 @@ public sealed class RunService
         {
             throw new CommandException($"Run duration must be between 1 and {MaximumRunDurationSeconds} seconds.");
         }
+    }
+
+    public static int RequireRequestedRunDuration(int? durationLimitSeconds)
+    {
+        if (durationLimitSeconds is null)
+        {
+            throw new CommandException("The scorekeeper did not send a run length. Reload the latest app before arming so the run cannot silently use the default length.");
+        }
+
+        ValidateRunDuration(durationLimitSeconds);
+        return durationLimitSeconds.Value;
     }
 
     public InputResult PressEvent(string runId, string eventId)
@@ -1276,6 +1295,7 @@ public sealed class RunService
                 }
 
                 run.Status = RunStatus.Countdown;
+                _countdownAnchorMilliseconds = _clock.MonotonicMilliseconds;
                 run.Revision++;
                 UpdateDeviceLeds();
                 return RecordAccepted(envelope, run, "Master started run countdown.", payloadJson);

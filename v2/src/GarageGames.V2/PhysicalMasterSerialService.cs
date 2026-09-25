@@ -11,6 +11,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
     private readonly RunService _runs;
     private readonly ILogger<PhysicalMasterSerialService> _logger;
     private readonly MasterProtocolState _protocol = new();
+    private static readonly TimeSpan StatusInterval = TimeSpan.FromSeconds(1);
     private SerialPort? _port;
     private CancellationTokenSource? _connectionCancellation;
     private ScanWaiter? _pendingScan;
@@ -121,6 +122,9 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         _runs.MarkDevicesUnverified();
         return GetSnapshot();
     }
+
+    public Task SendCurrentStatusAsync(CancellationToken cancellationToken = default) =>
+        SendStatusAsync(cancellationToken);
 
     public async Task<RunRecord> ArmQueueAsync(RunService runs, string queueId, bool manualOfflineOverride,
         CancellationToken cancellationToken = default)
@@ -272,7 +276,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        using var timer = new PeriodicTimer(StatusInterval);
         try
         {
             while (await timer.WaitForNextTickAsync(stoppingToken))
@@ -358,6 +362,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
     private async Task ProcessLineAsync(SerialPort port, string line, CancellationToken cancellationToken)
     {
         string? reply = null;
+        var pushStatus = false;
         lock (_gate)
         {
             if (!ReferenceEquals(_port, port))
@@ -389,7 +394,11 @@ public sealed class PhysicalMasterSerialService : BackgroundService
 
                 _protocol.ProcessLine(line,
                     (bootToken, sequence, startAllowed) =>
-                        _runs.ReceivePhysicalMasterStart(bootToken, sequence, startAllowed),
+                    {
+                        var result = _runs.ReceivePhysicalMasterStart(bootToken, sequence, startAllowed);
+                        pushStatus |= result.Disposition == MessageDisposition.Accepted;
+                        return result;
+                    },
                     (press, sessionAllowed) =>
                     {
                         var result = _runs.ReceivePhysicalSpokePress(press, sessionAllowed);
@@ -406,6 +415,10 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         if (reply is not null)
         {
             await SendProtocolLineAsync(port, reply, cancellationToken);
+        }
+        if (pushStatus)
+        {
+            await SendStatusAsync(cancellationToken);
         }
     }
 

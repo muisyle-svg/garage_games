@@ -20,6 +20,7 @@ var tests = new (string Name, Action Run)[]
     ("physical master start is durable, deduplicated, and consumes its on-deck item", PhysicalMasterStartDurabilityAndQueue),
     ("physical master status follows run countdown", PhysicalMasterStatusCountdown),
     ("timeout autosaves and releases next competitor", MvpTimeoutAndNextRun),
+    ("HTTP arm request duration flows into the saved run and ten-second timeout", ArmRequestDurationHandoff),
     ("custom run duration snapshots timeout and preserves edition leaderboard identity", PerRunDurationSnapshot),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
     ("MVP timing fields clear and manual score overrides add to total", MvpEditableScorecard),
@@ -591,11 +592,13 @@ static void CountdownFreezesTimeAndRejectsActions()
     Assert.Equal(RunStatus.Countdown, countdown.Status);
     Assert.Equal(null, countdown.StartedAt);
     Assert.Equal(RunStatus.Countdown, h.Service.GetCountdownState().Status);
-    Assert.Equal($"{{\"runId\":\"{countdown.Id}\",\"status\":\"countdown\"}}",
+    Assert.Equal(0L, h.Service.GetCountdownState().ElapsedMilliseconds);
+    Assert.Equal($"{{\"runId\":\"{countdown.Id}\",\"status\":\"countdown\",\"elapsedMilliseconds\":0}}",
         JsonSerializer.Serialize(h.Service.GetCountdownState(), JsonDefaults.Options));
     Assert.True(h.Service.GetOperatorSnapshot().Devices.All(device => device.Led == LedState.Countdown));
 
     h.Clock.Advance(TimeSpan.FromSeconds(40));
+    Assert.Equal(40_000L, h.Service.GetCountdownState().ElapsedMilliseconds);
     var stillCounting = h.Service.GetOperatorSnapshot().CurrentRun!;
     Assert.Equal(RunStatus.Countdown, stillCounting.Status);
     Assert.Equal(0L, stillCounting.ActiveElapsedMs);
@@ -615,7 +618,7 @@ static void CountdownFreezesTimeAndRejectsActions()
         Notes = "Not allowed yet"
     }));
     Assert.Equal(RunStatus.Aborted, h.Service.Abort().Status);
-    Assert.Equal("{\"runId\":null,\"status\":null}",
+    Assert.Equal("{\"runId\":null,\"status\":null,\"elapsedMilliseconds\":0}",
         JsonSerializer.Serialize(h.Service.GetCountdownState(), JsonDefaults.Options));
 }
 
@@ -844,6 +847,35 @@ static void PerRunDurationSnapshot()
     Assert.Equal(5_999, maximumDurationRun.Edition.DurationLimitSeconds);
     Assert.Equal(edition.EditionId, maximumDurationRun.EditionId);
     h.Service.Abort("Clean up maximum-duration test run");
+}
+
+static void ArmRequestDurationHandoff()
+{
+    const string json = """{"competitorId":"player-1","category":"exhibition","durationLimitSeconds":10}""";
+    var request = JsonSerializer.Deserialize<StartCompetitorRunRequest>(json, JsonDefaults.Options)!;
+    Assert.Equal("player-1", request.CompetitorId);
+    Assert.Equal(RunCategory.Exhibition, request.Category);
+    Assert.Equal(10, RunService.RequireRequestedRunDuration(request.DurationLimitSeconds));
+
+    var missingDuration = JsonSerializer.Deserialize<StartCompetitorRunRequest>(
+        """{"competitorId":"player-1","category":"exhibition"}""", JsonDefaults.Options)!;
+    Assert.Throws<CommandException>(() => RunService.RequireRequestedRunDuration(missingDuration.DurationLimitSeconds));
+
+    using var h = new TestHarness(MakeMvpEdition(durationSeconds: 300), NewPath());
+    var run = h.Service.ArmCompetitor(h.CompetitorId, request.Category,
+        RunService.RequireRequestedRunDuration(request.DurationLimitSeconds));
+    Assert.Equal(10, run.Edition.DurationLimitSeconds);
+    Assert.Equal(new MasterRunStatus("ARMED", 10), h.Service.GetMasterStatus());
+    Assert.Equal(10_000L, h.Service.GetScoreboard().CurrentRun!.RemainingMilliseconds);
+
+    h.StartRun();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(9_999));
+    Assert.Equal(RunStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1));
+    var timedOut = h.Service.GetOperatorSnapshot().History.Single(item => item.Id == run.Id);
+    Assert.Equal(RunStatus.TimedOut, timedOut.Status);
+    Assert.Equal(10, timedOut.Edition.DurationLimitSeconds);
+    Assert.Equal(300, h.Service.GetOperatorSnapshot().DurationLimitSeconds);
 }
 
 static void MvpRosterAndVirtualPresses()
