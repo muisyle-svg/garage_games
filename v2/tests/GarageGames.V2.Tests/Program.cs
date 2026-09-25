@@ -12,6 +12,8 @@ var tests = new (string Name, Action Run)[]
     ("legacy config and snapshots keep their persisted global scoring floors", LegacyScoringFallback),
     ("pause freezes time and timeout precedence", PauseAndTimeout),
     ("physical master protocol validates boot tokens and SPEED interlock", MasterProtocolAndSpeedInterlock),
+    ("physical spoke parser and handshake session are strict", PhysicalSpokeProtocolAndSession),
+    ("physical spoke presses deduplicate across master boots and mix with virtual presses", PhysicalSpokeDedupesAndMixesWithVirtual),
     ("countdown freezes time and rejects input and run actions", CountdownFreezesTimeAndRejectsActions),
     ("countdown completion is durable, idempotent, and run-scoped", CountdownCompletionIsRunScopedAndIdempotent),
     ("countdown recovery waits for replayed audio", CountdownRecovery),
@@ -439,6 +441,146 @@ static void MasterProtocolAndSpeedInterlock()
     speedInterlock.EnsureArmAllowed();
     Assert.Equal(RunStatus.Active, h.StartRun().Status);
 }
+
+static void PhysicalSpokeProtocolAndSession()
+{
+    Assert.Equal("0011223344556677",
+        MasterProtocolCodec.GetGarageRunToken("run-00112233445566778899AABBCCDDEEFF"));
+    Assert.True(MasterProtocolCodec.TryParsePhysicalPress(
+        "GG1 PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 42", out var press));
+    Assert.Equal("boot-A_1", press.BootToken);
+    Assert.Equal("0011223344556677", press.RunToken);
+    Assert.Equal("AABBCCDDEEFF", press.DeviceId);
+    Assert.Equal(42u, press.Sequence);
+    var retriedAfterMasterReboot = press with { BootToken = "boot-B" };
+    Assert.Equal(MasterProtocolCodec.GetPhysicalPressMessageId(press.RunToken, press.DeviceId, press.Sequence),
+        MasterProtocolCodec.GetPhysicalPressMessageId(retriedAfterMasterReboot.RunToken,
+            retriedAfterMasterReboot.DeviceId, retriedAfterMasterReboot.Sequence));
+    Assert.True(!MasterProtocolCodec.TryParsePhysicalPress(
+        "GG1  PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 42", out _));
+    Assert.True(!MasterProtocolCodec.TryParsePhysicalPress(
+        "GG1 PRESS boot-A_1 001122334455667g AABBCCDDEEFF 42", out _));
+    Assert.True(!MasterProtocolCodec.TryParsePhysicalPress(
+        "GG1 PRESS boot-A_1 0011223344556677 aabbccddeeff 42", out _));
+    Assert.True(!MasterProtocolCodec.TryParsePhysicalPress(
+        "GG1 PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParsePhysicalPress(
+        "GG1 PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 4294967296", out _));
+
+    var protocol = new MasterProtocolState();
+    var allowedValues = new List<bool>();
+    InputResult ReceiveStart(string _, ulong __, bool ___) =>
+        new(MessageDisposition.Accepted, "test", null);
+    MasterPhysicalPressResult ReceivePress(MasterPhysicalPress _, bool allowed)
+    {
+        allowedValues.Add(allowed);
+        return new MasterPhysicalPressResult("REJECTED", MessageDisposition.InvalidSignal, "test");
+    }
+
+    Assert.True(protocol.ProcessLine("GG1 HELLO boot-A_1", ReceiveStart, ReceivePress));
+    Assert.True(protocol.ProcessLine("GG1 PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 42", ReceiveStart, ReceivePress));
+    Assert.Equal(false, allowedValues[^1]); // MODE must be explicitly IDLE.
+    Assert.True(protocol.ProcessLine("GG1 MODE SPEED", ReceiveStart, ReceivePress));
+    protocol.ProcessLine("GG1 PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 43", ReceiveStart, ReceivePress);
+    Assert.Equal(false, allowedValues[^1]);
+    Assert.True(protocol.ProcessLine("GG1 MODE IDLE", ReceiveStart, ReceivePress));
+    protocol.ProcessLine("GG1 PRESS old-boot 0011223344556677 AABBCCDDEEFF 44", ReceiveStart, ReceivePress);
+    Assert.Equal(false, allowedValues[^1]);
+    protocol.ProcessLine("GG1 HELLO boot-after-restart", ReceiveStart, ReceivePress);
+    protocol.ProcessLine("GG1 PRESS boot-after-restart 0011223344556677 AABBCCDDEEFF 45", ReceiveStart, ReceivePress);
+    Assert.Equal(false, allowedValues[^1]); // A new handshake must report its mode.
+    protocol.ProcessLine("GG1 MODE IDLE", ReceiveStart, ReceivePress);
+    protocol.ProcessLine("GG1 PRESS boot-after-restart 0011223344556677 AABBCCDDEEFF 46", ReceiveStart, ReceivePress);
+    Assert.Equal(true, allowedValues[^1]);
+    Assert.Equal("GG1 RESULT 0011223344556677 AABBCCDDEEFF 42 ACTIVE",
+        MasterProtocolCodec.FormatPhysicalPressResult(press, "ACTIVE"));
+}
+
+static void PhysicalSpokeDedupesAndMixesWithVirtual()
+{
+    const string firstMac = "AABBCCDDEEFF";
+    const string secondMac = "001122334455";
+    using var h = new TestHarness(MakeSpokeEdition(), NewPath(), simulatedDevicesOnline: false);
+    h.Service.RecordDeviceScan(true, true, [firstMac, secondMac]);
+    Assert.Equal("-", h.Service.GetGarageStatus().Token);
+
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    var countdown = h.Service.StartMaster();
+    var runToken = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    Assert.Equal(runToken, h.Service.GetGarageStatus().Token);
+    Assert.Equal("COUNTDOWN", h.Service.GetGarageStatus().State);
+    Assert.Equal($"GG1 GARAGE {runToken} COUNTDOWN",
+        MasterProtocolCodec.FormatGarageStatus(h.Service.GetGarageStatus()));
+
+    var protocol = new MasterProtocolState();
+    InputResult ReceiveStart(string boot, ulong sequence, bool allowed) =>
+        h.Service.ReceivePhysicalMasterStart(boot, sequence, allowed);
+    MasterPhysicalPressResult? received = null;
+    MasterPhysicalPressResult ReceivePress(MasterPhysicalPress item, bool allowed) =>
+        received = h.Service.ReceivePhysicalSpokePress(item, allowed);
+
+    protocol.ProcessLine("GG1 HELLO boot-first", ReceiveStart, ReceivePress);
+    protocol.ProcessLine("GG1 MODE IDLE", ReceiveStart, ReceivePress);
+    protocol.ProcessLine($"GG1 PRESS boot-first {runToken} {firstMac} 1", ReceiveStart, ReceivePress);
+    Assert.Equal("REJECTED", received!.State); // Countdown is not gameplay-active.
+
+    h.Service.CompleteCountdown(countdown.Id);
+    protocol.ProcessLine($"GG1 PRESS boot-first FFFFFFFFFFFFFFFF {firstMac} 2", ReceiveStart, ReceivePress);
+    Assert.Equal(MessageDisposition.WrongRun, received!.Disposition);
+    h.Service.RecordDeviceScan(true, true, [secondMac]);
+    protocol.ProcessLine($"GG1 PRESS boot-first {runToken} {firstMac} 3", ReceiveStart, ReceivePress);
+    Assert.Equal(MessageDisposition.Offline, received!.Disposition);
+    h.Service.RecordDeviceScan(true, true, [firstMac, secondMac]);
+    protocol.ProcessLine($"GG1 PRESS boot-first {runToken} {firstMac} 4", ReceiveStart, ReceivePress);
+    Assert.Equal(MessageDisposition.Accepted, received!.Disposition);
+    Assert.Equal("ACTIVE", received.State);
+    Assert.Equal<long?>(0L, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == firstMac).StartElapsedMs);
+
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1_300));
+    protocol.Reset();
+    protocol.ProcessLine("GG1 HELLO boot-after-restart", ReceiveStart, ReceivePress);
+    protocol.ProcessLine("GG1 MODE IDLE", ReceiveStart, ReceivePress);
+    protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 4", ReceiveStart, ReceivePress);
+    Assert.Equal(MessageDisposition.Duplicate, received!.Disposition);
+    Assert.Equal("ACTIVE", received.State); // The retransmission did not finish the event.
+    Assert.Equal<long?>(null, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == firstMac).FinishElapsedMs);
+
+    h.Service.Pause();
+    protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 5", ReceiveStart, ReceivePress);
+    Assert.Equal(MessageDisposition.Paused, received!.Disposition);
+    h.Service.Resume();
+
+    protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} FFFFFFFFFFFF 6", ReceiveStart, ReceivePress);
+    Assert.Equal(MessageDisposition.UnknownStation, received!.Disposition);
+    h.Service.PressEvent(run.Id, "spoke-event-02");
+    h.Service.PressEvent(run.Id, "spoke-event-02");
+    h.Clock.Advance(TimeSpan.FromMilliseconds(700));
+    protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 7", ReceiveStart, ReceivePress);
+    Assert.Equal(MessageDisposition.Accepted, received!.Disposition);
+    Assert.Equal("COMPLETED", received.State);
+
+    var finished = h.Service.GetOperatorSnapshot().CurrentRun!;
+    Assert.Equal(RunStatus.Finished, finished.Status);
+    Assert.Equal<long?>(2_000L, finished.Events.Single(e => e.DeviceId == firstMac).FinishElapsedMs);
+    Assert.Equal("FINISHED", h.Service.GetGarageStatus().State);
+    Assert.Equal(runToken, h.Service.GetGarageStatus().Token);
+    protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 4", ReceiveStart, ReceivePress);
+    Assert.Equal(MessageDisposition.Duplicate, received!.Disposition);
+    Assert.Equal("COMPLETED", received.State);
+}
+
+static EditionDefinition MakeSpokeEdition() => new()
+{
+    EditionId = "spoke-test-edition",
+    Name = "Physical spoke test edition",
+    DurationLimitSeconds = 30,
+    Scoring = new ScoringRule(),
+    Events =
+    [
+        new EventDefinition { EventId = "spoke-event-01", Name = "Spoke event 1", DeviceId = "AABBCCDDEEFF", Type = EventKind.Standard },
+        new EventDefinition { EventId = "spoke-event-02", Name = "Spoke event 2", DeviceId = "001122334455", Type = EventKind.Standard }
+    ]
+};
 
 static void CountdownFreezesTimeAndRejectsActions()
 {

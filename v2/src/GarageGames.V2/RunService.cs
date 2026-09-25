@@ -281,27 +281,75 @@ public sealed class RunService
         lock (_gate)
         {
             RefreshActiveClock();
-            var run = _current ?? _lastDisplayedRun;
-            if (run is null)
-            {
-                return new MasterRunStatus("NONE", 0);
-            }
-
-            var state = run.Status switch
-            {
-                RunStatus.Armed => "ARMED",
-                RunStatus.Countdown => "COUNTDOWN",
-                RunStatus.Active => "ACTIVE",
-                RunStatus.Paused => "PAUSED",
-                RunStatus.Finished or RunStatus.Completed or RunStatus.TimedOut => "FINISHED",
-                _ => "NONE"
-            };
-            var remainingMilliseconds = Math.Max(0, run.Edition.DurationLimitSeconds * 1000L - run.ActiveElapsedMs);
-            var remainingSeconds = state is "ARMED" or "COUNTDOWN" or "ACTIVE" or "PAUSED"
-                ? (int)Math.Min(int.MaxValue, (remainingMilliseconds + 999) / 1000)
-                : 0;
-            return new MasterRunStatus(state, remainingSeconds);
+            return BuildMasterRunStatus(_current ?? _lastDisplayedRun);
         }
+    }
+
+    public MasterGarageStatus GetGarageStatus()
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            return BuildGarageStatus(_current ?? _lastDisplayedRun);
+        }
+    }
+
+    public (MasterRunStatus Status, MasterGarageStatus GarageStatus) GetMasterStatuses()
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            var run = _current ?? _lastDisplayedRun;
+            return (BuildMasterRunStatus(run), BuildGarageStatus(run));
+        }
+    }
+
+    private static MasterRunStatus BuildMasterRunStatus(RunRecord? run)
+    {
+        if (run is null)
+        {
+            return new MasterRunStatus("NONE", 0);
+        }
+
+        var state = run.Status switch
+        {
+            RunStatus.Armed => "ARMED",
+            RunStatus.Countdown => "COUNTDOWN",
+            RunStatus.Active => "ACTIVE",
+            RunStatus.Paused => "PAUSED",
+            RunStatus.Finished or RunStatus.Completed or RunStatus.TimedOut => "FINISHED",
+            _ => "NONE"
+        };
+        var remainingMilliseconds = Math.Max(0, run.Edition.DurationLimitSeconds * 1000L - run.ActiveElapsedMs);
+        var remainingSeconds = state is "ARMED" or "COUNTDOWN" or "ACTIVE" or "PAUSED"
+            ? (int)Math.Min(int.MaxValue, (remainingMilliseconds + 999) / 1000)
+            : 0;
+        return new MasterRunStatus(state, remainingSeconds);
+    }
+
+    private static MasterGarageStatus BuildGarageStatus(RunRecord? run)
+    {
+        if (run is null)
+        {
+            return new MasterGarageStatus("-", "NONE");
+        }
+
+        var state = run.Status switch
+        {
+            RunStatus.Armed => "ARMED",
+            RunStatus.Countdown => "COUNTDOWN",
+            RunStatus.Active => "ACTIVE",
+            RunStatus.Paused => "PAUSED",
+            RunStatus.Finished or RunStatus.Completed or RunStatus.TimedOut => "FINISHED",
+            _ => "NONE"
+        };
+        if (state == "NONE")
+        {
+            return new MasterGarageStatus("-", state);
+        }
+
+        var token = MasterProtocolCodec.GetGarageRunToken(run.Id);
+        return token is null ? new MasterGarageStatus("-", "NONE") : new MasterGarageStatus(token, state);
     }
 
     public OperatorSnapshot GetOperatorSnapshot(bool simulationMode = true)
@@ -768,6 +816,110 @@ public sealed class RunService
 
             return Receive(envelope);
         }
+    }
+
+    public MasterPhysicalPressResult ReceivePhysicalSpokePress(MasterPhysicalPress press, bool sessionAllowed)
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            var messageId = MasterProtocolCodec.GetPhysicalPressMessageId(press.RunToken, press.DeviceId, press.Sequence);
+            var tokenRun = _data.Runs
+                .Where(run => string.Equals(MasterProtocolCodec.GetGarageRunToken(run.Id), press.RunToken, StringComparison.Ordinal))
+                .OrderByDescending(run => run.Id == _current?.Id)
+                .ThenByDescending(run => run.Id == _lastDisplayedRun?.Id)
+                .FirstOrDefault();
+            var run = _current;
+            var messageRun = tokenRun ?? run;
+            var elapsed = messageRun?.ActiveElapsedMs ?? 0;
+            var envelope = new InputEnvelope
+            {
+                MessageId = messageId,
+                SessionId = messageRun?.Id ?? $"garage-{press.RunToken}",
+                RunId = messageRun?.Id ?? $"garage-{press.RunToken}",
+                DeviceId = press.DeviceId,
+                Type = "event-press",
+                ElapsedMilliseconds = elapsed,
+                Payload = JsonSerializer.SerializeToElement(new
+                {
+                    bootToken = press.BootToken,
+                    token = press.RunToken,
+                    mac = press.DeviceId,
+                    sequence = press.Sequence
+                }, JsonDefaults.Options)
+            };
+            var payloadJson = envelope.Payload.GetRawText();
+
+            if (_data.Messages.Any(message => string.Equals(message.MessageId, messageId, StringComparison.Ordinal)))
+            {
+                var duplicate = ReceiveCore(envelope, trustedVirtual: false);
+                return PhysicalPressResult(duplicate, tokenRun, press.DeviceId);
+            }
+
+            if (!sessionAllowed)
+            {
+                return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.InvalidSignal,
+                    "Physical spoke press does not match the current master handshake or IDLE mode.", payloadJson),
+                    tokenRun, press.DeviceId);
+            }
+
+            var currentToken = MasterProtocolCodec.GetGarageRunToken(run?.Id);
+            if (run is null || !string.Equals(currentToken, press.RunToken, StringComparison.Ordinal))
+            {
+                return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.WrongRun,
+                    "Physical spoke press token does not identify the current run.", payloadJson), tokenRun, press.DeviceId);
+            }
+
+            if (run.Status != RunStatus.Active)
+            {
+                var disposition = run.Status switch
+                {
+                    RunStatus.Paused => MessageDisposition.Paused,
+                    RunStatus.TimedOut => MessageDisposition.TimedOut,
+                    _ => MessageDisposition.InvalidSignal
+                };
+                return PhysicalPressResult(RecordRejected(envelope, disposition,
+                    "Physical spoke presses are accepted only while the run is ACTIVE.", payloadJson), run, press.DeviceId);
+            }
+
+            var eventResult = run.Events.SingleOrDefault(eventItem =>
+                string.Equals(eventItem.DeviceId, press.DeviceId, StringComparison.OrdinalIgnoreCase));
+            if (eventResult is null || eventResult.Type != EventKind.Standard)
+            {
+                return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.UnknownStation,
+                    "Physical spoke MAC is not assigned to a standard event in this run.", payloadJson), run, press.DeviceId);
+            }
+
+            var device = _data.Devices.SingleOrDefault(deviceItem =>
+                string.Equals(deviceItem.DeviceId, press.DeviceId, StringComparison.OrdinalIgnoreCase));
+            if (device?.Availability != DeviceAvailability.Online)
+            {
+                return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.Offline,
+                    "Physical spoke MAC is not confirmed online by the most recent device scan.", payloadJson), run, press.DeviceId);
+            }
+
+            var received = ReceiveCore(envelope, trustedVirtual: false);
+            return PhysicalPressResult(received, run, press.DeviceId);
+        }
+    }
+
+    private static MasterPhysicalPressResult PhysicalPressResult(InputResult result, RunRecord? run, string deviceId)
+    {
+        var state = "REJECTED";
+        if (result.Disposition is MessageDisposition.Accepted or MessageDisposition.Duplicate or MessageDisposition.AlreadyCompleted)
+        {
+            var eventResult = run?.Events.SingleOrDefault(eventItem =>
+                string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+            state = eventResult is null ? "REJECTED" : eventResult.Status switch
+            {
+                EventStatus.Pending => "PENDING",
+                EventStatus.Active => "ACTIVE",
+                EventStatus.Completed => "COMPLETED",
+                _ => "REJECTED"
+            };
+        }
+
+        return new MasterPhysicalPressResult(state, result.Disposition, result.Reason);
     }
 
     public RunRecord Pause()

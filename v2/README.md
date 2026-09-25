@@ -14,16 +14,17 @@ manually attached XIAO ESP32-C3 over USB serial. A short physical button press
 starts a competitor after the operator explicitly arms that competitor in the
 app. The current `GG1` serial protocol runs at 115200 baud; a five-second master
 button hold enters the existing Speed game when no Garage run is active or
-paused. Garage event scoring from physical spokes, the keypad and magnetic
-special events, bonus rounds, and event-specific scoring formulas remain future
+paused. Regular Garage events can now receive physical spoke presses over
+ESP-NOW; keypad and magnetic special events and bonus rounds remain future
 work. The app runs locally and has no Google Sheets or other network-service
 dependency.
 
-The combined master sketch is in `v2\firmware\garage_games_master`. The
-untouched original Speed master and spoke sketches are versioned alongside it
-under `v2\firmware\speed_button_master` and `v2\firmware\speed_button_spoke`.
-The current master retains Speed discovery on ESP-NOW channel 1; its Garage
-serial bridge and physical Start have not yet been verified on hardware.
+The combined master and spoke sketches are in
+`v2\firmware\garage_games_master` and `v2\firmware\speed_button_spoke`;
+the spoke retains Speed gameplay while adding Garage mode. The original Speed
+master remains as a reference in `v2\firmware\speed_button_master`. The Garage
+spoke protocol uses ESP-NOW channel 1. Firmware, the Garage serial bridge, and
+physical spoke events have not yet been verified on hardware.
 
 ## Launch
 
@@ -145,10 +146,10 @@ scan readiness.
 
 ## Physical master smoke test
 
-Physical hardware support is implemented but not yet physically verified: the
-XIAO board is not connected, and the firmware has not been compiled or flashed.
-The countdown audio flow and physical master/spoke interaction have not been
-validated on hardware; virtual/UI behavior is the only validation target so far.
+Physical hardware support is compiled but not flashed or physically verified:
+the XIAO board is not connected. The countdown audio flow and physical
+master/spoke interaction have not been validated on hardware; virtual/UI
+behavior is the only validation target so far.
 Treat the following as a test procedure, not a report of successful hardware
 operation.
 
@@ -163,16 +164,27 @@ operation.
 3. Close Arduino IDE's Serial Monitor before the app opens the port. Start
    Garage Games, select the master's COM port, choose **Connect**, and wait for
    the master status to show `IDLE`. The serial protocol is `GG1` at 115200 baud.
-4. Choose a competitor and use **Arm for physical Start**. A short press and
+4. For each physical event button, flash
+   `v2\firmware\speed_button_spoke\speed_button_spoke.ino` to a XIAO ESP32-C3.
+   The same sketch is used on every spoke. Read its 12-hex MAC from the startup
+   serial message, then assign that MAC to the matching event in the app's
+   **Setup** tab. Use one physical spoke and leave other events on their virtual
+   controls if desired. Spokes use ESP-NOW channel 1 and do not connect to the
+   Windows app over USB. If a press exhausts retries without receiving a result,
+   that spoke fast-blinks red and blocks further physical presses for that event
+   until a matching late result arrives or a new Garage session begins; use its
+   virtual event control as fallback. An explicit `REJECTED` result allows
+   another physical attempt.
+5. Choose a competitor and use **Arm for physical Start**. A short press and
    release of the master button starts that competitor's run. The on-screen
    virtual **Start** remains available with no master connected.
-5. An active or paused Garage run blocks the five-second Speed hold. With no
+6. An active or paused Garage run blocks the five-second Speed hold. With no
    active or paused Garage run, hold the master button for five seconds to
-   start Speed discovery. Discovery currently requires at least three
-   compatible spokes on ESP-NOW channel 1.
+   attempt Speed discovery. The existing Speed game requires at least three
+   compatible spokes and ends the attempt normally if fewer are found.
 
-The current integration uses the master for Garage Start, run-status display,
-and spoke discovery. Physical spokes do not yet report Garage event inputs.
+The master handles Garage Start, run-status display, and physical spoke event
+inputs. Physical operation still requires on-device verification.
 
 ## Storage and recovery
 
@@ -219,11 +231,17 @@ and operator controls, including virtual Start and virtual event presses. The
 trusted operator virtual-event endpoint remains available in hardware mode and
 can score events even when their physical devices are unverified or offline.
 
-## Future spoke architecture
+## Standard spoke protocol and future events
 
-The planned spoke network keeps ESP-NOW on fixed channel 1 and uses it only for
-master-to-spoke and spoke-to-master traffic. Garage event IDs will map through
-a separate Garage protocol, with per-device sequence numbers, acknowledgments,
-preflight status, and LED feedback. This design will not use Google Sheet row
-IDs or Wi-Fi. Battery-powered spokes must keep their radio listening to receive
-a wireless start; deep sleep cannot receive that start signal.
+The standard Garage spoke protocol is implemented over ESP-NOW channel 1, with
+session gating, per-spoke press sequences, result acknowledgments, and LED
+feedback. The firmware has compiled, but physical message delivery and LED
+behavior have not been verified on hardware. If bounded retries end without a
+result, the spoke reports an unknown outcome with a fast red blink and disables
+physical presses for that event until a matching late result resolves it or a
+new Garage session begins; use the virtual event control as fallback. A valid
+late result applies the event state, and an explicit `REJECTED` result permits
+retry. Future work includes keypad and magnetic special-event messages. This
+design does not use Google Sheet row IDs or Wi-Fi. Battery-powered spokes must
+keep their radio listening to receive a wireless start; deep sleep cannot
+receive that start signal.

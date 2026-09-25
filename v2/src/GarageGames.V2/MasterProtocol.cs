@@ -8,6 +8,12 @@ public enum MasterMode
 
 public sealed record MasterRunStatus(string State, int RemainingSeconds);
 
+public sealed record MasterGarageStatus(string Token, string State);
+
+public sealed record MasterPhysicalPress(string BootToken, string RunToken, string DeviceId, uint Sequence);
+
+public sealed record MasterPhysicalPressResult(string State, MessageDisposition Disposition, string Reason);
+
 public sealed record MasterScanReply(string ScanId, string Kind, string? DeviceId, int? Count);
 
 public sealed record MasterConnectionSnapshot(
@@ -31,8 +37,51 @@ public static class MasterProtocolCodec
     public static string GetStartMessageId(string bootToken, ulong sequence) =>
         $"master-start:{bootToken}:{sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
+    public static string GetPhysicalPressMessageId(string runToken, string deviceId, uint sequence) =>
+        $"spoke-press:{runToken}:{deviceId}:{sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+    public static string? GetGarageRunToken(string? runId)
+    {
+        const string prefix = "run-";
+        if (runId is null || !runId.StartsWith(prefix, StringComparison.Ordinal) ||
+            !Guid.TryParseExact(runId[prefix.Length..], "N", out var runGuid))
+        {
+            return null;
+        }
+
+        return runGuid.ToString("N")[..16].ToUpperInvariant();
+    }
+
     public static string FormatStatus(MasterRunStatus status) =>
         $"GG1 STATUS {status.State} {status.RemainingSeconds}";
+
+    public static string FormatGarageStatus(MasterGarageStatus status) =>
+        $"GG1 GARAGE {status.Token} {status.State}";
+
+    public static string FormatPhysicalPressResult(MasterPhysicalPress press, string state) =>
+        $"GG1 RESULT {press.RunToken} {press.DeviceId} {press.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)} {state}";
+
+    public static bool TryParsePhysicalPress(string line, out MasterPhysicalPress press)
+    {
+        press = null!;
+        if (line.Length > MaximumLineLength)
+        {
+            return false;
+        }
+
+        var parts = line.Split(' ');
+        if (parts.Length != 6 || parts[0] != "GG1" || parts[1] != "PRESS" ||
+            !IsValidBootToken(parts[2]) || !IsUpperHex(parts[3], 16) || !IsUpperHex(parts[4], 12) ||
+            parts[5].Length == 0 || parts[5].Any(character => character is < '0' or > '9') ||
+            !uint.TryParse(parts[5], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var sequence) || sequence == 0)
+        {
+            return false;
+        }
+
+        press = new MasterPhysicalPress(parts[2], parts[3], parts[4], sequence);
+        return true;
+    }
 
     public static bool TryParseScanReply(string line, out MasterScanReply reply)
     {
@@ -94,6 +143,9 @@ public static class MasterProtocolCodec
     private static bool IsHexDigit(char character) =>
         character is >= '0' and <= '9' or >= 'A' and <= 'F' or >= 'a' and <= 'f';
 
+    private static bool IsUpperHex(string value, int length) =>
+        value.Length == length && value.All(character => character is >= '0' and <= '9' or >= 'A' and <= 'F');
+
     public static bool TryParseLine(string line, out string normalizedLine, out string kind,
         out string value, out ulong sequence)
     {
@@ -146,7 +198,19 @@ public sealed class MasterProtocolState
     public string? LastMessage { get; private set; }
 
     public bool ProcessLine(string line, Func<string, ulong, bool, InputResult> receiveStart)
+        => ProcessLine(line, receiveStart, null);
+
+    public bool ProcessLine(string line, Func<string, ulong, bool, InputResult> receiveStart,
+        Func<MasterPhysicalPress, bool, MasterPhysicalPressResult>? receivePhysicalPress)
     {
+        if (MasterProtocolCodec.TryParsePhysicalPress(line, out var press))
+        {
+            LastMessage = line;
+            var sessionAllowed = string.Equals(BootToken, press.BootToken, StringComparison.Ordinal) && Mode == MasterMode.Idle;
+            receivePhysicalPress?.Invoke(press, sessionAllowed);
+            return true;
+        }
+
         if (!MasterProtocolCodec.TryParseLine(line, out var normalized, out var kind, out var value, out var sequence))
         {
             return false;
@@ -156,6 +220,10 @@ public sealed class MasterProtocolState
         switch (kind)
         {
             case "HELLO":
+                if (!string.Equals(BootToken, value, StringComparison.Ordinal))
+                {
+                    Mode = null;
+                }
                 BootToken = value;
                 return true;
             case "MODE":

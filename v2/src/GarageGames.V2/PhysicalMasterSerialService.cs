@@ -307,7 +307,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                     {
                         if (!discardLine && line.Length > 0)
                         {
-                            ProcessLine(port, line.ToString().TrimEnd('\r'));
+                            await ProcessLineAsync(port, line.ToString().TrimEnd('\r'), cancellationToken);
                         }
                         line.Clear();
                         discardLine = false;
@@ -354,8 +354,9 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         }
     }
 
-    private void ProcessLine(SerialPort port, string line)
+    private async Task ProcessLineAsync(SerialPort port, string line, CancellationToken cancellationToken)
     {
+        string? reply = null;
         lock (_gate)
         {
             if (!ReferenceEquals(_port, port))
@@ -385,13 +386,48 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                     return;
                 }
 
-                _protocol.ProcessLine(line, (bootToken, sequence, startAllowed) =>
-                    _runs.ReceivePhysicalMasterStart(bootToken, sequence, startAllowed));
+                _protocol.ProcessLine(line,
+                    (bootToken, sequence, startAllowed) =>
+                        _runs.ReceivePhysicalMasterStart(bootToken, sequence, startAllowed),
+                    (press, sessionAllowed) =>
+                    {
+                        var result = _runs.ReceivePhysicalSpokePress(press, sessionAllowed);
+                        reply = MasterProtocolCodec.FormatPhysicalPressResult(press, result.State);
+                        return result;
+                    });
             }
             catch
             {
                 _logger.LogError("Physical master input could not be recorded; the serial connection remains available.");
             }
+        }
+
+        if (reply is not null)
+        {
+            await SendProtocolLineAsync(port, reply, cancellationToken);
+        }
+    }
+
+    private async Task SendProtocolLineAsync(SerialPort port, string line, CancellationToken cancellationToken)
+    {
+        var bytes = Encoding.ASCII.GetBytes(line + "\n");
+        await _writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            lock (_gate)
+            {
+                if (!ReferenceEquals(_port, port) || !port.IsOpen)
+                {
+                    return;
+                }
+            }
+
+            await port.BaseStream.WriteAsync(bytes.AsMemory(), cancellationToken);
+            await port.BaseStream.FlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _writeGate.Release();
         }
     }
 
@@ -407,8 +443,10 @@ public sealed class PhysicalMasterSerialService : BackgroundService
             return;
         }
 
-        var status = _runs.GetMasterStatus();
-        var bytes = Encoding.ASCII.GetBytes(MasterProtocolCodec.FormatStatus(status) + "\n");
+        var (status, garageStatus) = _runs.GetMasterStatuses();
+        var statusLines = MasterProtocolCodec.FormatStatus(status) + "\n" +
+            MasterProtocolCodec.FormatGarageStatus(garageStatus) + "\n";
+        var bytes = Encoding.ASCII.GetBytes(statusLines);
         try
         {
             await _writeGate.WaitAsync(cancellationToken);

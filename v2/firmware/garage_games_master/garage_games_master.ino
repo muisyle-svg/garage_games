@@ -52,6 +52,7 @@
 // packet definition below. Forward-declare the type so that prototype builds.
 struct RxPacket;
 enum HostStatus : uint8_t;
+enum GarageStatus : uint8_t;
 void finishGame(const char* reason);
 void finishHostScan(bool busy);
 void processRx();
@@ -74,6 +75,7 @@ constexpr uint32_t HOST_HELLO_INTERVAL_MS = 2000;
 constexpr uint32_t HOST_SCAN_DURATION_MS = 2000;
 constexpr uint32_t HOST_SCAN_PING_MS = 500;
 constexpr uint32_t HOST_STATUS_STALE_MS = 3000;
+constexpr uint32_t GARAGE_BROADCAST_INTERVAL_MS = 250;
 constexpr uint8_t HOST_SCAN_MAX_RESPONDERS = 64;
 constexpr size_t HOST_SCAN_ID_MAX_LENGTH = 32;
 constexpr uint8_t HOST_RX_BYTES_PER_LOOP = 32;
@@ -248,7 +250,7 @@ void onSent(const wifi_tx_info_t*, esp_now_send_status_t status) {
 }
 
 void onRecv(const esp_now_recv_info* info, const uint8_t* data, int len) {
-  if (!info || !data || len <= 0 || !rxQueue) return;
+  if (!info || !info->src_addr || !data || len <= 0 || !rxQueue) return;
   RxPacket packet{};
   memcpy(packet.source, info->src_addr, 6);
   packet.len = (uint8_t)min(len, (int)RX_MAX_LEN);
@@ -493,12 +495,27 @@ enum HostStatus : uint8_t {
   HOST_STATUS_FINISHED
 };
 
+enum GarageStatus : uint8_t {
+  GARAGE_STATUS_NONE,
+  GARAGE_STATUS_ARMED,
+  GARAGE_STATUS_COUNTDOWN,
+  GARAGE_STATUS_ACTIVE,
+  GARAGE_STATUS_PAUSED,
+  GARAGE_STATUS_FINISHED
+};
+
 enum FirmwareMode { FIRMWARE_MODE_IDLE, FIRMWARE_MODE_SPEED };
 
 HostStatus hostStatus = HOST_STATUS_NONE;
 uint32_t hostRemainingSeconds = 0;
 uint32_t lastHostStatusMs = 0;
 bool hostStatusReceived = false;
+GarageStatus garageStatus = GARAGE_STATUS_NONE;
+char garageToken[17] = "-";
+bool garageStatusReceived = false;
+uint32_t lastGarageStatusMs = 0;
+uint32_t nextGarageBroadcastMs = 0;
+uint8_t masterMac[6] = {};
 uint32_t bootToken = 0;
 uint32_t hostStartSequence = 0;
 uint32_t lastHostHelloMs = 0;
@@ -514,9 +531,15 @@ HostStatus hostCountdownLastStatus = HOST_STATUS_NONE;
 bool hostCountdownWasActive = false;
 bool scoreResetSaved = true;
 
+bool hostStatusFresh(uint32_t now) {
+  return hostStatusReceived &&
+         (uint32_t)(now - lastHostStatusMs) <= HOST_STATUS_STALE_MS;
+}
+
 bool hostBlocksStarts() {
-  return hostStatus == HOST_STATUS_COUNTDOWN ||
-         hostStatus == HOST_STATUS_ACTIVE || hostStatus == HOST_STATUS_PAUSED;
+  return hostStatusFresh(millis()) &&
+         (hostStatus == HOST_STATUS_COUNTDOWN ||
+          hostStatus == HOST_STATUS_ACTIVE || hostStatus == HOST_STATUS_PAUSED);
 }
 
 struct HostScanResponder {
@@ -534,8 +557,7 @@ uint32_t hostScanUntilMs = 0;
 uint32_t nextHostScanPingMs = 0;
 
 bool hostScanSafe(uint32_t now) {
-  return gameState == IDLE && !hostBlocksStarts() && hostStatusReceived &&
-         (uint32_t)(now - lastHostStatusMs) <= HOST_STATUS_STALE_MS;
+  return gameState == IDLE && !hostBlocksStarts() && hostStatusFresh(now);
 }
 
 bool hostScanWindowContains(uint32_t receivedAtMs) {
@@ -609,7 +631,7 @@ void updateHostStatusLED() {
     return;
   }
 
-  if (hostStatus == HOST_STATUS_COUNTDOWN) {
+  if (hostStatusFresh(millis()) && hostStatus == HOST_STATUS_COUNTDOWN) {
     if (!hostWaitingLedActive) {
       startLEDBlink(true, true, false, 700);
       hostWaitingLedActive = true;
@@ -618,6 +640,170 @@ void updateHostStatusLED() {
     stopLEDPattern();
     hostWaitingLedActive = false;
   }
+}
+
+bool readProtocolToken(const char*& cursor, char* output, size_t outputSize) {
+  if (!cursor || !output || outputSize < 2 || *cursor == '\0' || *cursor == ' ') {
+    return false;
+  }
+  size_t length = 0;
+  while (*cursor != '\0' && *cursor != ' ') {
+    if (length + 1 >= outputSize) return false;
+    output[length++] = *cursor++;
+  }
+  output[length] = '\0';
+  if (*cursor == ' ') {
+    ++cursor;
+    if (*cursor == '\0' || *cursor == ' ') return false;
+  }
+  return length > 0;
+}
+
+bool parseGarageToken(const char* text, char* output) {
+  if (!text || !output) return false;
+  if (strcmp(text, "-") == 0) {
+    strcpy(output, "-");
+    return true;
+  }
+  if (strlen(text) != 16) return false;
+  for (uint8_t i = 0; i < 16; ++i) {
+    char value = text[i];
+    if (!((value >= '0' && value <= '9') ||
+          (value >= 'A' && value <= 'F'))) return false;
+    output[i] = value;
+  }
+  output[16] = '\0';
+  return true;
+}
+
+bool parseGarageStatusName(const char* text, GarageStatus& status) {
+  if (strcmp(text, "NONE") == 0) status = GARAGE_STATUS_NONE;
+  else if (strcmp(text, "ARMED") == 0) status = GARAGE_STATUS_ARMED;
+  else if (strcmp(text, "COUNTDOWN") == 0) status = GARAGE_STATUS_COUNTDOWN;
+  else if (strcmp(text, "ACTIVE") == 0) status = GARAGE_STATUS_ACTIVE;
+  else if (strcmp(text, "PAUSED") == 0) status = GARAGE_STATUS_PAUSED;
+  else if (strcmp(text, "FINISHED") == 0) status = GARAGE_STATUS_FINISHED;
+  else return false;
+  return true;
+}
+
+bool parseGarageStatusLine(const char* line, char* token, GarageStatus& status) {
+  static const char prefix[] = "GG1 GARAGE ";
+  if (!line || !token || strncmp(line, prefix, sizeof(prefix) - 1) != 0) return false;
+  const char* cursor = line + sizeof(prefix) - 1;
+  char tokenText[17];
+  char statusText[10];
+  if (!readProtocolToken(cursor, tokenText, sizeof(tokenText)) ||
+      !readProtocolToken(cursor, statusText, sizeof(statusText)) || *cursor != '\0' ||
+      !parseGarageToken(tokenText, token) || !parseGarageStatusName(statusText, status)) {
+    return false;
+  }
+  if ((status == GARAGE_STATUS_NONE) != (strcmp(token, "-") == 0)) return false;
+  return true;
+}
+
+bool parseUpperHexMac(const char* text, uint8_t* mac) {
+  if (!text || !mac || strlen(text) != 12) return false;
+  for (uint8_t i = 0; i < 6; ++i) {
+    uint8_t value = 0;
+    for (uint8_t digit = 0; digit < 2; ++digit) {
+      char c = text[i * 2 + digit];
+      uint8_t nibble;
+      if (c >= '0' && c <= '9') nibble = (uint8_t)(c - '0');
+      else if (c >= 'A' && c <= 'F') nibble = (uint8_t)(c - 'A' + 10);
+      else return false;
+      value = (uint8_t)((value << 4) | nibble);
+    }
+    mac[i] = value;
+  }
+  return true;
+}
+
+bool validStationMac(const uint8_t* mac) {
+  bool allZero = true;
+  for (uint8_t i = 0; i < 6; ++i) if (mac[i] != 0) allZero = false;
+  return !allZero && (mac[0] & 0x01) == 0;
+}
+
+bool parseUint32Token(const char* text, uint32_t& value) {
+  if (!text || *text == '\0') return false;
+  uint32_t parsed = 0;
+  for (const char* cursor = text; *cursor != '\0'; ++cursor) {
+    if (*cursor < '0' || *cursor > '9') return false;
+    uint32_t digit = (uint32_t)(*cursor - '0');
+    if (parsed > (UINT32_MAX - digit) / 10) return false;
+    parsed = parsed * 10 + digit;
+  }
+  value = parsed;
+  return true;
+}
+
+bool parseGarageResultLine(const char* line, char* token, uint8_t* mac,
+                           uint32_t& sequence, char* resultState, size_t stateSize) {
+  static const char prefix[] = "GG1 RESULT ";
+  if (!line || strncmp(line, prefix, sizeof(prefix) - 1) != 0) return false;
+  const char* cursor = line + sizeof(prefix) - 1;
+  char tokenText[17];
+  char macText[13];
+  char sequenceText[11];
+  if (!readProtocolToken(cursor, tokenText, sizeof(tokenText)) ||
+      !readProtocolToken(cursor, macText, sizeof(macText)) ||
+      !readProtocolToken(cursor, sequenceText, sizeof(sequenceText)) ||
+      !readProtocolToken(cursor, resultState, stateSize) || *cursor != '\0' ||
+      !parseGarageToken(tokenText, token) || strcmp(token, "-") == 0 ||
+      !parseUpperHexMac(macText, mac) || !validStationMac(mac) ||
+      !parseUint32Token(sequenceText, sequence) || sequence == 0) return false;
+  return strcmp(resultState, "PENDING") == 0 || strcmp(resultState, "ACTIVE") == 0 ||
+         strcmp(resultState, "COMPLETED") == 0 || strcmp(resultState, "REJECTED") == 0;
+}
+
+void acceptHostStatus(HostStatus status, uint32_t remainingSeconds) {
+  if (status == HOST_STATUS_COUNTDOWN && hostStatus != HOST_STATUS_COUNTDOWN) {
+    quickTapCount = 0;
+    lastQuickTapMs = 0;
+    if (masterHoldActive) {
+      masterHoldActive = false;
+      masterStartTriggered = true;
+      masterStartArmed = false;
+    }
+  }
+  hostStatus = status;
+  hostRemainingSeconds = remainingSeconds;
+  lastHostStatusMs = millis();
+  hostStatusReceived = true;
+}
+
+bool garageStatusFresh(uint32_t now) {
+  return garageStatusReceived &&
+         (uint32_t)(now - lastGarageStatusMs) <= HOST_STATUS_STALE_MS;
+}
+
+bool sendGarageState(const char* token, GarageStatus status) {
+  const char* stateText = "NONE";
+  switch (status) {
+    case GARAGE_STATUS_ARMED: stateText = "ARMED"; break;
+    case GARAGE_STATUS_COUNTDOWN: stateText = "COUNTDOWN"; break;
+    case GARAGE_STATUS_ACTIVE: stateText = "ACTIVE"; break;
+    case GARAGE_STATUS_PAUSED: stateText = "PAUSED"; break;
+    case GARAGE_STATUS_FINISHED: stateText = "FINISHED"; break;
+    default: break;
+  }
+  char message[40];
+  int length = snprintf(message, sizeof(message), "GARAGE:3:%s:%s",
+                        token, stateText);
+  return length > 0 && length <= 63 && sendBroadcast(message);
+}
+
+void updateGarageBroadcast() {
+  uint32_t now = millis();
+  if ((int32_t)(now - nextGarageBroadcastMs) < 0) return;
+  nextGarageBroadcastMs = now + GARAGE_BROADCAST_INTERVAL_MS;
+  if (gameState != IDLE) return;
+  if (!garageStatusFresh(now) || !hostStatusFresh(now)) {
+    sendGarageState("-", GARAGE_STATUS_NONE);
+    return;
+  }
+  sendGarageState(garageToken, garageStatus);
 }
 
 bool parseHostStatusLine(const char* line, HostStatus& parsedStatus,
@@ -711,22 +897,42 @@ void beginHostScan(const char* scanId) {
 }
 
 void processHostSerialLine(const char* line) {
+  char parsedGarageToken[17];
+  GarageStatus parsedGarageStatus;
+  if (parseGarageStatusLine(line, parsedGarageToken, parsedGarageStatus)) {
+    memcpy(garageToken, parsedGarageToken, sizeof(garageToken));
+    garageStatus = parsedGarageStatus;
+    garageStatusReceived = true;
+    lastGarageStatusMs = millis();
+    return;
+  }
+
+  char resultToken[17];
+  uint8_t resultMac[6];
+  uint32_t resultSequence = 0;
+  char resultState[10];
+  if (parseGarageResultLine(line, resultToken, resultMac, resultSequence,
+                            resultState, sizeof(resultState))) {
+    uint32_t now = millis();
+    if (gameState != IDLE || !garageStatusFresh(now) || !hostStatusFresh(now) ||
+        hostStatus == HOST_STATUS_NONE ||
+        garageStatus == GARAGE_STATUS_NONE || strcmp(resultToken, garageToken) != 0) {
+      return;
+    }
+    char macText[13];
+    macToHex(resultMac, macText, sizeof(macText));
+    char message[64];
+    int length = snprintf(message, sizeof(message), "GRESULT:3:%s:%lu:%s:%s",
+                          resultToken, (unsigned long)resultSequence,
+                          resultState, macText);
+    if (length > 0 && length <= 63) sendBroadcastTwice(message);
+    return;
+  }
+
   HostStatus parsedStatus;
   uint32_t parsedRemainingSeconds;
   if (parseHostStatusLine(line, parsedStatus, parsedRemainingSeconds)) {
-    if (parsedStatus == HOST_STATUS_COUNTDOWN && hostStatus != HOST_STATUS_COUNTDOWN) {
-      quickTapCount = 0;
-      lastQuickTapMs = 0;
-      if (masterHoldActive) {
-        masterHoldActive = false;
-        masterStartTriggered = true;
-        masterStartArmed = false;
-      }
-    }
-    hostStatus = parsedStatus;
-    hostRemainingSeconds = parsedRemainingSeconds;
-    lastHostStatusMs = millis();
-    hostStatusReceived = true;
+    acceptHostStatus(parsedStatus, parsedRemainingSeconds);
     return;
   }
 
@@ -1101,6 +1307,7 @@ void sendPrepMessage(char color) {
 }
 
 void startDiscovery() {
+  sendGarageState("-", GARAGE_STATUS_NONE);
   gameState = DISCOVERING;
   bootReadyDisplayActive = false;
   bootReadyDisplayed = false;
@@ -1376,9 +1583,41 @@ void handleReady(const RxPacket& packet) {
                 (unsigned long)(activeTargetWindowMs - elapsedMs));
 }
 
+void handleGaragePress(const RxPacket& packet) {
+  static const char prefix[] = "GPRESS:3:";
+  if (packet.len == 0 || memchr(packet.data, '\0', packet.len) != nullptr ||
+      strncmp(packet.data, prefix, sizeof(prefix) - 1) != 0) return;
+  const char* cursor = packet.data + sizeof(prefix) - 1;
+  char packetToken[17];
+  char parsedToken[17];
+  char sequenceText[11];
+  uint32_t sequence = 0;
+  if (!readProtocolToken(cursor, packetToken, sizeof(packetToken)) ||
+      !readProtocolToken(cursor, sequenceText, sizeof(sequenceText)) || *cursor != '\0' ||
+      !parseGarageToken(packetToken, parsedToken) || strcmp(parsedToken, "-") == 0 ||
+      !parseUint32Token(sequenceText, sequence) || sequence == 0 ||
+      !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0) return;
+
+  uint32_t now = millis();
+  if (gameState != IDLE || garageStatus != GARAGE_STATUS_ACTIVE ||
+      hostStatus != HOST_STATUS_ACTIVE || !hostStatusFresh(now) ||
+      !garageStatusFresh(now) || strcmp(parsedToken, garageToken) != 0 ||
+      (int32_t)(now - packet.receivedAtMs) < 0 ||
+      (uint32_t)(now - packet.receivedAtMs) > HOST_STATUS_STALE_MS) return;
+
+  char macText[13];
+  macToHex(packet.source, macText, sizeof(macText));
+  Serial.printf("GG1 PRESS %lu %s %s %lu\n", (unsigned long)bootToken,
+                parsedToken, macText, (unsigned long)sequence);
+}
+
 void processRx() {
   RxPacket packet;
   while (rxQueue && xQueueReceive(rxQueue, &packet, 0) == pdTRUE) {
+    if (strncmp(packet.data, "GPRESS:", 7) == 0) {
+      handleGaragePress(packet);
+      continue;
+    }
     unsigned int version = 0;
     unsigned long packetToken = 0;
     unsigned long packetRun = 0;
@@ -1577,6 +1816,7 @@ void setup() {
   if (radioResult != ESP_OK) restartAfterRadioFailure("Wi-Fi power-save setup", radioResult);
   radioResult = esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
   if (radioResult != ESP_OK) restartAfterRadioFailure("Wi-Fi channel setup", radioResult);
+  WiFi.macAddress(masterMac);
 
   // Fresh boot/session token: if the master resets, spokes will not mistake
   // the next game for an old run whose cue sequence has already advanced.
@@ -1612,6 +1852,7 @@ void loop() {
   processRx();
   updateHostScan();
   updatePendingTransmissions();
+  updateGarageBroadcast();
   updateRadioDiagnostics();
   updateMasterButton();
   checkMasterHold();
