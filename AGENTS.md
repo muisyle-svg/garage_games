@@ -44,7 +44,7 @@
 - Keep dependency vulnerability auditing enabled for normal checks; disclose any
   temporary offline bypass rather than reporting the audit as passed.
 - Run the Node frontend and firmware source tests with
-  `node --test tests/GarageGames.V2.Tests/` when Node is available; CI runs them.
+  `node --test "tests/**/*.test.cjs"` when Node is available; CI runs them.
 - Firmware is Arduino IDE sketches under `firmware/` (board `XIAO_ESP32C3`,
   `TM1637Display` library). Flash the Garage master and spokes together when the
   serial or ESP-NOW protocol changes. Hardware behavior is not yet verified.

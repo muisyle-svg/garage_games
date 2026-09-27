@@ -254,7 +254,7 @@ $env:NUGET_PACKAGES = (Resolve-Path .tools).Path + '\nuget-packages'
 & .tools/dotnet/dotnet.exe restore GarageGames.slnx --configfile NuGet.Config
 & .tools/dotnet/dotnet.exe build GarageGames.slnx -c Release --no-restore
 & .tools/dotnet/dotnet.exe run --project tests/GarageGames.V2.Tests/GarageGames.V2.Tests.csproj -c Release --no-build --no-restore
-node --test tests/GarageGames.V2.Tests/
+node --test "tests/**/*.test.cjs"
 ```
 
 For a self-contained Windows build, run:
