@@ -1,26 +1,23 @@
 # Build output
 **/bin/
 **/obj/
-.pio/
 .vs/
 .vscode/
 .tools/
+/publish/
 
 # Runtime data and secrets
 data/
 backups/
 exports/
-controller-settings.json
 *.db
 *.db-shm
 *.db-wal
 .env
 secrets.json
 
-# Spreadsheet build artifacts
-artifacts/
-release/
-tools/spreadsheet/node_modules/
+# Legacy v2 folder left behind by the move to the repository root
+/v2/
 
 # OS/editor files
 Thumbs.db

@@ -960,7 +960,7 @@ static void ArmRequestDurationHandoff()
 
 static void MvpRosterAndVirtualPresses()
 {
-    var editionPath = Path.Combine(Environment.CurrentDirectory, "v2", "config", "edition-2026.json");
+    var editionPath = Path.Combine(Environment.CurrentDirectory, "config", "edition-2026.json");
     var edition = EditionDefinition.FromJson(editionPath);
     Assert.Equal(13, edition.Events.Count);
     Assert.Equal(false, edition.Scoring.ManualEventPoints);

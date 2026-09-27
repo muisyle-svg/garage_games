@@ -1,6 +1,4 @@
 <Solution>
-  <Project Path="src/GarageGames.Core/GarageGames.Core.csproj" />
-  <Project Path="src/GarageGames.Controller/GarageGames.Controller.csproj" />
-  <Project Path="tests/GarageGames.Tests/GarageGames.Tests.csproj" />
+  <Project Path="src/GarageGames.V2/GarageGames.V2.csproj" />
+  <Project Path="tests/GarageGames.V2.Tests/GarageGames.V2.Tests.csproj" />
 </Solution>
-

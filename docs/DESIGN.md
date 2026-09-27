@@ -133,6 +133,10 @@ informed by the earlier implementation, not an instruction to delete or replace 
 
 ## Source review
 
+The files reviewed below belonged to the v1 controller and legacy scorekeeper.
+They were removed from the working tree when v2 became the only version and remain
+available at the `v1-final` tag.
+
 - `src/GarageGames.Controller/Services/RunService.cs`: corrections go through
   `AppendToCurrentAsync`; there is no historical-run correction workflow.
   Leaderboard currently lists each completed/timed-out run, rather than applying

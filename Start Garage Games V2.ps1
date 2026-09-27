@@ -6,7 +6,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $script:scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script:repoRoot = (Resolve-Path (Join-Path $script:scriptRoot '..')).Path
+$script:repoRoot = $script:scriptRoot
 $script:toolRoot = Join-Path $script:repoRoot '.tools'
 $script:dotnet = Join-Path $script:toolRoot 'dotnet\dotnet.exe'
 $script:localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)

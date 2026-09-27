@@ -9,31 +9,22 @@ permissions:
 
 jobs:
   package:
+    if: github.ref_name != 'v1-final'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.x
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - run: pip install platformio
-      - run: powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
-      - working-directory: firmware
-        run: |
-          pio run -e master
-          pio run -e station_standard
-          pio run -e station_prompt_demo
+      - run: dotnet restore GarageGames.slnx --configfile NuGet.Config
+      - run: dotnet run --project tests/GarageGames.V2.Tests/GarageGames.V2.Tests.csproj --configuration Release
+      - run: dotnet publish src/GarageGames.V2/GarageGames.V2.csproj --configuration Release --runtime win-x64 --self-contained true --output publish/win-x64
       - shell: powershell
         run: |
-          New-Item -ItemType Directory -Force release\firmware | Out-Null
-          Copy-Item firmware\.pio\build\master\firmware.bin release\firmware\master.bin
-          Copy-Item firmware\.pio\build\station_standard\firmware.bin release\firmware\station-standard.bin
-          Copy-Item firmware\.pio\build\station_prompt_demo\firmware.bin release\firmware\station-prompt-demo.bin
-          Compress-Archive release\firmware\* "release\garage-games-firmware-$env:GITHUB_REF_NAME.zip"
+          New-Item -ItemType Directory -Force release | Out-Null
+          Compress-Archive publish\win-x64\* "release\garage-games-$env:GITHUB_REF_NAME-win-x64.zip"
+          Compress-Archive firmware\* "release\garage-games-firmware-$env:GITHUB_REF_NAME.zip"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             release/*.zip
-

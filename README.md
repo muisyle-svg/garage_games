@@ -1,44 +1,293 @@
-# Garage Games 2026
+# Garage Games
 
-Garage Games 2026 is a local-first event controller for a timed series of
-ESP32-powered minigames. A Windows laptop owns the run state and records every
-accepted event in SQLite. A plugged-in XIAO ESP32-C3 master bridges Wi-Fi to
-battery-powered ESP-NOW stations. Google Sheets is an asynchronous participant
-view, correction queue, and emergency fallback rather than the live database.
+Garage Games (v2) is a local .NET 10 ASP.NET Core application with an embedded
+SQLite store. Its MVP scorekeeper has 13 regular events, competitor selection,
+a five-minute run clock, pause/resume, virtual two-press event buttons, editable
+timestamps, automatic event points with editable overrides and bonus scoring,
+and a history that can be corrected later.
+Timed-out runs remain as incomplete history and do not prevent starting the next
+competitor. A prior data folder is copied only when needed to move it to the
+standard Windows data location; its original folder is retained.
+
+The earlier v1 controller (Google Sheets sync, PlatformIO firmware) and the
+original Apps Script scorekeeper were removed from the working tree when v2
+became the only version. They remain available at the `v1-final` tag:
+`git checkout v1-final`.
 
 ## Repository layout
 
-- `src/GarageGames.Core` - run projection, protocol contracts, and scoring.
-- `src/GarageGames.Controller` - Windows web controller, SQLite, bridge, exports,
-  backups, and Google synchronization.
-- `firmware` - PlatformIO master, standard station, prompt-game example, and
-  shared protocol/runtime libraries.
-- `google-apps-script` - authenticated Sheet mirror, correction queue, and
-  emergency workflow.
-- `config/seasons` - versioned game rosters and scoring settings.
-- `tests` and `simulator` - deterministic tests and a 20-station loss simulator.
-- `docs` - setup, operation, protocol, recovery, and release runbooks.
+- `src/GarageGames.V2` - the scorekeeper app (API, SQLite store, serial master bridge, web UI).
+- `tests/GarageGames.V2.Tests` - .NET test runner plus Node frontend and firmware tests.
+- `firmware` - Arduino sketches for the combined Garage master and spoke, and the standalone Speed Button game.
+- `config/edition-2026.json` - default edition roster and scoring.
+- `docs` - design requirements and implementation decisions.
+- `Start Garage Games V2.cmd` - tray launcher for normal Windows use.
 
-## Quick start for operators
+The app supports virtual Start without a connected master and can also connect a
+manually attached XIAO ESP32-C3 over USB serial. A short physical button press
+starts a competitor after the operator explicitly arms that competitor in the
+app. The current `GG1` serial protocol runs at 115200 baud; a five-second master
+button hold enters the existing Speed game when no Garage run is active or
+paused. Regular Garage events can now receive physical spoke presses over
+ESP-NOW; keypad and magnetic special events and bonus rounds remain future
+work. The app runs locally and has no Google Sheets or other network-service
+dependency.
 
-1. Download the latest Windows release from GitHub Releases.
-2. Start `GarageGames.Controller.exe`.
-3. Open the displayed local URL and complete the setup checklist.
-4. Power the master, then assign discovered station IDs to event slots.
-5. Add competitors, select the 2026 season, and run diagnostics.
+The combined Garage Games/Speed Button master and spoke sketches are in
+`firmware\garage_games_master` and `firmware\garage_games_spoke`.
+The standalone Speed Button sketches remain in
+`firmware\speed_button_master` and `firmware\speed_button_spoke`.
+The Garage spoke protocol uses ESP-NOW channel 1. Firmware, the Garage serial
+bridge, and physical spoke events have not yet been verified on hardware.
 
-No developer tools are required for released builds. Google credentials,
-participant databases, Wi-Fi passwords, and signing secrets are never committed.
+## Launch
 
-## Developer checks
+From the repository root in PowerShell:
 
 ```powershell
-dotnet build GarageGames.slnx -c Release
-dotnet run --project tests/GarageGames.Tests -c Release
-pio test -d firmware -e native
-pio run -d firmware
+$env:DOTNET_CLI_HOME = (Resolve-Path .tools).Path
+$env:APPDATA = (Resolve-Path .tools).Path + '\appdata'
+$env:NUGET_PACKAGES = (Resolve-Path .tools).Path + '\nuget-packages'
+& .tools/dotnet/dotnet.exe restore GarageGames.slnx --configfile NuGet.Config
+& .tools/dotnet/dotnet.exe run --project src/GarageGames.V2/GarageGames.V2.csproj -- --legacy-data-path "$PWD\.tools\localappdata\GarageGamesV2" --urls http://127.0.0.1:5187
 ```
 
-See `docs/OPERATOR_RUNBOOK.md` for the event-day workflow,
-`docs/GOOGLE_SHEET_SETUP.md` for synchronization setup, and
-`docs/HARDWARE_VALIDATION.md` for release validation.
+Open `http://127.0.0.1:5187/` for the operator view and use **Open scoreboard**
+to open the separate spectator view at `/scoreboard` (the alias is also directly
+usable). The default data path is
+`%LOCALAPPDATA%\GarageGamesV2` for both the tray launcher and direct launches;
+pass `--data-path` only when intentionally isolating a test or event store. The
+app enforces loopback-only URLs; a `--urls` value such as `0.0.0.0`
+is rejected rather than exposed. For normal Windows use, double-click
+`Start Garage Games V2.cmd`. The tray launcher starts the app with
+`--hardware-mode`, so simulator-only routes are off during an event. It opens the operator view in your browser and
+leaves Garage Games in the Windows notification area (system tray). Right-click
+the tray icon for **Open Garage Games** or **Exit**; double-clicking the icon
+also opens the app. Closing the browser only closes that window. Choosing Exit
+asks the server started by this tray session to shut down cleanly so the local
+database can close safely. The tray launcher is single-instance for the
+current Windows user, creates no Windows startup entry, and stores launcher logs under
+`.tools\logs`.
+
+Before reusing an existing server, the launcher verifies its build fingerprint,
+application folder, and data folder. If any identity is missing or does not
+match, it will not connect or start a second copy; close the other Garage Games
+instance cleanly and retry. A verified server that was already running before
+this tray session is reused, and the tray menu says
+**Exit (leave existing server running)**. The launcher will not stop it or any
+unrelated process. If shutdown of a server owned by this tray session cannot be confirmed,
+the launcher will not force-kill it; the tray stays available so Exit can be
+retried. If a startup problem appears, check the `.out.log` and `.err.log` files
+under `.tools\logs`.
+
+The launcher uses the repository-local .NET toolchain but stores run data in
+`%LOCALAPPDATA%\GarageGamesV2`, outside the repository and Git history. If the
+older repo-local data folder at `.tools\localappdata\GarageGamesV2` exists
+and the standard folder does not, the app copies the database and its backups
+to the standard folder after confirming the old app no longer holds its data
+lock. The old folder is retained unchanged. If both folders already contain a
+database, the standard `%LOCALAPPDATA%` store is used and the repo-local copy
+is left untouched.
+
+The normal shortcut runs the current source project, so a stale published
+executable cannot silently hide source updates. To intentionally launch a
+published build, run `& '.\Start Garage Games V2.ps1' -UsePublished`; the tray still
+checks that build's identity before reuse.
+
+The standard source launch runs with
+`--no-restore`. The app now references `System.IO.Ports`, so run the restore
+command above with the repository `NuGet.Config` before launching the source
+build; the launcher does not restore packages itself. Exit the current tray
+instance before trying updated code; an already-running tray session can keep
+serving its existing process.
+
+Use the on-screen event buttons to test a run. Press an event once to record its
+start and again to record its finish; different events may overlap. The operator
+Start begins the supplied 3-2-1 Go audio; the run timer and event buttons remain
+inactive until playback ends. A blocked or failed playback leaves the run in
+Countdown and offers an explicit retry. This audio gate applies to virtual and
+physical Start; the TV scoreboard never plays the audio. Event times are shown
+and edited as M:SS remaining from the run limit (seconds-only input is also
+accepted), making earlier event timestamps larger, while the app persists
+elapsed milliseconds. Untouched event times retain their original millisecond
+precision. The simulator's custom clock advance also accepts M:SS or seconds
+and sends milliseconds to the backend. Completing all
+regular events freezes the timer and leaves the run marked finished but
+unrecorded until **Record result**. The operator can also finish a partial run
+and choose whether to record it. Event times and points remain editable before
+or after recording. When correcting a stopped or recorded run, missing event
+timestamps may be added anywhere within the run limit; the saved elapsed time
+extends through the latest corrected event. Points preview automatically from
+event times using the run's saved edition rules unless manually overridden;
+clearing a points override restores automatic scoring. Run bonus scoring is
+also editable. Each event may override `basePoints`, `minimumPoints`,
+`decayPoints`, `decayEverySeconds`, and `graceSeconds`. Missing values inherit
+the edition's global base, decay amount, and interval, and grace defaults to
+zero. When an event sets `basePoints` without `minimumPoints`, its floor is half
+that base rounded up; otherwise the global minimum is inherited. Decay starts
+after the grace period, with the first drop at the grace boundary: 10 seconds
+of grace with a 5 second interval drops at 10, 15, 20 seconds, and so on. With
+zero grace, the first drop remains at one full interval. Automatic scores never
+fall below their effective minimum. Manual point overrides remain in place
+until cleared.
+
+## Setup and device readiness
+
+Use the operator **Setup** tab to change the active edition name and event
+roster, including event names, types, and device assignments. The setup API is
+`GET /api/setup` and `PUT /api/setup`. Each event may include `basePoints`,
+`minimumPoints`, `decayPoints`, `decayEverySeconds`, and `graceSeconds`. These
+fields are optional nullable integers. Effective base, minimum, and decay
+values must be within 0–1,000,000 points; intervals and grace periods must be
+within 1–86,400 and 0–86,400 seconds respectively. The minimum cannot exceed
+the effective base. `GET /api/setup` and the `PUT` response include `scoring`
+with the actual edition-wide defaults. For compatibility, `scoring` is optional
+in a PUT request and any submitted value is ignored; only per-event fields are
+editable through setup.
+The active setup is stored transactionally in SQLite metadata; a database
+backup is created before a changed setup is saved. Setup is locked while a run
+is in progress or waiting to be recorded. Each run keeps its own edition
+snapshot, so editing setup never rewrites historical results. If the event
+roster or any per-event scoring setting changes while recorded runs exist in
+the current edition, the saved setup gets a new edition ID and the leaderboard
+starts a separate edition; earlier scores remain in history and are not
+deleted.
+
+Use **Scan devices** or arm a run while the physical master is connected. The
+server sends `GG1 STATUS` immediately before `GG1 SCAN <id>`; the master
+reports discovered 12-hex device IDs. `POST /api/master/scan` returns
+`connected`, `completed`, `detectedDeviceIds`, and per-event statuses
+`Responding`, `NotResponding`, or `NotScanned`. A scan only confirms devices
+that reported during that scan; it does not verify event wiring or gameplay
+inputs. Placeholder assignments such as `station-01`, a disconnected master,
+an incomplete/BUSY scan, or a process restart are **Unverified**, not Online.
+Missing or unverified spokes do not prevent arming: use the operator's virtual
+event controls as a fallback. A physical press that arrives through the current
+master handshake from the MAC assigned to a standard event is accepted even if
+that spoke missed the latest scan (for example, it was asleep or out of range
+while the run was armed); the press itself marks the spoke Online. Presses from
+unassigned MACs remain rejected. Disconnecting the master invalidates its last
+scan readiness.
+
+## Physical master smoke test
+
+Physical hardware support is compiled but not flashed or physically verified:
+the XIAO board is not connected. The countdown audio flow and physical
+master/spoke interaction have not been validated on hardware; virtual/UI
+behavior is the only validation target so far.
+Treat the following as a test procedure, not a report of successful hardware
+operation.
+
+1. Exit the current Garage Games tray instance so the next launch loads the
+   updated application. Make sure the source project has been restored as
+   described above. The standard shortcut now runs the source project; a
+   published build is used only when explicitly requested with `-UsePublished`.
+2. In Arduino IDE, open
+   `firmware\garage_games_master\garage_games_master.ino`. Install the
+   ESP32 Arduino board package and `TM1637Display`, select board
+   `XIAO_ESP32C3` and the board's COM port, then flash over USB.
+3. Close Arduino IDE's Serial Monitor before the app opens the port. Start
+   Garage Games, select the master's COM port, choose **Connect**, and wait for
+   the master status to show `IDLE`. The serial protocol is `GG1` at 115200 baud.
+4. For each physical event button, flash
+   `firmware\garage_games_spoke\garage_games_spoke.ino` to a XIAO ESP32-C3.
+   This combined sketch is used on every Garage spoke and retains Speed Button
+   gameplay. Read its 12-hex MAC from the startup serial message, then assign
+   that MAC to the matching event in the app's **Setup** tab. Use one physical
+   spoke and leave other events on their virtual controls if desired. Spokes use
+   ESP-NOW channel 1 and do not connect to the Windows app over USB. If a press
+   exhausts retries without receiving a result, that spoke fast-blinks red and
+   blocks further physical presses for that event until a matching late result
+   arrives or a new Garage session begins; use its virtual event control as
+   fallback. An explicit `REJECTED` result allows another physical attempt.
+5. Choose a competitor and use **Arm for physical Start**. A short press and
+   release of the master button starts that competitor's run. The on-screen
+   virtual **Start** remains available with no master connected.
+6. An active or paused Garage run blocks the five-second Speed hold. With no
+   active or paused Garage run, hold the master button for five seconds to
+   attempt Speed discovery. The existing Speed game requires at least three
+   compatible spokes and ends the attempt normally if fewer are found.
+
+The master handles Garage Start, run-status display, and physical spoke event
+inputs. Physical operation still requires on-device verification.
+
+## Storage and recovery
+
+SQLite uses WAL mode and `synchronous=FULL`; each command and accepted or
+rejected input message is committed transactionally. The run stores active
+elapsed time, not wall-clock downtime. If a process stops while a run is active,
+the next start changes that run to paused, preserves its last committed active
+elapsed value, and writes a recovery ledger entry. No downtime is awarded and
+the operator must resume explicitly. Unknown schema versions, missing required
+tables, failed integrity checks, or malformed persisted snapshots fail visibly;
+the app never resets the database.
+
+Schema version 2 persists when a run was recorded. On first start, a version 1
+database is backed up to `backups\garage-games-v2-pre-schema-2-*.db` and then
+upgraded in place; completed runs keep their recorded status. Timed-out runs
+recorded under version 1 were never saved as recorded, so record them again from
+History after upgrading. Older app builds refuse a version 2 database.
+
+A restart or replacement attempt does not displace the original result until the
+replacement is recorded; discarding the attempt leaves the original standing.
+Recording an older run from History does not advance the on-deck queue, and a
+competitor cannot end up with two recorded official results.
+
+The local API answers only loopback `Host` headers and rejects cross-origin
+state-changing requests, so another web page open in the operator's browser
+cannot drive the scorekeeper.
+
+The local `/api/backup` endpoint creates an explicit SQLite backup in the data
+directory's `backups` folder. `/api/export` returns an operator export of the
+current state and audit ledger.
+
+The server checkpoints an active run at least once per second. An unexpected
+stop can therefore lose at most the last checkpoint interval of active elapsed
+time; recovery still pauses the run and never awards the uncertain downtime.
+
+## Verification
+
+```powershell
+$env:DOTNET_CLI_HOME = (Resolve-Path .tools).Path
+$env:APPDATA = (Resolve-Path .tools).Path + '\appdata'
+$env:NUGET_PACKAGES = (Resolve-Path .tools).Path + '\nuget-packages'
+& .tools/dotnet/dotnet.exe restore GarageGames.slnx --configfile NuGet.Config
+& .tools/dotnet/dotnet.exe build GarageGames.slnx -c Release --no-restore
+& .tools/dotnet/dotnet.exe run --project tests/GarageGames.V2.Tests/GarageGames.V2.Tests.csproj -c Release --no-build --no-restore
+node --test tests/GarageGames.V2.Tests/
+```
+
+For a self-contained Windows build, run:
+
+```powershell
+& .tools/dotnet/dotnet.exe publish src/GarageGames.V2/GarageGames.V2.csproj -c Release -r win-x64 --self-contained true -o publish/win-x64
+```
+
+To run the published executable, explicitly start the PowerShell launcher with
+`-UsePublished`. The
+`--hardware-mode` flag disables simulated device availability and simulator
+clock/input routes, while retaining the physical USB serial master transport
+and operator controls, including virtual Start and virtual event presses. The
+trusted operator virtual-event endpoint remains available in hardware mode and
+can score events even when their physical devices are unverified or offline.
+
+## Standard spoke protocol and future events
+
+The standard Garage spoke protocol is implemented over ESP-NOW channel 1, with
+session gating, per-spoke press sequences, result acknowledgments, and LED
+feedback. The firmware has compiled, but physical message delivery and LED
+behavior have not been verified on hardware. If bounded retries end without a
+result, the spoke reports an unknown outcome with a fast red blink and disables
+physical presses for that event until a matching late result resolves it or a
+new Garage session begins; use the virtual event control as fallback. A valid
+late result applies the event state, and an explicit `REJECTED` result permits
+retry. Each press reports its age (time since the button was pushed, plus the
+master's relay delay), and the app times the press at that moment rather than at
+arrival, capped at 10 seconds and never earlier than the start of the current
+active stretch. Spoke press sequences start from a random value each session,
+so a spoke that reboots mid-run cannot reuse a sequence the app already
+recorded. Flash the master and spokes together: an older master rejects the
+new press format. Future work includes keypad and magnetic special-event messages. This
+design does not use Google Sheet row IDs or Wi-Fi. Battery-powered spokes must
+keep their radio listening to receive a wireless start; deep sleep cannot
+receive that start signal.
