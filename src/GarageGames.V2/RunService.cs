@@ -787,7 +787,8 @@ public sealed class RunService
         }
     }
 
-    public RunRecord ArmCompetitor(string competitorId, RunCategory category, int? durationLimitSeconds = null)
+    public RunRecord ArmCompetitor(string competitorId, RunCategory category, int? durationLimitSeconds = null,
+        bool replaceExistingOfficial = false)
     {
         ValidateRunDuration(durationLimitSeconds);
         lock (_gate)
@@ -802,17 +803,24 @@ public sealed class RunService
             {
                 throw new CommandException("Run category is invalid.");
             }
-            if (category == RunCategory.Official && FindAcceptedOfficial(competitorId, _edition.EditionId) is not null)
+            var existingOfficial = category == RunCategory.Official
+                ? FindAcceptedOfficial(competitorId, _edition.EditionId)
+                : null;
+            if (existingOfficial is not null && !replaceExistingOfficial)
             {
-                throw new CommandException("This competitor already has an official result. Choose Playoff or Exhibition for another run.");
+                throw new CommandException("This competitor already has an official result. Confirm an official redo to replace it, or choose Playoff or Exhibition.");
             }
 
+            // An official redo is linked to the result it replaces; the original keeps
+            // counting until the redo is recorded, so discarding the redo changes nothing.
             var run = CreateRun(new QueueItemRecord
             {
                 Id = NewId("direct"),
                 CompetitorId = competitorId,
-                Category = category
+                Category = category,
+                Reason = existingOfficial is null ? null : "Official redo; replaces the previous official result when recorded."
             }, manualOfflineOverride: false, durationLimitSeconds: durationLimitSeconds);
+            run.SupersedesRunId = existingOfficial?.Id;
             try
             {
                 _store.SaveRunsAndQueue([run], _data.Queue, selectedCompetitorId: null, selectedRunCategory: null);

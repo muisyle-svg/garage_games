@@ -10,7 +10,8 @@ public sealed record CompetitorImportResult(List<CompetitorRecord> Added, List<s
 public sealed record StartCompetitorRunRequest(
     string CompetitorId,
     RunCategory Category = RunCategory.Official,
-    int? DurationLimitSeconds = null);
+    int? DurationLimitSeconds = null,
+    bool ReplaceExistingOfficial = false);
 public sealed record AddQueueRequest(string CompetitorId, RunCategory Category, bool ReplaceExistingOfficial = false, string? Reason = null);
 public sealed record ReorderQueueRequest(List<string> QueueIds);
 public sealed record ArmRequest(bool ManualOfflineOverride = false);

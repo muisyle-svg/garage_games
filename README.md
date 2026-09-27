@@ -228,8 +228,11 @@ upgraded in place; completed runs keep their recorded status. Timed-out runs
 recorded under version 1 were never saved as recorded, so record them again from
 History after upgrading. Older app builds refuse a version 2 database.
 
-A restart or replacement attempt does not displace the original result until the
-replacement is recorded; discarding the attempt leaves the original standing.
+To redo an official run, select the competitor with category Official and use
+Start or Arm as usual; the app asks you to confirm an official redo. A restart,
+redo, or other replacement attempt does not displace the original result until the
+replacement is recorded; discarding the attempt leaves the original standing. A
+recorded redo replaces the original even if it scores lower.
 Recording an older run from History does not advance the on-deck queue, and a
 competitor cannot end up with two recorded official results.
 

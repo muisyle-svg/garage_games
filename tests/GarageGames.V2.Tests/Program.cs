@@ -47,6 +47,7 @@ var tests = new (string Name, Action Run)[]
     ("trusted virtual presses work with unverified hardware while station packets stay guarded", VirtualPressReadinessFallback),
     ("bonus records signals without automatic points", BonusSignal),
     ("restart lineage and one official result", RestartAndOfficialRule),
+    ("an official redo replaces the original only when recorded", OfficialRedoReplacesOnlyWhenRecorded),
     ("timed-out runs can be undone and their recording survives restart", TimedOutRunUndoAndRecordingPersist),
     ("recording an older run from history keeps the on-deck queue", HistoricalRecordKeepsOnDeckQueue),
     ("discarding a replacement attempt keeps the original official result", DiscardedReplacementKeepsOriginalOfficial),
@@ -1804,6 +1805,47 @@ static void RestartAndOfficialRule()
     Assert.Equal(RunStatus.Superseded, h.Store.Load().Runs.Single(r => r.Id == first.Id).Status);
     var secondOfficial = h.Service.AddToQueue(h.CompetitorId, RunCategory.Official);
     Assert.Throws<CommandException>(() => h.Service.Arm(secondOfficial.Id));
+}
+
+static void OfficialRedoReplacesOnlyWhenRecorded()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+    var original = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 300);
+    h.StartRun();
+    h.Service.Finish();
+    h.Service.Record();
+
+    // Without an explicit redo, a second official run is still refused.
+    Assert.Throws<CommandException>(() => h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 300));
+
+    // A discarded redo leaves the original official result untouched.
+    var discarded = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 300, replaceExistingOfficial: true);
+    Assert.Equal(original.Id, discarded.SupersedesRunId);
+    Assert.Equal(original.Id, h.Service.GetScoreboard().Leaderboard.Single().RunId);
+    h.Service.Abort("Redo discarded");
+    Assert.Equal(RunStatus.Completed, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == original.Id).Status);
+    Assert.Equal(original.Id, h.Service.GetScoreboard().Leaderboard.Single().RunId);
+
+    // A recorded redo replaces the original, and both changes persist.
+    var redo = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 300, replaceExistingOfficial: true);
+    h.StartRun();
+    Assert.Equal(original.Id, h.Service.GetScoreboard().Leaderboard.Single().RunId); // Still the original mid-redo.
+    h.Service.Finish();
+    h.Service.Record();
+    Assert.Equal(redo.Id, h.Service.GetScoreboard().Leaderboard.Single().RunId);
+    var persisted = h.Store.Load().Runs;
+    Assert.Equal(RunStatus.Superseded, persisted.Single(r => r.Id == original.Id).Status);
+    Assert.Equal(redo.Id, persisted.Single(r => r.Id == original.Id).SupersededByRunId);
+    Assert.True(persisted.Single(r => r.Id == redo.Id).IsCountedOfficial);
+
+    // The flag is ignored for competitors without an official result and for other categories.
+    var newcomer = h.AddCompetitor("Newcomer");
+    var first = h.Service.ArmCompetitor(newcomer.Id, RunCategory.Official, 300, replaceExistingOfficial: true);
+    Assert.Equal(null, first.SupersedesRunId);
+    h.Service.Abort("Cleanup");
+    var exhibition = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Exhibition, 300, replaceExistingOfficial: true);
+    Assert.Equal(null, exhibition.SupersedesRunId);
 }
 
 static void TimedOutRunUndoAndRecordingPersist()

@@ -12,7 +12,8 @@ const {
   connectMaster,
   disconnectMaster,
   armForPhysicalStart,
-  startVirtually
+  startVirtually,
+  findRecordedOfficial
 } = require("../../src/GarageGames.V2/wwwroot/mvp-scorekeeper-master.js");
 
 const armedRun = (durationLimitSeconds) => ({ id: "run-armed", edition: { durationLimitSeconds } });
@@ -50,6 +51,39 @@ test("physical arming posts the selected competitor and category without startin
     method: "POST",
     body: JSON.stringify({ competitorId: "competitor-1", category: "playoff", durationLimitSeconds: 300 })
   }]]);
+});
+
+test("an official redo is detected from counted results and sent only when confirmed", async () => {
+  const official = { id: "run-1", competitorId: "c1", category: "official", editionId: "e1", isRecorded: true, status: "completed" };
+  const snapshot = {
+    editionId: "e1",
+    history: [
+      { ...official, id: "run-old", supersededByRunId: "run-1", status: "superseded" },
+      { ...official, id: "run-other-edition", competitorId: "c2", editionId: "e0" },
+      { ...official, id: "run-unrecorded", competitorId: "c3", isRecorded: false, status: "timedOut" },
+      { ...official, id: "run-exhibition", competitorId: "c4", category: "exhibition" },
+      official
+    ]
+  };
+  assert.equal(findRecordedOfficial(snapshot, "c1")?.id, "run-1");
+  for (const competitorId of ["c2", "c3", "c4", "nobody", ""]) {
+    assert.equal(findRecordedOfficial(snapshot, competitorId), null);
+  }
+  assert.equal(findRecordedOfficial(null, "c1"), null);
+
+  const calls = [];
+  const request = async (...args) => {
+    calls.push(args);
+    return args[0] === "/api/run/arm" ? armedRun(JSON.parse(args[1].body).durationLimitSeconds) : null;
+  };
+  const master = { connected: true, mode: "IDLE" };
+  await armForPhysicalStart(request, { master, currentRun: null, competitorId: "c1", category: "official", replaceExistingOfficial: true });
+  await startVirtually(request, { master, currentRun: null, competitorId: "c1", category: "official", replaceExistingOfficial: true });
+  const armBodies = calls.filter(([path]) => path === "/api/run/arm").map(([, options]) => JSON.parse(options.body));
+  assert.deepEqual(armBodies, [
+    { competitorId: "c1", category: "official", durationLimitSeconds: 300, replaceExistingOfficial: true },
+    { competitorId: "c1", category: "official", durationLimitSeconds: 300, replaceExistingOfficial: true }
+  ]);
 });
 
 test("run length accepts positive M:SS values through 99:59 and formats seconds for display", () => {

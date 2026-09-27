@@ -185,7 +185,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
     }
 
     public async Task<RunRecord> ArmCompetitorAsync(RunService runs, string competitorId, RunCategory category,
-        CancellationToken cancellationToken = default, int? durationLimitSeconds = null)
+        CancellationToken cancellationToken = default, int? durationLimitSeconds = null, bool replaceExistingOfficial = false)
     {
         RunService.ValidateRunDuration(durationLimitSeconds);
         lock (_gate)
@@ -197,7 +197,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         lock (_gate)
         {
             _protocol.EnsureArmAllowed();
-            return runs.ArmCompetitor(competitorId, category, durationLimitSeconds);
+            return runs.ArmCompetitor(competitorId, category, durationLimitSeconds, replaceExistingOfficial);
         }
     }
 

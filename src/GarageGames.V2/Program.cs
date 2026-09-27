@@ -241,7 +241,7 @@ app.MapPost("/api/run/arm", async (StartCompetitorRunRequest request, RunService
 {
     var durationLimitSeconds = RunService.RequireRequestedRunDuration(request.DurationLimitSeconds);
     var run = await master.ArmCompetitorAsync(runs, request.CompetitorId, request.Category,
-        cancellationToken, durationLimitSeconds);
+        cancellationToken, durationLimitSeconds, request.ReplaceExistingOfficial);
     await master.SendCurrentStatusAsync(cancellationToken);
     return Results.Ok(run);
 });

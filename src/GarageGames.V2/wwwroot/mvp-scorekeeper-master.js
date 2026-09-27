@@ -89,7 +89,26 @@
     return request("/api/master/disconnect", { method: "POST" });
   }
 
-  async function armForPhysicalStart(request, { master, currentRun, competitorId, category, durationLimitSeconds = DEFAULT_DURATION_SECONDS }) {
+  // The competitor's counted official result in the current edition, if any. Arming
+  // another official run for them is an official redo that replaces it once recorded.
+  function findRecordedOfficial(snapshot, competitorId) {
+    if (!snapshot || !competitorId) return null;
+    return (snapshot.history || []).find((run) =>
+      run.competitorId === competitorId &&
+      run.category === "official" &&
+      run.editionId === snapshot.editionId &&
+      run.isRecorded &&
+      !run.supersededByRunId &&
+      run.status !== "aborted" && run.status !== "superseded") || null;
+  }
+
+  function armBody(competitorId, category, durationLimitSeconds, replaceExistingOfficial) {
+    return JSON.stringify(replaceExistingOfficial
+      ? { competitorId, category, durationLimitSeconds, replaceExistingOfficial: true }
+      : { competitorId, category, durationLimitSeconds });
+  }
+
+  async function armForPhysicalStart(request, { master, currentRun, competitorId, category, durationLimitSeconds = DEFAULT_DURATION_SECONDS, replaceExistingOfficial = false }) {
     assertStartAllowed(master);
     if (!master?.connected) throw new Error("Connect the physical master before arming a physical Start.");
     const guidance = handshakeGuidance(master);
@@ -99,12 +118,12 @@
     const selectedDuration = validatedDuration(durationLimitSeconds);
     const armed = await request("/api/run/arm", {
       method: "POST",
-      body: JSON.stringify({ competitorId, category, durationLimitSeconds: selectedDuration })
+      body: armBody(competitorId, category, selectedDuration, replaceExistingOfficial)
     });
     return confirmArmedDuration(armed, selectedDuration);
   }
 
-  async function startVirtually(request, { master, currentRun, competitorId, category, durationLimitSeconds = DEFAULT_DURATION_SECONDS }, afterArm = async () => {}) {
+  async function startVirtually(request, { master, currentRun, competitorId, category, durationLimitSeconds = DEFAULT_DURATION_SECONDS, replaceExistingOfficial = false }, afterArm = async () => {}) {
     assertStartAllowed(master);
     if (currentRun?.status === "armed") {
       competitorId = currentRun.competitorId;
@@ -115,7 +134,7 @@
       const selectedDuration = validatedDuration(durationLimitSeconds);
       const armed = await request("/api/run/arm", {
         method: "POST",
-        body: JSON.stringify({ competitorId, category, durationLimitSeconds: selectedDuration })
+        body: armBody(competitorId, category, selectedDuration, replaceExistingOfficial)
       });
       confirmArmedDuration(armed, selectedDuration);
       await afterArm();
@@ -135,6 +154,7 @@
     handshakeGuidance,
     canArmPhysical,
     canStartVirtual,
+    findRecordedOfficial,
     connectMaster,
     disconnectMaster,
     armForPhysicalStart,

@@ -2069,8 +2069,9 @@
     state.busy = true;
     updateControls();
     try {
-      await action();
-      if (successMessage) showAlert(successMessage, "success");
+      // An action returns false when the operator cancelled it at a confirmation.
+      const result = await action();
+      if (successMessage && result !== false) showAlert(successMessage, "success");
     } catch (error) {
       showAlert(error.message || "The action could not be completed.");
     } finally {
@@ -2097,14 +2098,31 @@
     }
   }
 
+  // Returns null when no redo is involved, true to arm an official redo, or false if
+  // the operator declined to replace the competitor's recorded official result.
+  function confirmOfficialRedo(competitorId, category) {
+    if (category !== "official") return null;
+    const existing = masterActions.findRecordedOfficial(state.snapshot, competitorId);
+    if (!existing) return null;
+    const points = (state.snapshot?.leaderboard || []).find((row) => row.runId === existing.id)?.points;
+    const name = competitorName(competitorId);
+    return window.confirm(
+      `${name} already has an official result${points == null ? "" : ` (${points} pts)`}. Start an official redo?\n\n` +
+      "The redo replaces that result when it is recorded, even if it scores lower. If the redo is discarded, the original result stays."
+    );
+  }
+
   async function startRun() {
     const current = state.snapshot?.currentRun;
+    const redo = current?.status === "armed" ? null : confirmOfficialRedo(ui.competitor.value, ui.category.value);
+    if (redo === false) return false;
     const started = await masterActions.startVirtually(request, {
       master: state.master,
       currentRun: current,
       competitorId: ui.competitor.value,
       category: ui.category.value,
-      durationLimitSeconds: selectedRunDurationSeconds()
+      durationLimitSeconds: selectedRunDurationSeconds(),
+      replaceExistingOfficial: redo === true
     }, () => loadSnapshot(true));
     state.discardedRunNotice = null;
     if (started.run) countdownCoordinator.observe(started.run);
@@ -2113,6 +2131,8 @@
   }
 
   async function armPhysicalRun() {
+    const redo = confirmOfficialRedo(ui.competitor.value, ui.category.value);
+    if (redo === false) return false;
     state.armScanRequestVersion += 1;
     state.armScanPending = true;
     state.armScanAfterSnapshotRequestId = null;
@@ -2126,7 +2146,8 @@
         currentRun: state.snapshot?.currentRun || null,
         competitorId: ui.competitor.value,
         category: ui.category.value,
-        durationLimitSeconds: selectedRunDurationSeconds()
+        durationLimitSeconds: selectedRunDurationSeconds(),
+        replaceExistingOfficial: redo === true
       });
       state.discardedRunNotice = null;
     } finally {
