@@ -56,6 +56,7 @@ public sealed class EventEditRequest
 public sealed class RunService
 {
     public const int MaximumRunDurationSeconds = 5_999;
+    public const long MaximumPhysicalPressAgeMilliseconds = 10_000;
 
     public const string DatabaseClearConfirmationPhrase = "CLEAR ALL DATA";
 
@@ -65,9 +66,14 @@ public sealed class RunService
     private readonly IMonotonicClock _clock;
     private readonly StoreSnapshot _data;
     private RunRecord? _current;
+    // Always the same instance held in _data.Runs (never a clone), so commands on
+    // the displayed run update history and persistence together.
     private RunRecord? _lastDisplayedRun;
     private long _clockAnchorMilliseconds;
     private long _countdownAnchorMilliseconds;
+    // Active elapsed time when the current run last became Active; aged physical
+    // presses are never back-dated into a pause or before the run started.
+    private long _activeSegmentStartElapsedMs;
 
     public RunService(RunStore store, EditionDefinition edition, IMonotonicClock clock)
     {
@@ -99,7 +105,7 @@ public sealed class RunService
             _data.Messages.Add(recovery);
         }
 
-        _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+        RestartClockAnchor();
         _countdownAnchorMilliseconds = _clock.MonotonicMilliseconds;
         UpdateDeviceLeds();
     }
@@ -272,7 +278,7 @@ public sealed class RunService
             _data.ShowExhibitionsOnLeaderboard = false;
             _current = null;
             _lastDisplayedRun = null;
-            _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+            RestartClockAnchor();
             UpdateDeviceLeds();
 
             return backupPath;
@@ -283,7 +289,7 @@ public sealed class RunService
     {
         lock (_gate)
         {
-            RefreshActiveClock();
+            RefreshActiveClock(persist: true);
         }
     }
 
@@ -333,7 +339,7 @@ public sealed class RunService
             };
 
             var updated = isCurrent ? EditCurrentRun(request) : EditHistoricalRun(runId, request);
-            if (reopenRun) _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+            if (reopenRun) RestartClockAnchor();
             UpdateDeviceLeds();
             return Clone(updated);
         }
@@ -426,7 +432,7 @@ public sealed class RunService
                 throw;
             }
             _data.Edits.Add(edit);
-            if (reopenRun) _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+            if (reopenRun) RestartClockAnchor();
             UpdateDeviceLeds();
             return Clone(candidate);
         }
@@ -992,20 +998,14 @@ public sealed class RunService
                 ? existingOfficial
                 : _data.Runs.SingleOrDefault(r => r.Id == queueItem.ReplacementOfRunId)
                     ?? throw new CommandException("The run selected for restart no longer exists.");
-            if (replacementSource is not null)
-            {
-                replacementSource.Status = RunStatus.Superseded;
-                replacementSource.SupersededByRunId = run.Id;
-                replacementSource.Revision++;
-                run.SupersedesRunId = replacementSource.Id;
-            }
+            // Link the lineage now; the source is superseded only when this run is recorded.
+            run.SupersedesRunId = replacementSource?.Id;
 
             _data.Queue.Remove(queueItem);
             NormalizeQueue();
-            var runs = replacementSource is null ? new[] { run } : new[] { replacementSource, run };
             try
             {
-                _store.SaveRunsAndQueue(runs, _data.Queue, selectedCompetitorId: null, selectedRunCategory: null);
+                _store.SaveRunsAndQueue([run], _data.Queue, selectedCompetitorId: null, selectedRunCategory: null);
             }
             catch
             {
@@ -1027,6 +1027,7 @@ public sealed class RunService
         lock (_gate)
         {
             var run = _current ?? throw new CommandException("Arm a queued competitor before starting the master.");
+            using var payload = JsonDocument.Parse("{}");
             var result = Receive(new InputEnvelope
             {
                 MessageId = NewId("message"),
@@ -1035,7 +1036,7 @@ public sealed class RunService
                 DeviceId = "master",
                 Type = "master-start",
                 ElapsedMilliseconds = 0,
-                Payload = JsonDocument.Parse("{}").RootElement
+                Payload = payload.RootElement.Clone()
             });
             if (result.Disposition != MessageDisposition.Accepted || result.Run is null)
             {
@@ -1069,7 +1070,7 @@ public sealed class RunService
             run.Status = RunStatus.Active;
             run.StartedAt = _clock.UtcNow;
             run.Revision++;
-            _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+            RestartClockAnchor();
             UpdateDeviceLeds();
             try
             {
@@ -1152,7 +1153,9 @@ public sealed class RunService
                 .FirstOrDefault();
             var run = _current;
             var messageRun = tokenRun ?? run;
-            var elapsed = messageRun?.ActiveElapsedMs ?? 0;
+            var elapsed = messageRun is not null && ReferenceEquals(messageRun, run) && run.Status == RunStatus.Active
+                ? PhysicalPressElapsed(run, press)
+                : messageRun?.ActiveElapsedMs ?? 0;
             var envelope = new InputEnvelope
             {
                 MessageId = messageId,
@@ -1213,15 +1216,45 @@ public sealed class RunService
 
             var device = _data.Devices.SingleOrDefault(deviceItem =>
                 string.Equals(deviceItem.DeviceId, press.DeviceId, StringComparison.OrdinalIgnoreCase));
-            if (device?.Availability != DeviceAvailability.Online)
+            if (device is null)
             {
-                return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.Offline,
-                    "Physical spoke MAC is not confirmed online by the most recent device scan.", payloadJson), run, press.DeviceId);
+                return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.UnknownStation,
+                    "Physical spoke MAC has no device record.", payloadJson), run, press.DeviceId);
+            }
+            if (device.Availability != DeviceAvailability.Online)
+            {
+                // A handshake-valid press from the MAC assigned to this event proves the
+                // spoke is alive, even if it was asleep or out of range during the arm-time scan.
+                device.Availability = DeviceAvailability.Online;
+                device.LastSeenAt = _clock.UtcNow;
+                device.LastError = null;
+                try
+                {
+                    _store.SetDevice(device);
+                }
+                catch
+                {
+                    ReloadInMemoryAfterPersistenceFailure();
+                    throw;
+                }
+                UpdateDeviceLeds();
             }
 
             var received = ReceiveCore(envelope, trustedVirtual: false);
             return PhysicalPressResult(received, run, press.DeviceId);
         }
+    }
+
+    // Time the press when the button was pushed, not when the laptop received it, so
+    // radio retries and relay latency are not charged to the competitor. Bounded so a
+    // press is never placed before the current active stretch or its event's last signal.
+    private long PhysicalPressElapsed(RunRecord run, MasterPhysicalPress press)
+    {
+        var age = Math.Min((long)press.AgeMilliseconds, MaximumPhysicalPressAgeMilliseconds);
+        var elapsed = Math.Max(run.ActiveElapsedMs - age, _activeSegmentStartElapsedMs);
+        var lastSignal = run.Events.SingleOrDefault(eventItem =>
+            string.Equals(eventItem.DeviceId, press.DeviceId, StringComparison.OrdinalIgnoreCase))?.LastSignalElapsedMs;
+        return Math.Max(elapsed, lastSignal ?? 0);
     }
 
     private static MasterPhysicalPressResult PhysicalPressResult(InputResult result, RunRecord? run, string deviceId)
@@ -1257,7 +1290,7 @@ public sealed class RunService
             run.PausedFromPhase = run.Phase.ToString();
             run.Status = RunStatus.Paused;
             run.Revision++;
-            _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+            RestartClockAnchor();
             UpdateDeviceLeds();
             try
             {
@@ -1295,7 +1328,7 @@ public sealed class RunService
             run.PausedFromPhase = null;
             run.Status = RunStatus.Active;
             run.Revision++;
-            _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+            RestartClockAnchor();
             UpdateDeviceLeds();
             try
             {
@@ -1333,7 +1366,7 @@ public sealed class RunService
             MarkFinishedUnrecorded(run);
             run.FinishedAt = _clock.UtcNow;
             run.Revision++;
-            _lastDisplayedRun = Clone(run);
+            _lastDisplayedRun = run;
             try
             {
                 _store.SaveRuns([run]);
@@ -1420,6 +1453,26 @@ public sealed class RunService
             return Clone(run);
         }
 
+        // A replacement displaces its source only once it is recorded, so discarding
+        // the retry leaves the original result standing. A non-official retry never
+        // displaces a counted official result.
+        var replacedSource = run.SupersedesRunId is null
+            ? null
+            : _data.Runs.SingleOrDefault(item => item.Id == run.SupersedesRunId && item.SupersededByRunId is null &&
+                item.Status != RunStatus.Superseded);
+        if (replacedSource is not null && replacedSource.IsCountedOfficial && run.Category != RunCategory.Official)
+        {
+            replacedSource = null;
+        }
+        if (run.Category == RunCategory.Official)
+        {
+            var existingOfficial = FindAcceptedOfficial(run.CompetitorId, run.EditionId);
+            if (existingOfficial is not null && existingOfficial.Id != run.Id && existingOfficial.Id != replacedSource?.Id)
+            {
+                throw new CommandException("This competitor already has a recorded official result. Change this run to Playoff or Exhibition, or restart the official run to replace it.");
+            }
+        }
+
         if (complete)
         {
             run.Status = RunStatus.Completed;
@@ -1427,17 +1480,29 @@ public sealed class RunService
         run.RecordedAt = _clock.UtcNow;
         run.FinishedAt ??= _clock.UtcNow;
         run.Revision++;
+        if (replacedSource is not null)
+        {
+            replacedSource.Status = RunStatus.Superseded;
+            replacedSource.SupersededByRunId = run.Id;
+            replacedSource.Revision++;
+        }
 
-        var promoted = _data.Queue.OrderBy(item => item.Position).FirstOrDefault();
+        // Only recording the run on screen advances the on-deck queue; recording an
+        // older run from history must not consume the next competitor.
+        var promotesQueue = _current?.Id == run.Id || (_current is null && _lastDisplayedRun?.Id == run.Id);
+        var promoted = promotesQueue ? _data.Queue.OrderBy(item => item.Position).FirstOrDefault() : null;
         if (promoted is not null)
         {
             _data.Queue.Remove(promoted);
             NormalizeQueue();
         }
+        var selectedCompetitorId = promotesQueue ? promoted?.CompetitorId : _data.SelectedCompetitorId;
+        var selectedRunCategory = promotesQueue ? promoted?.Category : _data.SelectedRunCategory;
+        var runsToSave = replacedSource is null ? new[] { run } : new[] { replacedSource, run };
 
         try
         {
-            _store.SaveRunsAndQueue([run], _data.Queue, promoted?.CompetitorId, promoted?.Category);
+            _store.SaveRunsAndQueue(runsToSave, _data.Queue, selectedCompetitorId, selectedRunCategory);
         }
         catch
         {
@@ -1445,11 +1510,11 @@ public sealed class RunService
             throw;
         }
 
-        _data.SelectedCompetitorId = promoted?.CompetitorId;
-        _data.SelectedRunCategory = promoted?.Category;
+        _data.SelectedCompetitorId = selectedCompetitorId;
+        _data.SelectedRunCategory = selectedRunCategory;
         if (_lastDisplayedRun?.Id == run.Id || _lastDisplayedRun is null)
         {
-            _lastDisplayedRun = Clone(run);
+            _lastDisplayedRun = run;
         }
         if (_current?.Id == run.Id)
         {
@@ -1471,7 +1536,7 @@ public sealed class RunService
             run.FinishedAt = _clock.UtcNow;
             RecomputeScores(run);
             run.Revision++;
-            _lastDisplayedRun = Clone(run);
+            _lastDisplayedRun = run;
             UpdateDeviceLeds();
             try
             {
@@ -1684,6 +1749,10 @@ public sealed class RunService
                 ExtendStoppedCorrectionTimeline(candidate, request);
             }
             ValidateHistoricalCandidate(candidate);
+            if (candidate.Status == RunStatus.Completed)
+            {
+                candidate.RecordedAt ??= _clock.UtcNow;
+            }
             HandleOfficialConflict(run, candidate, request.ReplaceExistingOfficial, out var replaced);
 
             var before = Serialize(run);
@@ -1734,6 +1803,7 @@ public sealed class RunService
                 ExtendStoppedCorrectionTimeline(candidate, request);
             }
             ValidateLiveCandidate(candidate);
+            ApplyLiveStatusTransition(run, candidate);
             HandleOfficialConflict(run, candidate, request.ReplaceExistingOfficial, out var replaced);
 
             var before = Serialize(run);
@@ -1760,6 +1830,7 @@ public sealed class RunService
             }
 
             _data.Edits.Add(edit);
+            if (run.Status != RunStatus.Active && candidate.Status == RunStatus.Active) RestartClockAnchor();
             return Clone(candidate);
         }
     }
@@ -1798,6 +1869,7 @@ public sealed class RunService
                 ? before.ActiveElapsedMs
                 : run.ActiveElapsedMs;
             ValidateLiveCandidate(candidate);
+            ApplyLiveStatusTransition(run, candidate);
             candidate.LastAcceptedInputElapsedMs = run.LastAcceptedInputElapsedMs;
             candidate.SupersedesRunId = run.SupersedesRunId;
             candidate.SupersededByRunId = run.SupersededByRunId;
@@ -1823,6 +1895,7 @@ public sealed class RunService
                 throw;
             }
             _data.Edits.Add(undo);
+            if (run.Status != RunStatus.Active && candidate.Status == RunStatus.Active) RestartClockAnchor();
             return Clone(candidate);
         }
     }
@@ -2077,7 +2150,9 @@ public sealed class RunService
         return new InputResult(disposition, reason, _current is null ? null : Clone(_current));
     }
 
-    private void RefreshActiveClock()
+    // Reads advance the in-memory clock only; the checkpoint service and state-changing
+    // commands persist it, so polling never turns into a synchronous disk write.
+    private void RefreshActiveClock(bool persist = false)
     {
         if (_current is null || _current.Status != RunStatus.Active)
         {
@@ -2086,7 +2161,7 @@ public sealed class RunService
 
         var now = _clock.MonotonicMilliseconds;
         var delta = Math.Max(0, now - _clockAnchorMilliseconds);
-        if (delta == 0)
+        if (delta == 0 && !persist)
         {
             return;
         }
@@ -2097,7 +2172,7 @@ public sealed class RunService
         {
             TimeoutCurrent();
         }
-        else
+        else if (persist)
         {
             try
             {
@@ -2109,6 +2184,12 @@ public sealed class RunService
                 throw;
             }
         }
+    }
+
+    private void RestartClockAnchor()
+    {
+        _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+        _activeSegmentStartElapsedMs = _current?.ActiveElapsedMs ?? 0;
     }
 
     private void TimeoutCurrent()
@@ -2133,7 +2214,7 @@ public sealed class RunService
             ReloadInMemoryAfterPersistenceFailure();
             throw;
         }
-        _lastDisplayedRun = Clone(_current);
+        _lastDisplayedRun = _current;
         _current = null;
     }
 
@@ -2157,10 +2238,7 @@ public sealed class RunService
 
         if (request.DurationLimitSeconds is int durationLimit)
         {
-            if (durationLimit <= 0)
-            {
-                throw new CommandException("Duration limit must be positive.");
-            }
+            ValidateRunDuration(durationLimit);
             candidate.Edition.DurationLimitSeconds = durationLimit;
         }
 
@@ -2253,9 +2331,10 @@ public sealed class RunService
 
     private void ValidateHistoricalCandidate(RunRecord candidate)
     {
-        if (candidate.Status is RunStatus.Active or RunStatus.Armed or RunStatus.Paused)
+        // Any unfinished status would make startup find a second current run and refuse to boot.
+        if (candidate.Status is RunStatus.Active or RunStatus.Armed or RunStatus.Paused or RunStatus.Countdown or RunStatus.Finished)
         {
-            throw new CommandException("Historical edits cannot create a live or armed run.");
+            throw new CommandException("Historical edits cannot make a run live, armed, counting down, or awaiting recording.");
         }
         if (candidate.ActiveElapsedMs < 0 || candidate.ActiveElapsedMs > candidate.Edition.DurationLimitSeconds * 1000L)
         {
@@ -2367,6 +2446,24 @@ public sealed class RunService
         }
     }
 
+    // Status changes through a correction must not skip the countdown, and entering
+    // Paused needs its resume phase. Entering Active restarts the clock anchor after save.
+    private static void ApplyLiveStatusTransition(RunRecord original, RunRecord candidate)
+    {
+        if ((original.Status == RunStatus.Armed) != (candidate.Status == RunStatus.Armed))
+        {
+            throw new CommandException("A correction cannot arm a run or skip its countdown; use Start or Discard instead.");
+        }
+        if (candidate.Status == RunStatus.Paused && original.Status != RunStatus.Paused)
+        {
+            candidate.PausedFromPhase = candidate.Phase.ToString();
+        }
+        else if (candidate.Status != RunStatus.Paused)
+        {
+            candidate.PausedFromPhase = null;
+        }
+    }
+
     private static bool MatchesLiveUndoSnapshot(RunRecord current, RunRecord after)
     {
         var currentComparable = Clone(current);
@@ -2412,6 +2509,12 @@ public sealed class RunService
         }
 
         replaced = FindAcceptedOfficial(candidate.CompetitorId, candidate.EditionId);
+        if (replaced is not null && replaced.Id == candidate.SupersedesRunId && !candidate.IsRecorded)
+        {
+            // An unrecorded replacement displaces its source when it is recorded.
+            replaced = null;
+            return;
+        }
         if (replaced is not null && replaced.Id != original.Id && !replaceExisting)
         {
             throw new CommandException("This correction would create two accepted official runs; explicitly replace the existing result first.");
@@ -2474,7 +2577,7 @@ public sealed class RunService
         _data.DeviceScanCheckedAt = fresh.DeviceScanCheckedAt;
         _current = _data.Runs.SingleOrDefault(r => r.Status is RunStatus.Armed or RunStatus.Countdown or RunStatus.Active or RunStatus.Paused or RunStatus.Finished);
         _lastDisplayedRun = _current ?? _data.Runs.OrderByDescending(r => r.CreatedAt).FirstOrDefault();
-        _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+        RestartClockAnchor();
     }
 
     private RunRecord CreateRun(QueueItemRecord queueItem, bool manualOfflineOverride, int? durationLimitSeconds = null)

@@ -22,7 +22,7 @@ public sealed class StoreSnapshot
 
 public sealed class RunStore : IDisposable
 {
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
     private readonly string _connectionString;
     private FileStream? _lifetimeLock;
     private bool _disposed;
@@ -234,7 +234,7 @@ public sealed class RunStore : IDisposable
                        bonus_started_elapsed_ms, bonus_result_json, bonus_points_override,
                        created_at, started_at, finished_at,
                        supersedes_run_id, superseded_by_run_id, paused_from_phase,
-                       notes, revision, edition_snapshot_json
+                       notes, revision, edition_snapshot_json, recorded_at
                 FROM runs ORDER BY created_at, id
                 """;
             using var reader = command.ExecuteReader();
@@ -263,6 +263,7 @@ public sealed class RunStore : IDisposable
                     Notes = reader.IsDBNull(18) ? null : reader.GetString(18),
                     Revision = reader.GetInt32(19),
                     Edition = Deserialize<EditionSnapshot>(reader.GetString(20), "edition snapshot"),
+                    RecordedAt = reader.IsDBNull(21) ? null : ParseDate(reader.GetString(21)),
                     Events = []
                 };
                 snapshot.Runs.Add(run);
@@ -657,12 +658,12 @@ public sealed class RunStore : IDisposable
                 bonus_started_elapsed_ms, bonus_result_json, bonus_points_override,
                 created_at, started_at, finished_at,
                 supersedes_run_id, superseded_by_run_id, paused_from_phase, notes,
-                revision, edition_snapshot_json)
+                revision, edition_snapshot_json, recorded_at)
             VALUES($id, $competitor_id, $edition_id, $category, $status, $phase,
                 $manual_override, $active_elapsed, $last_input, $bonus_started,
                 $bonus_result, $bonus_points_override,
                 $created_at, $started_at, $finished_at, $supersedes, $superseded_by,
-                $paused_from, $notes, $revision, $edition)
+                $paused_from, $notes, $revision, $edition, $recorded_at)
             ON CONFLICT(id) DO UPDATE SET
                 competitor_id = excluded.competitor_id,
                 edition_id = excluded.edition_id,
@@ -683,7 +684,8 @@ public sealed class RunStore : IDisposable
                 paused_from_phase = excluded.paused_from_phase,
                 notes = excluded.notes,
                 revision = excluded.revision,
-                edition_snapshot_json = excluded.edition_snapshot_json
+                edition_snapshot_json = excluded.edition_snapshot_json,
+                recorded_at = excluded.recorded_at
             """;
         AddRunParameters(command, run);
         command.ExecuteNonQuery();
@@ -829,11 +831,12 @@ public sealed class RunStore : IDisposable
             return;
         }
 
+        int version;
         using (var command = connection.CreateCommand())
         {
             command.CommandText = "SELECT value FROM meta WHERE key = 'schema_version'";
             var versionValue = command.ExecuteScalar() as string;
-            if (!int.TryParse(versionValue, CultureInfo.InvariantCulture, out var version) || version != SchemaVersion)
+            if (!int.TryParse(versionValue, CultureInfo.InvariantCulture, out version) || version is < 1 or > SchemaVersion)
             {
                 throw new InvalidDataException($"Unsupported Garage Games v2 database schema version '{versionValue ?? "missing"}'. The database was not changed.");
             }
@@ -859,6 +862,44 @@ public sealed class RunStore : IDisposable
                 throw new InvalidDataException("Garage Games v2 database integrity check failed. The database was not reset.");
             }
         }
+
+        if (version == 1)
+        {
+            MigrateFromVersion1(connection);
+        }
+    }
+
+    // Version 2 persists RecordedAt; before it, recorded timed-out runs reverted to
+    // unrecorded on restart. Completed runs imply recording and are backfilled.
+    // Timed-out runs recorded under version 1 were never saved as recorded and must be
+    // re-recorded by the operator.
+    private void MigrateFromVersion1(SqliteConnection connection)
+    {
+        var backupDirectory = Path.Combine(DataDirectory, "backups");
+        Directory.CreateDirectory(backupDirectory);
+        var backupPath = Path.Combine(backupDirectory,
+            $"garage-games-v2-pre-schema-2-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmssfff}-{Guid.NewGuid():N}.db");
+        using (var backup = connection.CreateCommand())
+        {
+            backup.CommandText = "VACUUM INTO $path";
+            backup.Parameters.AddWithValue("$path", backupPath);
+            backup.ExecuteNonQuery();
+        }
+
+        using var transaction = connection.BeginTransaction();
+        foreach (var statement in new[]
+        {
+            "ALTER TABLE runs ADD COLUMN recorded_at TEXT NULL",
+            "UPDATE runs SET recorded_at = COALESCE(finished_at, created_at) WHERE status = 'Completed'",
+            "UPDATE meta SET value = '2' WHERE key = 'schema_version'"
+        })
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = statement;
+            command.ExecuteNonQuery();
+        }
+        transaction.Commit();
     }
 
     private static void CreateSchema(SqliteConnection connection, SqliteTransaction transaction)
@@ -866,11 +907,11 @@ public sealed class RunStore : IDisposable
         var statements = new[]
         {
             "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-            "INSERT INTO meta(key, value) VALUES('schema_version', '1')",
+            "INSERT INTO meta(key, value) VALUES('schema_version', '2')",
             "CREATE TABLE competitors(id TEXT PRIMARY KEY, name TEXT NOT NULL, edition_id TEXT NOT NULL, created_at TEXT NOT NULL)",
             "CREATE TABLE queue_items(id TEXT PRIMARY KEY, competitor_id TEXT NOT NULL REFERENCES competitors(id), category TEXT NOT NULL, replace_existing_official INTEGER NOT NULL, replacement_of_run_id TEXT NULL REFERENCES runs(id), reason TEXT NULL, position INTEGER NOT NULL)",
             "CREATE TABLE devices(device_id TEXT PRIMARY KEY, event_id TEXT NOT NULL, availability TEXT NOT NULL, last_seen_at TEXT NULL, led TEXT NOT NULL, last_error TEXT NULL)",
-            "CREATE TABLE runs(id TEXT PRIMARY KEY, competitor_id TEXT NOT NULL REFERENCES competitors(id), edition_id TEXT NOT NULL, category TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, manual_offline_override INTEGER NOT NULL, active_elapsed_ms INTEGER NOT NULL, last_input_elapsed_ms INTEGER NOT NULL, bonus_started_elapsed_ms INTEGER NULL, bonus_result_json TEXT NULL, bonus_points_override INTEGER NULL, created_at TEXT NOT NULL, started_at TEXT NULL, finished_at TEXT NULL, supersedes_run_id TEXT NULL REFERENCES runs(id), superseded_by_run_id TEXT NULL REFERENCES runs(id), paused_from_phase TEXT NULL, notes TEXT NULL, revision INTEGER NOT NULL, edition_snapshot_json TEXT NOT NULL)",
+            "CREATE TABLE runs(id TEXT PRIMARY KEY, competitor_id TEXT NOT NULL REFERENCES competitors(id), edition_id TEXT NOT NULL, category TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, manual_offline_override INTEGER NOT NULL, active_elapsed_ms INTEGER NOT NULL, last_input_elapsed_ms INTEGER NOT NULL, bonus_started_elapsed_ms INTEGER NULL, bonus_result_json TEXT NULL, bonus_points_override INTEGER NULL, created_at TEXT NOT NULL, started_at TEXT NULL, finished_at TEXT NULL, supersedes_run_id TEXT NULL REFERENCES runs(id), superseded_by_run_id TEXT NULL REFERENCES runs(id), paused_from_phase TEXT NULL, notes TEXT NULL, revision INTEGER NOT NULL, edition_snapshot_json TEXT NOT NULL, recorded_at TEXT NULL)",
             "CREATE TABLE run_events(run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, event_id TEXT NOT NULL, event_order INTEGER NOT NULL, name TEXT NOT NULL, device_id TEXT NOT NULL, type TEXT NOT NULL, prompt TEXT NULL, status TEXT NOT NULL, start_elapsed_ms INTEGER NULL, finish_elapsed_ms INTEGER NULL, score INTEGER NOT NULL, score_override INTEGER NULL, measurement_json TEXT NULL, notes TEXT NULL, last_signal_elapsed_ms INTEGER NULL, PRIMARY KEY(run_id, event_id))",
             "CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL, run_id TEXT NULL, session_id TEXT NULL, device_id TEXT NOT NULL, type TEXT NOT NULL, elapsed_ms INTEGER NOT NULL, payload_json TEXT NULL, disposition TEXT NOT NULL, reason TEXT NULL, received_at TEXT NOT NULL)",
             "CREATE TABLE edits(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id), created_at TEXT NOT NULL, reason TEXT NOT NULL, before_json TEXT NOT NULL, after_json TEXT NOT NULL, undone_edit_id INTEGER NULL REFERENCES edits(id))",
@@ -925,6 +966,7 @@ public sealed class RunStore : IDisposable
         command.Parameters.AddWithValue("$notes", ValueOrNull(run.Notes));
         command.Parameters.AddWithValue("$revision", run.Revision);
         command.Parameters.AddWithValue("$edition", JsonSerializer.Serialize(run.Edition, JsonDefaults.Options));
+        command.Parameters.AddWithValue("$recorded_at", ValueOrNull(run.RecordedAt is null ? null : FormatDate(run.RecordedAt.Value)));
     }
 
     private static object ValueOrNull(object? value) => value ?? DBNull.Value;

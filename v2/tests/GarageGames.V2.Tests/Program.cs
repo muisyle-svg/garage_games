@@ -47,6 +47,13 @@ var tests = new (string Name, Action Run)[]
     ("trusted virtual presses work with unverified hardware while station packets stay guarded", VirtualPressReadinessFallback),
     ("bonus records signals without automatic points", BonusSignal),
     ("restart lineage and one official result", RestartAndOfficialRule),
+    ("timed-out runs can be undone and their recording survives restart", TimedOutRunUndoAndRecordingPersist),
+    ("recording an older run from history keeps the on-deck queue", HistoricalRecordKeepsOnDeckQueue),
+    ("discarding a replacement attempt keeps the original official result", DiscardedReplacementKeepsOriginalOfficial),
+    ("a second official result cannot be recorded from history", SecondOfficialCannotBeRecordedFromHistory),
+    ("corrections cannot create unfinished history or count paused time", CorrectionsCannotCorruptRunLifecycle),
+    ("physical press age back-dates presses within the current active stretch", PhysicalPressAgeBackdatesWithinActiveTime),
+    ("schema version 1 databases upgrade once after a backup", SchemaVersion1UpgradesWithBackup),
     ("category exclusion and shared tie rank", CategoryAndTieRank),
     ("leaderboard preference persists and playoffs precede official and exhibition rows", LeaderboardPreferenceAndCategories),
     ("persistent recovery and exclusive data lock", RecoveryAndLock),
@@ -483,6 +490,15 @@ static void PhysicalSpokeProtocolAndSession()
         "GG1 PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 0", out _));
     Assert.True(!MasterProtocolCodec.TryParsePhysicalPress(
         "GG1 PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 4294967296", out _));
+    Assert.Equal(0u, press.AgeMilliseconds);
+    Assert.True(MasterProtocolCodec.TryParsePhysicalPress(
+        "GG1 PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 42 850", out var agedPress));
+    Assert.Equal(850u, agedPress.AgeMilliseconds);
+    Assert.Equal(42u, agedPress.Sequence);
+    Assert.True(!MasterProtocolCodec.TryParsePhysicalPress(
+        "GG1 PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 42 -5", out _));
+    Assert.True(!MasterProtocolCodec.TryParsePhysicalPress(
+        "GG1 PRESS boot-A_1 0011223344556677 AABBCCDDEEFF 42 850 1", out _));
 
     var protocol = new MasterProtocolState();
     var allowedValues = new List<bool>();
@@ -548,19 +564,22 @@ static void PhysicalSpokeDedupesAndMixesWithVirtual()
     protocol.ProcessLine($"GG1 PRESS boot-first FFFFFFFFFFFFFFFF {firstMac} 2", ReceiveStart, ReceivePress);
     Assert.Equal(MessageDisposition.WrongRun, received!.Disposition);
     h.Service.RecordDeviceScan(true, true, [secondMac]);
+    Assert.Equal(DeviceAvailability.Offline,
+        h.Service.GetOperatorSnapshot().Devices.Single(d => d.DeviceId == firstMac).Availability);
+    // A press from the MAC assigned to this event proves the spoke is alive even though it
+    // missed the latest scan, so it is accepted and the spoke is marked online.
     protocol.ProcessLine($"GG1 PRESS boot-first {runToken} {firstMac} 3", ReceiveStart, ReceivePress);
-    Assert.Equal(MessageDisposition.Offline, received!.Disposition);
-    h.Service.RecordDeviceScan(true, true, [firstMac, secondMac]);
-    protocol.ProcessLine($"GG1 PRESS boot-first {runToken} {firstMac} 4", ReceiveStart, ReceivePress);
     Assert.Equal(MessageDisposition.Accepted, received!.Disposition);
     Assert.Equal("ACTIVE", received.State);
+    Assert.Equal(DeviceAvailability.Online,
+        h.Service.GetOperatorSnapshot().Devices.Single(d => d.DeviceId == firstMac).Availability);
     Assert.Equal<long?>(0L, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == firstMac).StartElapsedMs);
 
     h.Clock.Advance(TimeSpan.FromMilliseconds(1_300));
     protocol.Reset();
     protocol.ProcessLine("GG1 HELLO boot-after-restart", ReceiveStart, ReceivePress);
     protocol.ProcessLine("GG1 MODE IDLE", ReceiveStart, ReceivePress);
-    protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 4", ReceiveStart, ReceivePress);
+    protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 3", ReceiveStart, ReceivePress);
     Assert.Equal(MessageDisposition.Duplicate, received!.Disposition);
     Assert.Equal("ACTIVE", received.State); // The retransmission did not finish the event.
     Assert.Equal<long?>(null, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == firstMac).FinishElapsedMs);
@@ -584,7 +603,7 @@ static void PhysicalSpokeDedupesAndMixesWithVirtual()
     Assert.Equal<long?>(2_000L, finished.Events.Single(e => e.DeviceId == firstMac).FinishElapsedMs);
     Assert.Equal("FINISHED", h.Service.GetGarageStatus().State);
     Assert.Equal(runToken, h.Service.GetGarageStatus().Token);
-    protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 4", ReceiveStart, ReceivePress);
+    protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 3", ReceiveStart, ReceivePress);
     Assert.Equal(MessageDisposition.Duplicate, received!.Disposition);
     Assert.Equal("COMPLETED", received.State);
 }
@@ -1773,15 +1792,224 @@ static void RestartAndOfficialRule()
     var restartQueue = h.Service.Restart(first.Id);
     var replacement = h.Service.Arm(restartQueue.Id);
     Assert.Equal(first.Id, replacement.SupersedesRunId);
+    // The original result stands until the replacement is actually recorded.
     var history = h.Service.GetOperatorSnapshot().History;
-    Assert.Equal(RunStatus.Superseded, history.Single(r => r.Id == first.Id).Status);
-    Assert.Equal(0, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+    Assert.Equal(RunStatus.Completed, history.Single(r => r.Id == first.Id).Status);
+    Assert.Equal(first.Id, h.Service.GetOperatorSnapshot().Leaderboard.Single().RunId);
 
     h.Service.Finish();
     h.Service.Record();
-    Assert.Equal(1, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+    Assert.Equal(RunStatus.Superseded, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == first.Id).Status);
+    Assert.Equal(replacement.Id, h.Service.GetOperatorSnapshot().Leaderboard.Single().RunId);
+    Assert.Equal(RunStatus.Superseded, h.Store.Load().Runs.Single(r => r.Id == first.Id).Status);
     var secondOfficial = h.Service.AddToQueue(h.CompetitorId, RunCategory.Official);
     Assert.Throws<CommandException>(() => h.Service.Arm(secondOfficial.Id));
+}
+
+static void TimedOutRunUndoAndRecordingPersist()
+{
+    var path = NewPath();
+    var edition = MakeMvpEdition(durationSeconds: 2);
+    var clock = new TestClock();
+    var store = new RunStore(path);
+    var service = new RunService(store, edition, clock);
+    var competitor = service.AddCompetitor("Timed-out competitor");
+    var run = service.ArmCompetitor(competitor.Id, RunCategory.Official, 2);
+    service.CompleteCountdown(service.StartMaster().Id);
+    service.PressEvent(run.Id, "event-01");
+    clock.Advance(TimeSpan.FromMilliseconds(500));
+    service.PressEvent(run.Id, "event-01");
+    clock.Advance(TimeSpan.FromSeconds(2));
+    Assert.Equal(RunStatus.TimedOut, service.GetOperatorSnapshot().CurrentRun!.Status);
+
+    // The displayed timed-out run used to be a detached copy, so undo threw.
+    var undone = service.UndoLastEventPress();
+    Assert.Equal(EventStatus.Active, undone.Events.Single(e => e.EventId == "event-01").Status);
+    Assert.Equal(EventStatus.Active,
+        service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).Events.Single(e => e.EventId == "event-01").Status);
+
+    Assert.True(service.Record().IsRecorded);
+    Assert.True(service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).IsRecorded);
+    Assert.Equal(run.Id, service.GetScoreboard().Leaderboard.Single().RunId);
+    store.Dispose();
+
+    // RecordedAt used to live only in memory, so the result vanished on restart.
+    var reopenedStore = new RunStore(path);
+    var reopened = new RunService(reopenedStore, edition, new TestClock());
+    Assert.True(reopened.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).IsRecorded);
+    Assert.Equal(run.Id, reopened.GetScoreboard().Leaderboard.Single().RunId);
+    reopenedStore.Dispose();
+    Cleanup(path);
+}
+
+static void HistoricalRecordKeepsOnDeckQueue()
+{
+    using var h = new TestHarness(MakeMvpEdition(durationSeconds: 2), NewPath());
+    foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+    var old = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 2);
+    h.StartRun();
+    h.Clock.Advance(TimeSpan.FromSeconds(3));
+    Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+
+    var next = h.AddCompetitor("Next competitor");
+    var onDeckCompetitor = h.AddCompetitor("On-deck competitor");
+    h.Service.ArmCompetitor(next.Id, RunCategory.Official, 60);
+    var onDeck = h.Service.AddToQueue(onDeckCompetitor.Id, RunCategory.Official);
+
+    h.Service.RecordHistoricalRun(old.Id);
+    Assert.Equal(onDeck.Id, h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    Assert.Equal(onDeck.Id, h.Store.Load().Queue.Single().Id);
+}
+
+static void DiscardedReplacementKeepsOriginalOfficial()
+{
+    using var h = NewHarness();
+    var first = h.ArmAndStart();
+    h.Service.Finish();
+    h.Service.Record();
+    var restart = h.Service.Restart(first.Id, "Retry requested");
+    h.Service.Arm(restart.Id);
+    h.Service.Abort("Competitor declined the retry");
+
+    Assert.Equal(first.Id, h.Service.GetOperatorSnapshot().Leaderboard.Single().RunId);
+    Assert.Equal(RunStatus.Completed, h.Store.Load().Runs.Single(r => r.Id == first.Id).Status);
+}
+
+static void SecondOfficialCannotBeRecordedFromHistory()
+{
+    using var h = new TestHarness(MakeMvpEdition(durationSeconds: 2), NewPath());
+    foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+    var timedOut = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 2);
+    h.StartRun();
+    h.Clock.Advance(TimeSpan.FromSeconds(3));
+    Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+
+    var second = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 60);
+    h.StartRun();
+    h.Service.Finish();
+    h.Service.Record();
+
+    Assert.Throws<CommandException>(() => h.Service.RecordHistoricalRun(timedOut.Id));
+    Assert.Equal(second.Id, h.Service.GetScoreboard().Leaderboard.Single(r => r.Category == RunCategory.Official).RunId);
+    Assert.True(!h.Store.Load().Runs.Single(r => r.Id == timedOut.Id).IsRecorded);
+}
+
+static void CorrectionsCannotCorruptRunLifecycle()
+{
+    var path = NewPath();
+    var edition = MakeMvpEdition();
+    var clock = new TestClock();
+    var store = new RunStore(path);
+    var service = new RunService(store, edition, clock);
+    var competitor = service.AddCompetitor("Correction competitor");
+    service.ArmCompetitor(competitor.Id, RunCategory.Exhibition, 60);
+    service.CompleteCountdown(service.StartMaster().Id);
+    service.Finish();
+    var recorded = service.Record();
+    foreach (var status in new[] { RunStatus.Finished, RunStatus.Countdown, RunStatus.Active, RunStatus.Armed, RunStatus.Paused })
+    {
+        Assert.Throws<CommandException>(() => service.EditHistoricalRun(recorded.Id,
+            new EditRunRequest { ExpectedRevision = recorded.Revision, Reason = "Invalid status", Status = status }));
+    }
+
+    service.ArmCompetitor(competitor.Id, RunCategory.Exhibition, 300);
+    service.CompleteCountdown(service.StartMaster().Id);
+    clock.Advance(TimeSpan.FromSeconds(10));
+    var paused = service.Pause();
+    clock.Advance(TimeSpan.FromSeconds(120));
+    var resumed = service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = paused.Revision,
+        Reason = "Resume through a correction",
+        Status = RunStatus.Active
+    });
+    Assert.Equal(RunStatus.Active, resumed.Status);
+    clock.Advance(TimeSpan.FromMilliseconds(1));
+    Assert.Equal(10_001L, service.GetOperatorSnapshot().CurrentRun!.ActiveElapsedMs); // Pause time is not counted.
+    Assert.Throws<CommandException>(() => service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = service.GetOperatorSnapshot().CurrentRun!.Revision,
+        Reason = "Too long",
+        DurationLimitSeconds = RunService.MaximumRunDurationSeconds + 1
+    }));
+    store.Dispose();
+
+    var reopenedStore = new RunStore(path);
+    _ = new RunService(reopenedStore, edition, new TestClock());
+    reopenedStore.Dispose();
+    Cleanup(path);
+}
+
+static void PhysicalPressAgeBackdatesWithinActiveTime()
+{
+    const string firstMac = "AABBCCDDEEFF";
+    const string secondMac = "001122334455";
+    using var h = new TestHarness(MakeSpokeEdition(), NewPath(), simulatedDevicesOnline: false);
+    h.Service.RecordDeviceScan(true, true, [firstMac, secondMac]);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    var start = h.Service.ReceivePhysicalSpokePress(new MasterPhysicalPress("boot", token, firstMac, 1, 1_200), sessionAllowed: true);
+    Assert.Equal(MessageDisposition.Accepted, start.Disposition);
+    Assert.Equal<long?>(3_800L, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == firstMac).StartElapsedMs);
+
+    h.Clock.Advance(TimeSpan.FromSeconds(2));
+    h.Service.Pause();
+    h.Clock.Advance(TimeSpan.FromSeconds(30));
+    h.Service.Resume();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(300));
+    // An old age cannot reach back into the pause: the press lands at the resume point.
+    var finish = h.Service.ReceivePhysicalSpokePress(new MasterPhysicalPress("boot", token, firstMac, 2, 5_000), sessionAllowed: true);
+    Assert.Equal(MessageDisposition.Accepted, finish.Disposition);
+    Assert.Equal<long?>(7_000L, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == firstMac).FinishElapsedMs);
+
+    // Ages are capped, so a bogus value never lands before the active stretch either.
+    var capped = h.Service.ReceivePhysicalSpokePress(new MasterPhysicalPress("boot", token, secondMac, 1, uint.MaxValue), sessionAllowed: true);
+    Assert.Equal(MessageDisposition.Accepted, capped.Disposition);
+    Assert.Equal<long?>(7_000L, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == secondMac).StartElapsedMs);
+}
+
+static void SchemaVersion1UpgradesWithBackup()
+{
+    var path = NewPath();
+    var edition = MakeMvpEdition();
+    var store = new RunStore(path);
+    var service = new RunService(store, edition, new TestClock());
+    var competitor = service.AddCompetitor("Upgrade competitor");
+    var run = service.ArmCompetitor(competitor.Id, RunCategory.Official, 60);
+    service.CompleteCountdown(service.StartMaster().Id);
+    service.Finish();
+    service.Record();
+    var databasePath = store.DatabasePath;
+    store.Dispose();
+
+    using (var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
+    {
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "ALTER TABLE runs DROP COLUMN recorded_at; UPDATE meta SET value = '1' WHERE key = 'schema_version';";
+        command.ExecuteNonQuery();
+    }
+
+    var upgradedStore = new RunStore(path);
+    Assert.Equal(1, Directory.GetFiles(Path.Combine(path, "backups"), "garage-games-v2-pre-schema-2-*.db").Length);
+    Assert.True(upgradedStore.Load().Runs.Single(r => r.Id == run.Id).RecordedAt is not null);
+    upgradedStore.Dispose();
+
+    using (var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
+    {
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT value FROM meta WHERE key = 'schema_version'";
+        Assert.Equal("2", command.ExecuteScalar() as string);
+    }
+
+    var reopenedStore = new RunStore(path);
+    Assert.Equal(1, Directory.GetFiles(Path.Combine(path, "backups"), "garage-games-v2-pre-schema-2-*.db").Length);
+    reopenedStore.Dispose();
+    Cleanup(path);
 }
 
 static void CategoryAndTieRank()

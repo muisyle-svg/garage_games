@@ -30,13 +30,27 @@ test("master parses bounded colon-delimited spoke presses separately from host t
     /void handleGaragePress\([\s\S]*?\n}\n\nvoid processRx/
   );
   assert.ok(handler, "spoke press handler exists");
-  assert.match(handler[0], /parseGaragePressPacket\(packet, parsedToken, sequence\)/);
+  assert.match(handler[0], /parseGaragePressPacket\(packet, parsedToken, sequence, pressAgeMs\)/);
+  assert.match(handler[0], /GG1 PRESS %lu %s %s %lu %lu/, "the relayed press carries its age");
+  assert.match(handler[0], /now - packet\.receivedAtMs/, "master adds its own relay delay to the press age");
+  assert.match(parser[0], /parseUint32Token\(ageText, pressAgeMs\)/);
 
   const hostParser = master.match(
     /bool parseGarageStatusLine\([\s\S]*?\n}\n\n/
   );
   assert.ok(hostParser, "space-delimited host serial parser remains present");
   assert.match(hostParser[0], /readProtocolToken/);
+});
+
+test("spoke press sequences survive a reboot and report press age", () => {
+  assert.doesNotMatch(spoke, /\n\s+garagePressSequence = 0;/,
+    "a reset to 0 lets a rebooted spoke reuse sequences the host already recorded");
+  assert.match(spoke, /garagePressSequence = randomGarageSequenceBase\(\);/);
+  assert.match(spoke, /esp_random\(\) & 0x3FFFFFFFUL/);
+  assert.match(spoke, /garagePressAtMs = now;/);
+  assert.match(spoke, /millis\(\) - garagePressAtMs/);
+  assert.doesNotMatch(spoke, /sendBroadcast\(pendingGaragePressMessage\)/,
+    "retries must recompute the press age instead of resending a fixed message");
 });
 
 test("idle spoke presses and virtual identification are relayed through the master", () => {

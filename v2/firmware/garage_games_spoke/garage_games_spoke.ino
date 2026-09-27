@@ -270,6 +270,7 @@ uint32_t diagnosticPressSequence = 0;
 uint32_t lastIdentifySequence = 0;
 uint32_t lastIdentifyAtMs = 0;
 uint32_t pendingGarageSequence = 0;
+uint32_t garagePressAtMs = 0;
 bool garagePressAwaitingResult = false;
 uint8_t garagePressRetriesLeft = 0;
 uint32_t nextGaragePressRetryMs = 0;
@@ -491,12 +492,30 @@ void handleIdentify(const RxPacket& packet) {
   startBlink(true, false, true, 120, 850);
 }
 
+// Press sequences live in RAM, so a spoke that reboots mid-run rejoins the same
+// session. Starting each session from a random base keeps post-reboot presses
+// from reusing a sequence the host already recorded (and would drop as a duplicate).
+uint32_t randomGarageSequenceBase() {
+  return esp_random() & 0x3FFFFFFFUL;
+}
+
+// The press age lets the host timestamp the physical press rather than its
+// arrival, so ESP-NOW retries and relay latency are not charged to the player.
+void sendGaragePress() {
+  if (pendingGaragePressMessage[0] == '\0') return;
+  char message[64];
+  int length = snprintf(message, sizeof(message), "%s:%lu", pendingGaragePressMessage,
+                        (unsigned long)(millis() - garagePressAtMs));
+  if (length <= 0 || (size_t)length >= sizeof(message)) return;
+  sendBroadcast(message);
+}
+
 void clearGarageMode(bool clearVisual) {
   garageModeState = GARAGE_MODE_NONE;
   strcpy(garageToken, "-");
   garageStatusSeen = false;
   lastGarageStateMs = 0;
-  garagePressSequence = 0;
+  garagePressSequence = randomGarageSequenceBase();
   pendingGarageSequence = 0;
   garagePressAwaitingResult = false;
   garagePressRetriesLeft = 0;
@@ -555,7 +574,7 @@ void handleGarageMode(const RxPacket& packet) {
   }
 
   if (!sameSession) {
-    garagePressSequence = 0;
+    garagePressSequence = randomGarageSequenceBase();
     pendingGarageSequence = 0;
     garagePressAwaitingResult = false;
     garagePressRetriesLeft = 0;
@@ -1000,12 +1019,13 @@ void handlePress() {
                           garageToken, (unsigned long)pendingGarageSequence);
     if (length <= 0 || (size_t)length >= sizeof(pendingGaragePressMessage)) return;
     memcpy(pendingGaragePressMessage, message, (size_t)length + 1);
+    garagePressAtMs = now;
     garagePressAwaitingResult = true;
     garagePressRetriesLeft = GARAGE_PRESS_MAX_RETRIES;
     nextGaragePressRetryMs = now + GARAGE_PRESS_RESEND_INTERVAL_MS;
     garageResultState[0] = '\0';
     garageVisualAppliedKey = -100;
-    sendBroadcast(pendingGaragePressMessage);
+    sendGaragePress();
     return;
   }
 
@@ -1045,7 +1065,7 @@ void updateGaragePressResend() {
     garageVisualAppliedKey = -100;
     return;
   }
-  sendBroadcast(pendingGaragePressMessage);
+  sendGaragePress();
   --garagePressRetriesLeft;
   nextGaragePressRetryMs = millis() + GARAGE_PRESS_RESEND_INTERVAL_MS;
   if (garagePressRetriesLeft == 0) {

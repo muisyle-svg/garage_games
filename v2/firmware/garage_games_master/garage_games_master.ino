@@ -1726,7 +1726,7 @@ void handleReady(const RxPacket& packet) {
 }
 
 bool parseGaragePressPacket(const RxPacket& packet, char* parsedToken,
-                            uint32_t& sequence) {
+                            uint32_t& sequence, uint32_t& pressAgeMs) {
   static const char prefix[] = "GPRESS:3:";
   const size_t prefixLength = sizeof(prefix) - 1;
   if (!parsedToken || packet.len <= prefixLength ||
@@ -1747,19 +1747,34 @@ bool parseGaragePressPacket(const RxPacket& packet, char* parsedToken,
   if (!parseGarageToken(packetToken, parsedToken) ||
       strcmp(parsedToken, "-") == 0) return false;
 
+  // An optional trailing ":<ageMs>" reports how long ago the button was pressed.
   const char* sequenceStart = tokenEnd + 1;
-  size_t sequenceLength = (size_t)(packetEnd - sequenceStart);
+  const char* sequenceEnd = static_cast<const char*>(
+      memchr(sequenceStart, ':', (size_t)(packetEnd - sequenceStart)));
+  if (!sequenceEnd) sequenceEnd = packetEnd;
+  size_t sequenceLength = (size_t)(sequenceEnd - sequenceStart);
   if (sequenceLength == 0 || sequenceLength >= 11) return false;
   char sequenceText[11];
   memcpy(sequenceText, sequenceStart, sequenceLength);
   sequenceText[sequenceLength] = '\0';
-  return parseUint32Token(sequenceText, sequence) && sequence != 0;
+  if (!parseUint32Token(sequenceText, sequence) || sequence == 0) return false;
+
+  pressAgeMs = 0;
+  if (sequenceEnd == packetEnd) return true;
+  const char* ageStart = sequenceEnd + 1;
+  size_t ageLength = (size_t)(packetEnd - ageStart);
+  if (ageLength == 0 || ageLength >= 11) return false;
+  char ageText[11];
+  memcpy(ageText, ageStart, ageLength);
+  ageText[ageLength] = '\0';
+  return parseUint32Token(ageText, pressAgeMs);
 }
 
 void handleGaragePress(const RxPacket& packet) {
   char parsedToken[17];
   uint32_t sequence = 0;
-  if (!parseGaragePressPacket(packet, parsedToken, sequence) ||
+  uint32_t pressAgeMs = 0;
+  if (!parseGaragePressPacket(packet, parsedToken, sequence, pressAgeMs) ||
       !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0) return;
 
   uint32_t now = millis();
@@ -1771,8 +1786,12 @@ void handleGaragePress(const RxPacket& packet) {
 
   char macText[13];
   macToHex(packet.source, macText, sizeof(macText));
-  Serial.printf("GG1 PRESS %lu %s %s %lu\n", (unsigned long)bootToken,
-                parsedToken, macText, (unsigned long)sequence);
+  uint32_t relayDelayMs = now - packet.receivedAtMs;
+  uint32_t totalAgeMs = pressAgeMs > UINT32_MAX - relayDelayMs
+                            ? UINT32_MAX : pressAgeMs + relayDelayMs;
+  Serial.printf("GG1 PRESS %lu %s %s %lu %lu\n", (unsigned long)bootToken,
+                parsedToken, macText, (unsigned long)sequence,
+                (unsigned long)totalAgeMs);
 }
 
 void processRx() {

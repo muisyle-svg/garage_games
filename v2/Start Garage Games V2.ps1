@@ -169,7 +169,7 @@ function Start-OwnedServer {
             }
             $filePath = $script:published
             $workingDirectory = $script:scriptRoot
-            $arguments = '--data-path ' + (Quote-ProcessArgument $script:dataPath) +
+            $arguments = '--hardware-mode --data-path ' + (Quote-ProcessArgument $script:dataPath) +
                 ' --legacy-data-path ' + (Quote-ProcessArgument $script:legacyDataPath) +
                 ' --build-id ' + (Quote-ProcessArgument $script:buildId) +
                 ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))
@@ -183,7 +183,7 @@ function Start-OwnedServer {
             $filePath = $script:dotnet
             $workingDirectory = $script:repoRoot
             $arguments = 'run --configuration Release --no-restore --project ' + (Quote-ProcessArgument $script:project) +
-                ' -- --data-path ' + (Quote-ProcessArgument $script:dataPath) +
+                ' -- --hardware-mode --data-path ' + (Quote-ProcessArgument $script:dataPath) +
                 ' --legacy-data-path ' + (Quote-ProcessArgument $script:legacyDataPath) +
                 ' --build-id ' + (Quote-ProcessArgument $script:buildId) +
                 ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))

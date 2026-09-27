@@ -14,7 +14,9 @@ public sealed record MasterGarageEventStatus(string RunToken, int Revision, stri
 
 public sealed record MasterGarageEventSnapshot(string? Version, IReadOnlyList<MasterGarageEventStatus> Events);
 
-public sealed record MasterPhysicalPress(string BootToken, string RunToken, string DeviceId, uint Sequence);
+// AgeMilliseconds is how long before the relay line the button was pressed (0 from older firmware).
+public sealed record MasterPhysicalPress(string BootToken, string RunToken, string DeviceId, uint Sequence,
+    uint AgeMilliseconds = 0);
 public sealed record MasterButtonTestPress(string BootToken, string DeviceId, uint Sequence);
 
 public sealed record MasterPhysicalPressResult(string State, MessageDisposition Disposition, string Reason);
@@ -103,16 +105,20 @@ public static class MasterProtocolCodec
         }
 
         var parts = line.Split(' ');
-        if (parts.Length != 6 || parts[0] != "GG1" || parts[1] != "PRESS" ||
+        if (parts.Length is not (6 or 7) || parts[0] != "GG1" || parts[1] != "PRESS" ||
             !IsValidBootToken(parts[2]) || !IsUpperHex(parts[3], 16) || !IsUpperHex(parts[4], 12) ||
-            parts[5].Length == 0 || parts[5].Any(character => character is < '0' or > '9') ||
-            !uint.TryParse(parts[5], System.Globalization.NumberStyles.None,
-                System.Globalization.CultureInfo.InvariantCulture, out var sequence) || sequence == 0)
+            !TryParseDecimalUInt(parts[5], out var sequence) || sequence == 0)
         {
             return false;
         }
 
-        press = new MasterPhysicalPress(parts[2], parts[3], parts[4], sequence);
+        var ageMilliseconds = 0u;
+        if (parts.Length == 7 && !TryParseDecimalUInt(parts[6], out ageMilliseconds))
+        {
+            return false;
+        }
+
+        press = new MasterPhysicalPress(parts[2], parts[3], parts[4], sequence, ageMilliseconds);
         return true;
     }
 
@@ -171,6 +177,14 @@ public static class MasterProtocolCodec
 
         bootToken = suffix[..separator];
         return true;
+    }
+
+    private static bool TryParseDecimalUInt(string value, out uint result)
+    {
+        result = 0;
+        return value.Length > 0 && value.All(character => character is >= '0' and <= '9') &&
+            uint.TryParse(value, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out result);
     }
 
     private static bool IsHexDigit(char character) =>

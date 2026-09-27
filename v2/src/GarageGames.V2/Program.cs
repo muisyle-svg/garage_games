@@ -79,13 +79,34 @@ app.UseExceptionHandler(errorApp =>
         await context.Response.WriteAsJsonAsync(new { error = message });
     });
 });
+// Binding to loopback does not stop a web page open in the operator's browser from
+// posting to this port, or a DNS-rebinding hostname from reaching it. The API only
+// answers loopback Host headers and rejects cross-origin state changes.
 app.Use(async (context, next) =>
 {
-    var pageName = context.Request.Path.Value?.ToLowerInvariant() switch
+    if (context.Request.Path.StartsWithSegments("/api") && !IsTrustedApiRequest(context))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new { error = "Cross-origin requests to the Garage Games API are not allowed." });
+        return;
+    }
+
+    await next();
+});
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path.Value?.ToLowerInvariant();
+    if (path is "/mvp" or "/mvp.html")
+    {
+        // The standalone MVP page was folded into the operator view.
+        context.Response.Redirect("/");
+        return;
+    }
+
+    var pageName = path switch
     {
         "/" or "/index.html" or "/advanced" => "index.html",
         "/scoreboard" or "/scoreboard.html" => "scoreboard.html",
-        "/mvp" or "/mvp.html" => "mvp.html",
         _ => null
     };
     if (pageName is null)
@@ -381,10 +402,29 @@ static bool IsLoopbackClearRequest(HttpContext context)
         return false;
     }
 
+    return IsSameOriginOrNonBrowser(context);
+}
+
+static bool IsTrustedApiRequest(HttpContext context)
+{
+    if (!IsLoopbackHost(context.Request.Host.Host))
+    {
+        return false;
+    }
+
+    return HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method) ||
+        HttpMethods.IsOptions(context.Request.Method) || IsSameOriginOrNonBrowser(context);
+}
+
+// Browsers send Origin (and Sec-Fetch-Site) on cross-origin writes; local tools such as
+// the tray launcher send neither and are allowed.
+static bool IsSameOriginOrNonBrowser(HttpContext context)
+{
     var originHeader = context.Request.Headers.Origin.ToString();
     if (string.IsNullOrEmpty(originHeader))
     {
-        return true;
+        var fetchSite = context.Request.Headers["Sec-Fetch-Site"].ToString();
+        return fetchSite is "" or "same-origin" or "none";
     }
 
     if (!Uri.TryCreate(originHeader, UriKind.Absolute, out var origin) || !IsLoopbackHost(origin.Host))
@@ -395,7 +435,7 @@ static bool IsLoopbackClearRequest(HttpContext context)
     var requestPort = context.Request.Host.Port ?? DefaultPort(context.Request.Scheme);
     var originPort = origin.IsDefaultPort ? DefaultPort(origin.Scheme) : origin.Port;
     return string.Equals(origin.Scheme, context.Request.Scheme, StringComparison.OrdinalIgnoreCase) &&
-        string.Equals(origin.Host, requestHost, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(origin.Host, context.Request.Host.Host, StringComparison.OrdinalIgnoreCase) &&
         originPort == requestPort;
 }
 

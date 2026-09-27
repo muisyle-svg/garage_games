@@ -47,7 +47,8 @@ usable). The default data path is
 pass `--data-path` only when intentionally isolating a test or event store. The
 app enforces loopback-only URLs; a `--urls` value such as `0.0.0.0`
 is rejected rather than exposed. For normal Windows use, double-click
-`v2\Start Garage Games V2.cmd`. It opens the operator view in your browser and
+`v2\Start Garage Games V2.cmd`. The tray launcher starts the app with
+`--hardware-mode`, so simulator-only routes are off during an event. It opens the operator view in your browser and
 leaves Garage Games in the Windows notification area (system tray). Right-click
 the tray icon for **Open Garage Games** or **Exit**; double-clicking the icon
 also opens the app. Closing the browser only closes that window. Choosing Exit
@@ -149,8 +150,11 @@ that reported during that scan; it does not verify event wiring or gameplay
 inputs. Placeholder assignments such as `station-01`, a disconnected master,
 an incomplete/BUSY scan, or a process restart are **Unverified**, not Online.
 Missing or unverified spokes do not prevent arming: use the operator's virtual
-event controls as a fallback. Physical station packets from unverified or
-missing devices remain rejected. Disconnecting the master invalidates its last
+event controls as a fallback. A physical press that arrives through the current
+master handshake from the MAC assigned to a standard event is accepted even if
+that spoke missed the latest scan (for example, it was asleep or out of range
+while the run was armed); the press itself marks the spoke Online. Presses from
+unassigned MACs remain rejected. Disconnecting the master invalidates its last
 scan readiness.
 
 ## Physical master smoke test
@@ -206,6 +210,21 @@ the operator must resume explicitly. Unknown schema versions, missing required
 tables, failed integrity checks, or malformed persisted snapshots fail visibly;
 the app never resets the database.
 
+Schema version 2 persists when a run was recorded. On first start, a version 1
+database is backed up to `backups\garage-games-v2-pre-schema-2-*.db` and then
+upgraded in place; completed runs keep their recorded status. Timed-out runs
+recorded under version 1 were never saved as recorded, so record them again from
+History after upgrading. Older app builds refuse a version 2 database.
+
+A restart or replacement attempt does not displace the original result until the
+replacement is recorded; discarding the attempt leaves the original standing.
+Recording an older run from History does not advance the on-deck queue, and a
+competitor cannot end up with two recorded official results.
+
+The local API answers only loopback `Host` headers and rejects cross-origin
+state-changing requests, so another web page open in the operator's browser
+cannot drive the scorekeeper.
+
 The local `/api/backup` endpoint creates an explicit SQLite backup in the data
 directory's `backups` folder. `/api/export` returns an operator export of the
 current state and audit ledger.
@@ -250,7 +269,13 @@ result, the spoke reports an unknown outcome with a fast red blink and disables
 physical presses for that event until a matching late result resolves it or a
 new Garage session begins; use the virtual event control as fallback. A valid
 late result applies the event state, and an explicit `REJECTED` result permits
-retry. Future work includes keypad and magnetic special-event messages. This
+retry. Each press reports its age (time since the button was pushed, plus the
+master's relay delay), and the app times the press at that moment rather than at
+arrival, capped at 10 seconds and never earlier than the start of the current
+active stretch. Spoke press sequences start from a random value each session,
+so a spoke that reboots mid-run cannot reuse a sequence the app already
+recorded. Flash the master and spokes together: an older master rejects the
+new press format. Future work includes keypad and magnetic special-event messages. This
 design does not use Google Sheet row IDs or Wi-Fi. Battery-powered spokes must
 keep their radio listening to receive a wireless start; deep sleep cannot
 receive that start signal.
