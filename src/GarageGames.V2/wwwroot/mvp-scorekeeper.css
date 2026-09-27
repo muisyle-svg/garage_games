@@ -62,7 +62,7 @@ h2 { margin: .2rem 0 0; font-size: 1rem; letter-spacing: -.02em; }
 h3 { margin: 0; font-size: .94rem; }
 .muted, #run-caption { margin: 0; color: var(--muted); font-size: .76rem; }
 .run-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .45rem; }
-.run-summary { display: grid; grid-template-columns: minmax(230px, 1.45fr) repeat(5, minmax(100px, .68fr)); gap: .55rem; margin-bottom: .75rem; }
+.run-summary { display: grid; grid-template-columns: minmax(250px, 1.5fr) minmax(135px, .7fr) minmax(160px, .9fr) repeat(2, minmax(110px, .6fr)); gap: .55rem; margin-bottom: .75rem; }
 .physical-master-strip { display: flex; flex-wrap: wrap; align-items: center; gap: .38rem .8rem; margin: 0 0 .75rem; padding: .52rem .65rem; border: 1px solid var(--line); border-radius: 10px; background: rgba(7, 15, 13, .22); }
 .master-port-controls { display: flex; flex: 1 1 490px; flex-wrap: wrap; align-items: center; gap: .35rem; min-width: 0; }
 .master-port-controls label { flex: 0 0 auto; color: var(--muted); font-size: .64rem; font-weight: 850; letter-spacing: .05em; text-transform: uppercase; }
@@ -89,7 +89,7 @@ select:disabled, input:disabled { opacity: .58; }
 .summary-run-length input[aria-invalid="true"] { border-color: rgba(240, 135, 121, .8); box-shadow: 0 0 0 2px rgba(240, 135, 121, .13); }
 .run-duration-help { min-height: 1.7em; color: var(--dim); font-size: .57rem; line-height: 1.35; }
 .summary-stat strong { overflow: hidden; color: var(--ink); font-size: 1.15rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-.summary-clock strong { color: var(--amber); font-size: 1.65rem; letter-spacing: -.04em; }
+.summary-clock strong { color: var(--amber); font-size: 2.2rem; letter-spacing: -.04em; line-height: 1; }
 .summary-clock strong.is-expired { color: var(--red); }
 .summary-total strong { color: var(--green); }
 .on-deck-panel { margin-bottom: .8rem; }
@@ -164,14 +164,16 @@ select:disabled, input:disabled { opacity: .58; }
 .card-heading > div { display: grid; gap: .22rem; }
 .small-note, .table-help { color: var(--muted); font-size: .66rem; line-height: 1.45; }
 .card-heading > .small-note { text-align: right; }
-.virtual-event-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .4rem; padding: 0 .85rem .6rem; }
-.virtual-button { display: flex; min-width: 0; min-height: 42px; align-items: center; justify-content: space-between; gap: .35rem; padding: .45rem .52rem; border: 1px solid var(--line); border-radius: 9px; background: rgba(255, 255, 255, .025); color: var(--ink); cursor: pointer; text-align: left; }
+/* Event tiles stack the full name (wrapping to two lines) above a status row, so names are not cut off. */
+.virtual-event-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: .5rem; padding: 0 .95rem .7rem; }
+.virtual-button { display: flex; min-width: 0; min-height: 64px; flex-direction: column; align-items: stretch; justify-content: space-between; gap: .4rem; padding: .55rem .65rem; border: 1px solid var(--line); border-radius: 10px; background: rgba(255, 255, 255, .025); color: var(--ink); cursor: pointer; text-align: left; }
 .virtual-button:hover:not(:disabled) { border-color: rgba(244, 189, 96, .65); background: rgba(244, 189, 96, .07); }
-.virtual-button strong { flex: 1 1 0; min-width: 0; overflow: hidden; font-size: .69rem; text-overflow: ellipsis; white-space: nowrap; }
-.virtual-button small { flex: 0 0 auto; max-width: 48%; overflow: hidden; color: var(--muted); font-size: .58rem; text-overflow: ellipsis; white-space: nowrap; }
-.virtual-button-meta { display: grid; flex: 0 1 54%; min-width: 0; justify-items: end; gap: .06rem; line-height: 1.05; }
-.virtual-button-meta small { flex: none; max-width: 100%; text-align: right; }
-.virtual-action-hint { color: var(--muted) !important; font-size: .52rem !important; }
+.virtual-button .virtual-button-name { display: -webkit-box; overflow: hidden; font-size: .8rem; line-height: 1.2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+.virtual-button-number { margin-right: .4rem; color: var(--dim); font-variant-numeric: tabular-nums; }
+.virtual-button small { overflow: hidden; color: var(--muted); font-size: .6rem; text-overflow: ellipsis; white-space: nowrap; }
+.virtual-button-meta { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: .4rem; line-height: 1.1; }
+.virtual-button-meta small { min-width: 0; }
+.virtual-action-hint { color: var(--muted) !important; font-size: .6rem !important; text-align: right; }
 .virtual-button.device-responding { border-color: rgba(104, 214, 164, .58); background: rgba(104, 214, 164, .1); }
 .virtual-button.device-responding small { color: var(--green); }
 .virtual-button.device-not-responding { border-color: rgba(240, 135, 121, .58); background: rgba(240, 135, 121, .1); }
@@ -187,6 +189,37 @@ select:disabled, input:disabled { opacity: .58; }
 @keyframes started-event-flash { 50% { border-color: rgba(244, 189, 96, .28); background: rgba(244, 189, 96, .025); color: var(--amber); } }
 @keyframes physical-event-pulse { to { border-color: #cf9dff; background: rgba(173, 128, 255, .34); box-shadow: 0 0 0 3px rgba(173, 128, 255, .24); } }
 .virtual-note { margin: 0; padding: 0 .9rem .85rem; }
+
+/* Run lifecycle buttons stay top-right; Discard sits apart from Record. */
+.run-controls { align-items: center; }
+.run-controls-divider { width: 1px; height: 26px; margin: 0 .35rem; background: var(--line); }
+.run-controls-divider:has(+ [hidden]) { display: none; }
+
+/* Start lives with the event buttons it unlocks. */
+.virtual-card-heading { flex-wrap: wrap; }
+.start-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .45rem; }
+.start-controls .button[hidden] { display: none; }
+.button-start { min-height: 44px; padding: .65rem 1.25rem; font-size: .85rem; }
+
+/* Undo is prominent but separated from the event grid, and says exactly what it will undo. */
+.undo-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .75rem; margin: 0 .95rem .9rem; padding: .5rem .6rem; border: 1px dashed rgba(244, 189, 96, .3); border-radius: 10px; background: rgba(244, 189, 96, .04); }
+.button-undo { border-color: rgba(244, 189, 96, .55); background: rgba(244, 189, 96, .12); color: var(--amber); font-size: .78rem; }
+.button-undo span { margin-right: .4rem; font-size: 1rem; line-height: 1; }
+.undo-detail { color: var(--muted); font-size: .7rem; }
+.button-undo:not(:disabled) + .undo-detail { color: var(--ink); }
+
+/* Hardware tools collapse under the scorecard; the summary line stays visible. */
+.hardware-panel > summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem 1rem; padding: .8rem .95rem; cursor: pointer; list-style: none; }
+.hardware-panel > summary::-webkit-details-marker { display: none; }
+.hardware-panel > summary::after { content: "Show"; color: var(--muted); font-size: .66rem; font-weight: 800; }
+.hardware-panel[open] > summary::after { content: "Hide"; }
+.hardware-panel-title { display: grid; gap: .15rem; }
+.hardware-panel-title strong { font-size: .85rem; }
+.hardware-panel-summary { flex: 1 1 auto; color: var(--muted); font-size: .7rem; text-align: right; }
+.hardware-panel.needs-attention { border-color: rgba(244, 189, 96, .5); }
+.hardware-panel.needs-attention .hardware-panel-summary { color: var(--amber); }
+.hardware-panel-content { padding: 0 .95rem .95rem; }
+.hardware-panel .physical-readiness-panel { margin: 0; }
 .scorecard-card { min-width: 0; }
 .save-state { color: var(--muted); font-size: .64rem; text-align: right; }
 .table-help { margin: 0; padding: 0 .95rem .6rem; }

@@ -618,7 +618,10 @@ public sealed class RunService
                 }).ToList()
             };
 
-            var next = _data.Queue.OrderBy(q => q.Position).FirstOrDefault();
+            var onDeck = _data.Queue.OrderBy(q => q.Position).Take(4)
+                .Select(item => new ScoreboardOnDeck(
+                    competitorNames.GetValueOrDefault(item.CompetitorId, "Unknown competitor"), item.Category))
+                .ToList();
             return new ScoreboardSnapshot
             {
                 EditionName = _edition.Name,
@@ -626,7 +629,8 @@ public sealed class RunService
                 SimulationMode = simulationMode,
                 ShowExhibitionsOnLeaderboard = _data.ShowExhibitionsOnLeaderboard,
                 CurrentRun = current,
-                OnDeckName = next is null ? null : competitorNames.GetValueOrDefault(next.CompetitorId),
+                OnDeckName = onDeck.FirstOrDefault()?.Name,
+                OnDeck = onDeck,
                 Leaderboard = BuildLeaderboard()
             };
         }
@@ -2769,16 +2773,24 @@ public sealed class RunService
             }
         }
 
+        // Ranks restart within each category (playoff, official, exhibition), since each
+        // category is shown as its own standings; tied points share a rank.
         var lastPoints = int.MinValue;
         RunCategory? lastCategory = null;
         var lastRank = 0;
+        var categoryStart = 0;
         for (var index = 0; index < rows.Count; index++)
         {
-            if (rows[index].Points != lastPoints || rows[index].Category != lastCategory)
+            if (rows[index].Category != lastCategory)
             {
-                lastRank = index + 1;
-                lastPoints = rows[index].Points;
+                categoryStart = index;
                 lastCategory = rows[index].Category;
+                lastPoints = int.MinValue;
+            }
+            if (rows[index].Points != lastPoints)
+            {
+                lastRank = index - categoryStart + 1;
+                lastPoints = rows[index].Points;
             }
             rows[index].Rank = lastRank;
         }

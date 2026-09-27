@@ -28,6 +28,11 @@ var service = new RunService(store, edition, clock);
 var urls = GetOption(args, "--urls") ?? "http://127.0.0.1:5187";
 ValidateLoopbackUrls(urls);
 
+// The scorekeeper and TV poll several times a second; per-request info logs filled
+// tens of MB per hour. Keep warnings and errors, plus startup/shutdown messages.
+builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Information);
+
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;

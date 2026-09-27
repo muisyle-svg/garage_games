@@ -15,15 +15,51 @@
     </header>
     <div id="scoreboard-stale" class="scoreboard-stale is-hidden" role="status"><strong>Connection lost.</strong> The display is holding its last known state; timer is stale.</div>
     <section class="scoreboard-stage">
-      <div class="scoreboard-run-head"><div><p class="eyebrow">Now competing</p><h2 id="scoreboard-competitor">No active run</h2><div class="scoreboard-category-row"><span id="scoreboard-category" class="category-pill">—</span><span id="scoreboard-phase" class="phase-chip">Waiting</span></div></div><div class="scoreboard-clock-wrap"><span class="label">Time remaining</span><strong id="scoreboard-countdown" class="scoreboard-clock">5:00</strong><span id="scoreboard-run-status" class="scoreboard-run-status">Awaiting master start</span></div><div class="scoreboard-total"><span class="label">Awarded total</span><strong id="scoreboard-points">0</strong><span class="scoreboard-total-note">points</span></div></div>
-      <div class="scoreboard-progress"><div class="progress-label"><span>Event progress</span><strong id="scoreboard-event-progress">0 / 13 complete</strong></div><div class="progress-track"><span id="scoreboard-progress-fill" class="progress-fill" style="width:0%"></span></div></div>
-      <div class="scoreboard-grid-layout">
-        <section class="scoreboard-events"><div class="scoreboard-section-heading"><div><p class="eyebrow">Live roster</p><h3>Events</h3></div><span class="muted">Updates from operator desk</span></div><div id="scoreboard-events" class="tv-event-grid"><div class="tv-empty">Events will appear when a run is armed.</div></div></section>
-        <aside class="scoreboard-side"><section class="tv-panel"><div class="scoreboard-section-heading"><div><p class="eyebrow">Next up</p><h3>On deck</h3></div></div><strong id="scoreboard-on-deck" class="on-deck-name">—</strong></section><section class="tv-panel leaderboard-panel"><div class="scoreboard-section-heading"><div><p class="eyebrow">Current standings</p><h3>Leaderboard</h3></div><span id="scoreboard-leaderboard-note" class="shared-rank-note">Playoffs listed first</span></div><div id="scoreboard-leaderboard" class="tv-leaderboard"><div class="tv-empty">No leaderboard results yet.</div></div></section></aside>
+      <div class="scoreboard-main">
+      <div class="scoreboard-hero">
+        <div class="hero-competitor">
+          <p class="eyebrow">Now competing</p>
+          <h2 id="scoreboard-competitor">No active run</h2>
+          <div class="scoreboard-category-row"><span id="scoreboard-category" class="category-pill">—</span><span id="scoreboard-phase" class="phase-chip">Waiting</span></div>
+        </div>
+        <div class="hero-clock">
+          <span class="label">Time remaining</span>
+          <strong id="scoreboard-countdown" class="scoreboard-clock">5:00</strong>
+          <span id="scoreboard-run-status" class="scoreboard-run-status">Awaiting master start</span>
+        </div>
+        <div class="hero-points">
+          <span class="label">Points</span>
+          <strong id="scoreboard-points">0</strong>
+          <div class="hero-progress">
+            <div class="progress-label"><span>Events</span><strong id="scoreboard-event-progress">0 / 13 complete</strong></div>
+            <div class="progress-track"><span id="scoreboard-progress-fill" class="progress-fill" style="width:0%"></span></div>
+          </div>
+        </div>
       </div>
+        <section class="scoreboard-events" aria-label="Events">
+          <div id="scoreboard-events" class="tv-event-grid"><div class="tv-empty">Events will appear when a run is armed.</div></div>
+        </section>
+      </div>
+        <aside class="scoreboard-side">
+          <section class="tv-panel on-deck-panel" aria-labelledby="on-deck-title">
+            <p id="on-deck-title" class="eyebrow">On deck</p>
+            <div class="on-deck-main"><strong id="scoreboard-on-deck" class="on-deck-name">—</strong><span id="scoreboard-on-deck-category" class="category-pill" hidden></span></div>
+            <div id="scoreboard-on-deck-following-wrap" class="on-deck-following-wrap" hidden>
+              <span class="label">Then</span>
+              <ol id="scoreboard-on-deck-following" class="on-deck-following"></ol>
+            </div>
+          </section>
+          <section id="scoreboard-playoff-panel" class="tv-panel leaderboard-panel playoff-panel" aria-labelledby="playoff-title" hidden>
+            <div class="scoreboard-section-heading"><h3 id="playoff-title">Playoffs</h3></div>
+            <div id="scoreboard-playoff-leaderboard" class="tv-leaderboard"></div>
+          </section>
+          <section class="tv-panel leaderboard-panel standings-panel" aria-labelledby="standings-title">
+            <div class="scoreboard-section-heading"><h3 id="standings-title">Standings</h3><span id="scoreboard-leaderboard-note" class="shared-rank-note">Official results</span></div>
+            <div id="scoreboard-leaderboard" class="tv-leaderboard"><div class="tv-empty">No results yet.</div></div>
+          </section>
+        </aside>
     </section>
   </main>
-  <footer class="scoreboard-footer"><span>Garage Games</span><span id="scoreboard-footer-edition">Local scoreboard</span><span id="scoreboard-footer-category">Playoff · official standings</span></footer>
   <script src="mvp-scorekeeper-time.js?v=__GG_ASSET_VERSION__" defer></script>
   <script src="app.js?v=__GG_ASSET_VERSION__" defer></script>
 </body>

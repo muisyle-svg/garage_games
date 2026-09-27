@@ -2110,6 +2110,19 @@ static void LeaderboardPreferenceAndCategories()
     Assert.Equal(2, hidden.Leaderboard.Count);
     Assert.Equal(RunCategory.Playoff, hidden.Leaderboard[0].Category);
     Assert.Equal(RunCategory.Official, hidden.Leaderboard[1].Category);
+    Assert.Equal(1, hidden.Leaderboard[0].Rank);
+    Assert.Equal(1, hidden.Leaderboard[1].Rank); // Ranks restart within each category.
+
+    foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+    var queuedNames = new[] { "Queue one", "Queue two", "Queue three", "Queue four", "Queue five" };
+    foreach (var queuedName in queuedNames)
+    {
+        h.Service.AddToQueue(h.AddCompetitor(queuedName).Id, queuedName == "Queue two" ? RunCategory.Exhibition : RunCategory.Official);
+    }
+    var onDeck = h.Service.GetScoreboard();
+    Assert.Equal("Queue one", onDeck.OnDeckName);
+    Assert.True(onDeck.OnDeck.Select(entry => entry.Name).SequenceEqual(queuedNames.Take(4)));
+    Assert.Equal(RunCategory.Exhibition, onDeck.OnDeck[1].Category);
 
     h.Service.SetLeaderboardPreference(true);
     var included = h.Service.GetOperatorSnapshot();

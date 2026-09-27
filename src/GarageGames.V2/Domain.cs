@@ -434,8 +434,12 @@ public sealed class ScoreboardSnapshot
     public bool ShowExhibitionsOnLeaderboard { get; set; }
     public ScoreboardRun? CurrentRun { get; set; }
     public string? OnDeckName { get; set; }
+    // The next few queued competitors in order; the first is the same as OnDeckName.
+    public List<ScoreboardOnDeck> OnDeck { get; set; } = [];
     public required List<LeaderboardRow> Leaderboard { get; set; }
 }
+
+public sealed record ScoreboardOnDeck(string Name, RunCategory Category);
 
 public sealed class ScoreboardRun
 {

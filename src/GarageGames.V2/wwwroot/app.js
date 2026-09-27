@@ -932,13 +932,9 @@
   function renderScoreboard(snapshot) {
     setMode(!!snapshot.simulationMode, snapshot.editionName, "#scoreboard-mode");
     text(q("#scoreboard-edition"), snapshot.editionName || "Scoreboard");
-    text(q("#scoreboard-footer-edition"), snapshot.editionName || "Local scoreboard");
-    text(q("#scoreboard-footer-category"), snapshot.showExhibitionsOnLeaderboard
-      ? "Playoff · official · exhibition standings"
-      : "Playoff · official standings");
     text(q("#scoreboard-leaderboard-note"), snapshot.showExhibitionsOnLeaderboard
-      ? "Playoffs first · exhibitions shown"
-      : "Playoffs listed first");
+      ? "Official · exhibitions shown"
+      : "Official results");
     const run = snapshot.currentRun;
     const total = run ? Number(run.totalEvents || 0) : 13;
     const completed = run ? Number(run.completedEvents || 0) : 0;
@@ -951,9 +947,39 @@
     text(q("#scoreboard-points"), run ? run.awardedPoints || 0 : 0);
     text(q("#scoreboard-event-progress"), `${completed} / ${total} complete`);
     const fill = q("#scoreboard-progress-fill"); if (fill) fill.style.width = `${total ? Math.min(100, completed / total * 100) : 0}%`;
-    text(q("#scoreboard-on-deck"), snapshot.onDeckName || "—");
+    renderOnDeckBoard(snapshot);
     renderScoreboardEvents(run);
-    renderLeaderboard(snapshot.leaderboard || []);
+    // Playoff standings get their own board above the main one, shown only once
+    // playoff results exist; ranks already restart within each category.
+    const rows = snapshot.leaderboard || [];
+    const playoffRows = rows.filter((row) => row.category === "playoff");
+    const playoffPanel = q("#scoreboard-playoff-panel");
+    if (playoffPanel) playoffPanel.hidden = playoffRows.length === 0;
+    renderLeaderboard(playoffRows, "#scoreboard-playoff-leaderboard");
+    renderLeaderboard(rows.filter((row) => row.category !== "playoff"), "#scoreboard-leaderboard");
+  }
+
+  function renderOnDeckBoard(snapshot) {
+    const queue = Array.isArray(snapshot.onDeck) && snapshot.onDeck.length
+      ? snapshot.onDeck
+      : snapshot.onDeckName ? [{ name: snapshot.onDeckName, category: "official" }] : [];
+    const next = queue[0];
+    text(q("#scoreboard-on-deck"), next ? next.name : "—");
+    const nextCategory = q("#scoreboard-on-deck-category");
+    if (nextCategory) {
+      nextCategory.hidden = !next || next.category === "official";
+      text(nextCategory, next ? pretty(next.category) : "");
+      nextCategory.className = `category-pill${next ? ` ${categoryClass(next.category)}` : ""}`;
+    }
+    const following = queue.slice(1, 4);
+    const wrap = q("#scoreboard-on-deck-following-wrap");
+    if (wrap) wrap.hidden = following.length === 0;
+    const list = q("#scoreboard-on-deck-following"); clear(list);
+    following.forEach((entry) => {
+      const item = make("li", "", entry.name);
+      if (entry.category !== "official") item.appendChild(make("span", "on-deck-following-category", pretty(entry.category)));
+      if (list) list.appendChild(item);
+    });
   }
 
   function renderScoreboardEvents(run) {
@@ -968,12 +994,15 @@
     });
   }
 
-  function renderLeaderboard(rows) {
-    const container = q("#scoreboard-leaderboard"); clear(container);
-    if (!rows.length) { container.appendChild(make("div", "tv-empty", "No leaderboard results yet.")); return; }
+  function renderLeaderboard(rows, selector) {
+    const container = q(selector); if (!container) return; clear(container);
+    if (!rows.length) { container.appendChild(make("div", "tv-empty", "No results yet.")); return; }
     rows.forEach((row) => {
-      const line = make("div", "tv-rank-row"); line.appendChild(make("span", "tv-rank", row.rank));
-      const name = make("div"); name.appendChild(make("div", "tv-rank-name", row.displayName || row.competitorName)); name.appendChild(make("div", "tv-rank-meta", `${pretty(row.category)} · ${pretty(row.status)}`)); line.appendChild(name); line.appendChild(make("span", "tv-points", row.points)); container.appendChild(line);
+      const line = make("div", `tv-rank-row${row.rank === 1 ? " is-leader" : ""}`); line.appendChild(make("span", "tv-rank", row.rank));
+      const name = make("div", "tv-rank-identity"); name.appendChild(make("div", "tv-rank-name", row.displayName || row.competitorName));
+      // Only exhibition rows need a label; the board title already names the category.
+      if (row.category === "exhibition") name.appendChild(make("div", "tv-rank-meta", "Exhibition"));
+      line.appendChild(name); line.appendChild(make("span", "tv-points", row.points)); container.appendChild(line);
     });
   }
 

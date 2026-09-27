@@ -118,11 +118,13 @@
     physicalStartHelp: $("physical-start-help"),
     pause: $("pause-run-button"),
     undoPress: $("undo-last-event-press"),
+    undoDetail: $("undo-last-event-detail"),
+    hardwarePanel: $("hardware-panel"),
+    hardwarePanelSummary: $("hardware-panel-summary"),
     finish: $("finish-run-button"),
     record: $("record-run-button"),
     discard: $("discard-run-button"),
     countdown: $("run-countdown"),
-    runCompetitor: $("run-competitor"),
     progress: $("event-progress"),
     runTotal: $("run-total"),
     banner: $("run-state-banner"),
@@ -318,6 +320,7 @@
     ui.masterConnect.disabled = state.busy || state.masterBusy || Boolean(master?.connected) || !ui.masterPort.value;
     ui.masterDisconnect.disabled = state.busy || state.masterBusy || !master?.connected;
     ui.masterRefresh.disabled = state.busy || state.masterBusy || state.masterLoading;
+    renderHardwarePanelSummary();
   }
 
   async function loadMaster(silent = false) {
@@ -1436,7 +1439,6 @@
     const events = currentEditionEvents(run);
     const complete = run ? events.filter((event) => event.status === "completed").length : 0;
     ui.progress.textContent = `${complete} / ${events.length}`;
-    ui.runCompetitor.textContent = run ? competitorName(run.competitorId) : "—";
     if (!run) {
       ui.banner.textContent = state.discardedRunNotice || "No run is active. Select a competitor to begin.";
       ui.banner.classList.toggle("is-discarded", Boolean(state.discardedRunNotice));
@@ -1531,7 +1533,8 @@
         ? `${event.name}: ${actionHint}.`
         : `${event.name}: physical button ${status.label}. ${actionHint}. Press to ${actionLabel}.`);
       button.title = identificationMode ? `${event.name} · ${actionHint}` : `${event.name} · ${status.label} · ${actionHint}`;
-      const name = make("strong", "", `${String(index + 1).padStart(2, "0")} · ${event.name}`);
+      const name = make("strong", "virtual-button-name");
+      name.append(make("span", "virtual-button-number", String(index + 1).padStart(2, "0")), make("span", "", event.name));
       const stateLabel = make("small", "virtual-device-status", status.label);
       const action = make("small", "virtual-action-hint", actionHint);
       const metadata = make("span", "virtual-button-meta");
@@ -1612,8 +1615,30 @@
     return { text: `${prefix}.${checkedLabel} Virtual event buttons remain available.`, entries, checkedAt };
   }
 
+  // The hardware section is collapsed by default, so its summary line carries the
+  // essentials and is highlighted when the master or a button needs attention.
+  function renderHardwarePanelSummary() {
+    const master = state.master;
+    const entries = state.hardwareEntries || [];
+    const responding = entries.filter((item) => item.status.key === "responding").length;
+    const missing = entries.filter((item) => item.status.key === "not-responding").length;
+    const masterText = state.masterError
+      ? "Master status unavailable"
+      : master?.connected
+        ? `Master connected · ${master.mode ? master.mode.toUpperCase() : "waiting for handshake"}`
+        : "Master not connected";
+    const buttonsText = entries.length
+      ? `${responding} of ${entries.length} buttons responding${missing ? ` · ${missing} not responding` : ""}`
+      : "No physical buttons assigned";
+    ui.hardwarePanelSummary.textContent = `${masterText} · ${buttonsText}`;
+    const attention = Boolean(state.masterError || missing || masterActions.isSpeedMode(master) || masterActions.handshakeGuidance(master));
+    ui.hardwarePanel.classList.toggle("needs-attention", attention);
+  }
+
   function renderPhysicalReadiness(events) {
     const summary = physicalAvailabilitySummary(events);
+    state.hardwareEntries = summary.entries;
+    renderHardwarePanelSummary();
     ui.physicalReadinessSummary.textContent = summary.text;
     ui.physicalReadinessList.replaceChildren();
     if (!summary.entries.length) {
@@ -1974,13 +1999,20 @@
     ui.start.textContent = run?.status === "armed"
       ? "Start armed run"
       : `Start ${masterActions.formatRunDuration(durationSeconds || 300)} run`;
+    // Start controls live beside the event buttons and only show while a run can start.
+    ui.start.hidden = locked && run?.status !== "armed";
+    ui.armPhysical.hidden = ui.start.hidden || !(state.master?.connected || run?.status === "armed");
     ui.armPhysical.disabled = state.busy || state.masterBusy || !masterActions.canArmPhysical(state.master, run, selectedId) || (!locked && durationSeconds === null);
     ui.armPhysical.textContent = run?.status === "armed"
       ? "Waiting for physical Start"
       : `Arm ${masterActions.formatRunDuration(durationSeconds || 300)} run`;
     ui.pause.disabled = state.busy || !run || !["active", "paused"].includes(run.status);
     ui.pause.textContent = run?.status === "paused" ? "Resume" : "Pause";
-    ui.undoPress.disabled = state.busy || !undoableEventPress(run);
+    const undoable = undoableEventPress(run);
+    ui.undoPress.disabled = state.busy || !undoable;
+    ui.undoDetail.textContent = undoable
+      ? `Will undo: ${undoable.event.name} · ${String(undoable.event.status).toLowerCase() === "completed" ? "finish" : "start"} press`
+      : "No event press to undo.";
     ui.finish.disabled = state.busy || !run || !["armed", "active", "paused"].includes(run.status);
     ui.discard.hidden = !runActions.isDiscardableRun(run);
     ui.discard.disabled = state.busy || !state.connected;
@@ -2423,6 +2455,10 @@
       renderSetupControls();
     });
     ui.countdownRetry.addEventListener("click", () => countdownCoordinator.retry());
+    try { ui.hardwarePanel.open = window.localStorage.getItem("gg.hardwarePanelOpen") === "true"; } catch { /* Storage may be unavailable. */ }
+    ui.hardwarePanel.addEventListener("toggle", () => {
+      try { window.localStorage.setItem("gg.hardwarePanelOpen", String(ui.hardwarePanel.open)); } catch { /* Storage may be unavailable. */ }
+    });
     ui.armPhysical.addEventListener("click", () => performAction(armPhysicalRun, "Run armed · waiting for the physical Start button."));
     ui.start.addEventListener("click", () => performAction(startRun, "Countdown started. Run begins at Go."));
     ui.masterConnect.addEventListener("click", () => {

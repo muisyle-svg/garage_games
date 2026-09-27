@@ -41,13 +41,11 @@
           <h1 id="run-heading">Current run</h1>
           <p id="run-caption" class="muted">Choose a competitor and set the run length before starting.</p>
         </div>
-        <div class="run-controls">
-          <button id="arm-physical-button" class="button button-secondary" type="button" disabled>Arm for physical Start</button>
-          <button id="start-run-button" class="button button-primary" type="button" disabled>Start 5:00 run</button>
+        <div class="run-controls" role="group" aria-label="Run controls">
           <button id="pause-run-button" class="button button-secondary" type="button" disabled>Pause</button>
-          <button id="undo-last-event-press" class="button button-quiet" type="button" disabled>Undo last press</button>
           <button id="finish-run-button" class="button button-secondary" type="button" disabled>Finish run</button>
           <button id="record-run-button" class="button button-record" type="button" disabled>Record result</button>
+          <span class="run-controls-divider" aria-hidden="true"></span>
           <button id="discard-run-button" class="button button-discard" type="button" hidden>Discard run</button>
         </div>
       </div>
@@ -70,39 +68,11 @@
           <small id="run-duration-help" class="run-duration-help" aria-live="polite">Default 5:00 · change before arming or starting.</small>
         </div>
         <div class="summary-stat summary-clock"><span>Time remaining</span><strong id="run-countdown">5:00</strong></div>
-        <div class="summary-stat"><span>Competitor</span><strong id="run-competitor">—</strong></div>
         <div class="summary-stat"><span>Events complete</span><strong id="event-progress">0 / 0</strong></div>
         <div class="summary-stat summary-total"><span>Total points</span><strong id="run-total">0</strong></div>
       </div>
 
-      <div class="physical-master-strip" aria-label="Physical master connection">
-        <div class="master-port-controls">
-          <label for="master-port-select">Physical master</label>
-          <select id="master-port-select" aria-label="Physical master COM port">
-            <option value="">Loading COM ports…</option>
-          </select>
-          <button id="master-connect-button" class="button button-secondary" type="button" disabled>Connect</button>
-          <button id="master-disconnect-button" class="button button-quiet" type="button" disabled>Disconnect</button>
-          <button id="master-refresh-button" class="button button-quiet" type="button">Refresh</button>
-        </div>
-        <div class="master-readout">
-          <strong id="master-connection-label">Checking connection…</strong>
-          <span id="master-mode-label">Mode: unknown</span>
-          <span id="master-last-message">Last message: —</span>
-        </div>
-        <p id="physical-start-help" class="master-help" role="status" aria-live="polite">Checking physical master status…</p>
-      </div>
-
       <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
-      <section class="physical-readiness-panel" aria-labelledby="physical-readiness-heading" aria-live="polite">
-        <div class="physical-readiness-heading">
-          <div><p class="mvp-kicker">Hardware check</p><h2 id="physical-readiness-heading">Physical event buttons</h2></div>
-          <strong id="physical-readiness-summary">Unverified until a physical scan.</strong>
-        </div>
-        <ul id="physical-readiness-list" class="physical-readiness-list">
-          <li class="physical-readiness-empty">Assigned physical buttons will be listed here; virtual presses stay available.</li>
-        </ul>
-      </section>
       <div id="countdown-audio-notice" class="countdown-audio-notice" role="status" aria-live="polite" hidden>
         <span id="countdown-audio-message"></span>
         <button id="countdown-audio-retry" class="button button-secondary" type="button" hidden>Retry countdown audio</button>
@@ -110,9 +80,16 @@
 
       <div class="scorekeeper-layout">
         <section class="sheet-card virtual-card" aria-labelledby="virtual-heading">
-          <div class="card-heading">
-            <div><p class="mvp-kicker">Course map</p><h2 id="virtual-heading">Virtual event buttons</h2></div>
-            <span class="small-note">Event controls · identify buttons while idle</span>
+          <div class="card-heading virtual-card-heading">
+            <div><p class="mvp-kicker">Course map</p><h2 id="virtual-heading">Start &amp; event buttons</h2></div>
+            <div class="start-controls" role="group" aria-label="Start the run">
+              <button id="arm-physical-button" class="button button-secondary" type="button" disabled hidden>Arm for physical Start</button>
+              <button id="start-run-button" class="button button-primary button-start" type="button" disabled>Start 5:00 run</button>
+            </div>
+          </div>
+          <div class="undo-bar">
+            <button id="undo-last-event-press" class="button button-undo" type="button" disabled><span aria-hidden="true">↶</span> Undo last press</button>
+            <span id="undo-last-event-detail" class="undo-detail" aria-live="polite">No event press to undo.</span>
           </div>
           <div id="virtual-event-buttons" class="virtual-event-grid">
             <p class="empty-state">Start a run to enable the virtual buttons.</p>
@@ -141,6 +118,41 @@
             <button id="save-current-edits" class="button button-secondary" type="button" disabled>Save scorecard edits</button>
           </div>
         </section>
+
+        <details id="hardware-panel" class="sheet-card hardware-panel">
+          <summary>
+            <span class="hardware-panel-title"><span class="mvp-kicker">Hardware</span><strong>Physical master &amp; buttons</strong></span>
+            <span id="hardware-panel-summary" class="hardware-panel-summary">Checking physical master status…</span>
+          </summary>
+          <div class="hardware-panel-content">
+            <div class="physical-master-strip" aria-label="Physical master connection">
+              <div class="master-port-controls">
+                <label for="master-port-select">Physical master</label>
+                <select id="master-port-select" aria-label="Physical master COM port">
+                  <option value="">Loading COM ports…</option>
+                </select>
+                <button id="master-connect-button" class="button button-secondary" type="button" disabled>Connect</button>
+                <button id="master-disconnect-button" class="button button-quiet" type="button" disabled>Disconnect</button>
+                <button id="master-refresh-button" class="button button-quiet" type="button">Refresh</button>
+              </div>
+              <div class="master-readout">
+                <strong id="master-connection-label">Checking connection…</strong>
+                <span id="master-mode-label">Mode: unknown</span>
+                <span id="master-last-message">Last message: —</span>
+              </div>
+              <p id="physical-start-help" class="master-help" role="status" aria-live="polite">Checking physical master status…</p>
+            </div>
+            <section class="physical-readiness-panel" aria-labelledby="physical-readiness-heading" aria-live="polite">
+              <div class="physical-readiness-heading">
+                <div><p class="mvp-kicker">Hardware check</p><h2 id="physical-readiness-heading">Physical event buttons</h2></div>
+                <strong id="physical-readiness-summary">Unverified until a physical scan.</strong>
+              </div>
+              <ul id="physical-readiness-list" class="physical-readiness-list">
+                <li class="physical-readiness-empty">Assigned physical buttons will be listed here; virtual presses stay available.</li>
+              </ul>
+            </section>
+          </div>
+        </details>
       </div>
     </section>
     </section>
