@@ -7,7 +7,7 @@ This document defines the first runnable local app; physical firmware follows.
 
 v2 was built as a separate application alongside the old controller, preserving
 its database. It is now the repository's only application; the old controller is
-kept at the `v1-final` tag. Reuse the available .NET 10 toolchain and SQLite dependencies.
+kept at the `archive/v1-final` tag. Reuse the available .NET 10 toolchain and SQLite dependencies.
 The initial Windows executable hosts its operator and spectator views locally on
 loopback. These views open in browser windows; a native window wrapper is not
 required for this milestone. Operation must work without internet or Google.

@@ -11,8 +11,8 @@ standard Windows data location; its original folder is retained.
 
 The earlier v1 controller (Google Sheets sync, PlatformIO firmware) and the
 original Apps Script scorekeeper were removed from the working tree when v2
-became the only version. They remain available at the `v1-final` tag:
-`git checkout v1-final`.
+became the only version. They remain available at the `archive/v1-final` tag:
+`git checkout archive/v1-final`.
 
 ## Repository layout
 

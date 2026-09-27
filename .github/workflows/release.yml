@@ -9,7 +9,6 @@ permissions:
 
 jobs:
   package:
-    if: github.ref_name != 'v1-final'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

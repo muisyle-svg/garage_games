@@ -5,7 +5,7 @@
 - This directory is the Git root; its parent `Garage Games` is only a container.
 - The app is v2 (`src/GarageGames.V2`). The v1 controller, PlatformIO firmware,
   Google Sheets sync, and legacy Apps Script scorekeeper live only at the
-  `v1-final` tag; do not restore them without an explicit request.
+  `archive/v1-final` tag; do not restore them without an explicit request.
 - Inspect status before edits. Use a feature branch; preserve user changes and
   existing history. Never force-push or discard work without explicit permission.
 - Answer status/diagnosis requests with targeted evidence. Expand checks only when
