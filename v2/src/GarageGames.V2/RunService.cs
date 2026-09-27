@@ -26,6 +26,7 @@ public sealed class EditRunRequest
     public RunCategory? Category { get; set; }
     public bool ReplaceExistingOfficial { get; set; }
     public RunStatus? Status { get; set; }
+    public bool ReopenRunClock { get; set; }
     public int? DurationLimitSeconds { get; set; }
     public long? ActiveElapsedMs { get; set; }
     public string? BonusResultJson { get; set; }
@@ -46,6 +47,8 @@ public sealed class EventEditRequest
     public long? DurationMs { get; set; }
     public int? ScoreOverride { get; set; }
     public bool ClearScoreOverride { get; set; }
+    public bool ClearMeasurementJson { get; set; }
+    public bool ClearNotes { get; set; }
     public string? MeasurementJson { get; set; }
     public string? Notes { get; set; }
 }
@@ -102,6 +105,25 @@ public sealed class RunService
     }
 
     public string EditionId => _edition.EditionId;
+
+    public bool CanIdentifyPhysicalButtons()
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            return _current is null || _current.Status is RunStatus.Finished or RunStatus.TimedOut or RunStatus.Aborted or RunStatus.Superseded;
+        }
+    }
+
+    public void SetLeaderboardPreference(bool showExhibitions)
+    {
+        lock (_gate)
+        {
+            if (_data.ShowExhibitionsOnLeaderboard == showExhibitions) return;
+            _store.SaveLeaderboardPreference(showExhibitions);
+            _data.ShowExhibitionsOnLeaderboard = showExhibitions;
+        }
+    }
 
     public EditionSetup GetSetup()
     {
@@ -201,7 +223,8 @@ public sealed class RunService
 
             try
             {
-                _store.SaveDevices(deviceRows);
+                _store.SaveDevices(deviceRows, connected && completed ? now : null);
+                if (connected && completed) _data.DeviceScanCheckedAt = now;
             }
             catch
             {
@@ -245,6 +268,8 @@ public sealed class RunService
             _data.Edits.Clear();
             _data.SelectedCompetitorId = null;
             _data.SelectedRunCategory = null;
+            _data.DeviceScanCheckedAt = null;
+            _data.ShowExhibitionsOnLeaderboard = false;
             _current = null;
             _lastDisplayedRun = null;
             _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
@@ -267,6 +292,143 @@ public sealed class RunService
         lock (_gate)
         {
             return _current?.Id == runId;
+        }
+    }
+
+    public RunRecord ClearEvent(string runId, string eventId, int expectedRevision)
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            var isCurrent = _current?.Id == runId;
+            var run = isCurrent ? _current! : FindHistoricalRun(runId);
+            if (run.Revision != expectedRevision)
+            {
+                throw new CommandException("This run changed before the event could be cleared. Reload it and try again.");
+            }
+
+            var eventResult = run.Events.SingleOrDefault(item => item.EventId == eventId)
+                ?? throw new CommandException("That event is not part of this run.");
+            var reopenRun = isCurrent && run.Status == RunStatus.Finished &&
+                run.Events.All(item => item.Type == EventKind.Standard);
+            var request = new EditRunRequest
+            {
+                ExpectedRevision = expectedRevision,
+                Reason = $"Operator cleared event '{eventResult.Name}'.",
+                Status = reopenRun ? RunStatus.Active : null,
+                ReopenRunClock = reopenRun,
+                Events =
+                [
+                    new EventEditRequest
+                    {
+                        EventId = eventId,
+                        Status = EventStatus.Pending,
+                        ClearStartElapsedMs = true,
+                        ClearFinishElapsedMs = true,
+                        ClearScoreOverride = true,
+                        ClearMeasurementJson = true,
+                        ClearNotes = true
+                    }
+                ]
+            };
+
+            var updated = isCurrent ? EditCurrentRun(request) : EditHistoricalRun(runId, request);
+            if (reopenRun) _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+            UpdateDeviceLeds();
+            return Clone(updated);
+        }
+    }
+
+    public RunRecord UndoLastEventPress()
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            var run = _current ?? (_lastDisplayedRun?.Status == RunStatus.TimedOut ? _lastDisplayedRun : null)
+                ?? throw new CommandException("There is no current run with an event press to undo.");
+            if (run.IsRecorded)
+            {
+                throw new CommandException("Recorded runs are changed through the history editor, not button-press undo.");
+            }
+            if (run.Status is not RunStatus.Active and not RunStatus.Paused and not RunStatus.Finished and not RunStatus.TimedOut)
+            {
+                throw new CommandException("Undo is available after the run has started.");
+            }
+
+            var selected = _data.Messages
+                .Where(message => message.RunId == run.Id && message.Type == "event-press" && message.Disposition == MessageDisposition.Accepted)
+                .Select(message => new
+                {
+                    Message = message,
+                    Event = run.Events.SingleOrDefault(item => item.Type == EventKind.Standard &&
+                        string.Equals(item.DeviceId, message.DeviceId, StringComparison.OrdinalIgnoreCase))
+                })
+                .Where(item => item.Event is not null && item.Event.LastSignalElapsedMs == item.Message.ElapsedMilliseconds &&
+                    ((item.Event.Status == EventStatus.Completed && item.Event.FinishElapsedMs == item.Message.ElapsedMilliseconds) ||
+                     (item.Event.Status == EventStatus.Active && item.Event.StartElapsedMs == item.Message.ElapsedMilliseconds && item.Event.FinishElapsedMs is null)))
+                .OrderByDescending(item => item.Message.Id)
+                .FirstOrDefault()
+                ?? throw new CommandException("There are no remaining standard event-button presses to undo.");
+
+            var targetEvent = selected.Event!;
+            var before = Serialize(run);
+            var candidate = Clone(run);
+            var candidateEvent = candidate.Events.Single(item => item.EventId == targetEvent.EventId);
+            var undoneFinish = candidateEvent.Status == EventStatus.Completed;
+            if (undoneFinish)
+            {
+                candidateEvent.FinishElapsedMs = null;
+                candidateEvent.Status = EventStatus.Active;
+                candidateEvent.LastSignalElapsedMs = candidateEvent.StartElapsedMs;
+                candidateEvent.ScoreOverride = null;
+            }
+            else
+            {
+                candidateEvent.StartElapsedMs = null;
+                candidateEvent.FinishElapsedMs = null;
+                candidateEvent.Status = EventStatus.Pending;
+                candidateEvent.LastSignalElapsedMs = null;
+                candidateEvent.ScoreOverride = null;
+            }
+            candidateEvent.Score = CalculateScore(candidateEvent, candidate.Edition);
+
+            var reopenRun = candidate.Status == RunStatus.Finished &&
+                run.Events.All(item => item.Type == EventKind.Standard);
+            if (reopenRun)
+            {
+                candidate.Status = RunStatus.Active;
+                candidate.FinishedAt = null;
+                candidate.Phase = RunPhase.Normal;
+                candidate.BonusStartedElapsedMs = null;
+                candidate.PausedFromPhase = null;
+            }
+            candidate.Revision = run.Revision + 1;
+            var after = Serialize(candidate);
+            selected.Message.Disposition = MessageDisposition.Undone;
+            selected.Message.Reason = $"Undone by operator; removed the {(undoneFinish ? "finish" : "start")} press for '{targetEvent.Name}'.";
+            var edit = new EditRecord
+            {
+                RunId = run.Id,
+                CreatedAt = _clock.UtcNow,
+                Reason = $"Undid the latest button press for '{targetEvent.Name}'.",
+                BeforeJson = before,
+                AfterJson = after
+            };
+
+            ReplaceRun(run, candidate);
+            try
+            {
+                _store.AddEditAndUndoMessage(candidate, edit, selected.Message);
+            }
+            catch
+            {
+                ReloadInMemoryAfterPersistenceFailure();
+                throw;
+            }
+            _data.Edits.Add(edit);
+            if (reopenRun) _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
+            UpdateDeviceLeds();
+            return Clone(candidate);
         }
     }
 
@@ -374,8 +536,10 @@ public sealed class RunService
                 EditionName = _edition.Name,
                 DurationLimitSeconds = _edition.DurationLimitSeconds,
                 SimulationMode = simulationMode,
+                ShowExhibitionsOnLeaderboard = _data.ShowExhibitionsOnLeaderboard,
                 SelectedCompetitorId = _data.SelectedCompetitorId ?? "",
                 SelectedRunCategory = _data.SelectedRunCategory,
+                DeviceScanCheckedAt = _data.DeviceScanCheckedAt,
                 CurrentRun = _current is null ? (_lastDisplayedRun is null ? null : Clone(_lastDisplayedRun)) : Clone(_current),
                 Events = _edition.ToSnapshot().Events,
                 Competitors = _data.Competitors.Select(Clone).ToList(),
@@ -427,6 +591,7 @@ public sealed class RunService
                 EditionName = _edition.Name,
                 DurationLimitSeconds = displayedRun?.Edition.DurationLimitSeconds ?? _edition.DurationLimitSeconds,
                 SimulationMode = simulationMode,
+                ShowExhibitionsOnLeaderboard = _data.ShowExhibitionsOnLeaderboard,
                 CurrentRun = current,
                 OnDeckName = next is null ? null : competitorNames.GetValueOrDefault(next.CompetitorId),
                 Leaderboard = BuildLeaderboard()
@@ -457,11 +622,109 @@ public sealed class RunService
         }
     }
 
+    public CompetitorImportResult ImportCompetitors(IEnumerable<string> names)
+    {
+        lock (_gate)
+        {
+            var incoming = names.Take(501).ToList();
+            if (incoming.Count > 500)
+            {
+                throw new CommandException("Import is limited to 500 names at a time.");
+            }
+
+            var knownNames = _data.Competitors.Select(item => NormalizeCompetitorName(item.Name))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var added = new List<CompetitorRecord>();
+            var skipped = new List<string>();
+            foreach (var rawName in incoming)
+            {
+                var name = rawName?.Trim() ?? "";
+                if (name.Length is < 1 or > 120)
+                {
+                    skipped.Add($"{(name.Length == 0 ? "(blank row)" : name)} — names must be 1–120 characters.");
+                    continue;
+                }
+
+                if (!knownNames.Add(NormalizeCompetitorName(name)))
+                {
+                    skipped.Add($"{name} — duplicate name already exists or appears earlier in this import.");
+                    continue;
+                }
+
+                added.Add(new CompetitorRecord
+                {
+                    Id = NewId("competitor"),
+                    Name = name,
+                    EditionId = _edition.EditionId,
+                    CreatedAt = _clock.UtcNow.AddTicks(added.Count)
+                });
+            }
+
+            if (added.Count > 0)
+            {
+                _store.AddCompetitors(added);
+                _data.Competitors.AddRange(added);
+            }
+
+            return new CompetitorImportResult(added.Select(Clone).ToList(), skipped);
+        }
+    }
+
+    public CompetitorRecord RenameCompetitor(string competitorId, string name)
+    {
+        lock (_gate)
+        {
+            var competitor = _data.Competitors.SingleOrDefault(item => item.Id == competitorId)
+                ?? throw new CommandException("Competitor was not found.");
+            name = name.Trim();
+            if (name.Length is < 1 or > 120)
+            {
+                throw new CommandException("Competitor name must be between 1 and 120 characters.");
+            }
+            if (_data.Competitors.Any(item => item.Id != competitorId &&
+                string.Equals(NormalizeCompetitorName(item.Name), NormalizeCompetitorName(name), StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new CommandException("Another competitor already has that name. Names must be unique ignoring capitalization and extra spaces.");
+            }
+
+            _store.RenameCompetitor(competitorId, name);
+            competitor.Name = name;
+            return Clone(competitor);
+        }
+    }
+
+    public CompetitorRecord SetCompetitorArchived(string competitorId, bool archived)
+    {
+        lock (_gate)
+        {
+            var competitor = _data.Competitors.SingleOrDefault(item => item.Id == competitorId)
+                ?? throw new CommandException("Competitor was not found.");
+            if (archived && _data.Queue.Any(item => item.CompetitorId == competitorId))
+            {
+                throw new CommandException("Remove this competitor from the on-deck queue before archiving them.");
+            }
+            if (archived && _current?.CompetitorId == competitorId)
+            {
+                throw new CommandException("Finish or discard this competitor’s current run before archiving them.");
+            }
+
+            var archivedIds = _data.Competitors.Where(item => item.IsArchived && item.Id != competitorId)
+                .Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+            if (archived) archivedIds.Add(competitorId);
+            var selectedCompetitorId = archived && _data.SelectedCompetitorId == competitorId
+                ? null : _data.SelectedCompetitorId;
+            _store.SaveArchivedCompetitorIds(archivedIds, selectedCompetitorId, _data.SelectedRunCategory);
+            competitor.IsArchived = archived;
+            _data.SelectedCompetitorId = selectedCompetitorId;
+            return Clone(competitor);
+        }
+    }
+
     public QueueItemRecord AddToQueue(string competitorId, RunCategory category, bool replaceExistingOfficial = false, string? reason = null)
     {
         lock (_gate)
         {
-            RequireCompetitor(competitorId);
+            RequireActiveCompetitor(competitorId);
             if (category != RunCategory.Official)
             {
                 replaceExistingOfficial = false;
@@ -501,7 +764,7 @@ public sealed class RunService
             {
                 throw new CommandException("Record or finish the current run before starting another competitor.");
             }
-            RequireCompetitor(competitorId);
+            RequireActiveCompetitor(competitorId);
             if (!Enum.IsDefined(category))
             {
                 throw new CommandException("Run category is invalid.");
@@ -1860,6 +2123,10 @@ public sealed class RunService
         {
             candidate.Status = status;
         }
+        if (request.ReopenRunClock)
+        {
+            ReopenRun(candidate);
+        }
 
         if (request.DurationLimitSeconds is int durationLimit)
         {
@@ -1933,13 +2200,25 @@ public sealed class RunService
             {
                 result.ScoreOverride = null;
             }
+            if (edit.ClearMeasurementJson)
+            {
+                result.MeasurementJson = null;
+            }
             if (edit.MeasurementJson is not null)
             {
                 result.MeasurementJson = edit.MeasurementJson;
             }
+            if (edit.ClearNotes)
+            {
+                result.Notes = null;
+            }
             if (edit.Notes is not null)
             {
                 result.Notes = edit.Notes;
+            }
+            if (edit.ClearStartElapsedMs || edit.ClearFinishElapsedMs)
+            {
+                result.LastSignalElapsedMs = null;
             }
             result.Score = CalculateScore(result, candidate.Edition);
         }
@@ -2165,6 +2444,7 @@ public sealed class RunService
         _data.Edits.AddRange(fresh.Edits);
         _data.SelectedCompetitorId = fresh.SelectedCompetitorId;
         _data.SelectedRunCategory = fresh.SelectedRunCategory;
+        _data.DeviceScanCheckedAt = fresh.DeviceScanCheckedAt;
         _current = _data.Runs.SingleOrDefault(r => r.Status is RunStatus.Armed or RunStatus.Countdown or RunStatus.Active or RunStatus.Paused or RunStatus.Finished);
         _lastDisplayedRun = _current ?? _data.Runs.OrderByDescending(r => r.CreatedAt).FirstOrDefault();
         _clockAnchorMilliseconds = _clock.MonotonicMilliseconds;
@@ -2212,6 +2492,16 @@ public sealed class RunService
         }
     }
 
+    private void RequireActiveCompetitor(string competitorId)
+    {
+        var competitor = _data.Competitors.SingleOrDefault(c => c.Id == competitorId);
+        if (competitor is null) throw new CommandException("Competitor was not found.");
+        if (competitor.IsArchived) throw new CommandException("This competitor is archived. Restore them before adding a new run.");
+    }
+
+    private static string NormalizeCompetitorName(string name) =>
+        string.Join(' ', name.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+
     private RunRecord? FindAcceptedOfficial(string competitorId, string editionId) => _data.Runs
         .Where(r => r.CompetitorId == competitorId && r.EditionId == editionId && r.IsCountedOfficial)
         .OrderByDescending(r => r.CreatedAt)
@@ -2243,6 +2533,15 @@ public sealed class RunService
     {
         run.Status = RunStatus.Finished;
         run.FinishedAt ??= _clock.UtcNow;
+        run.PausedFromPhase = null;
+        run.Phase = RunPhase.Normal;
+        run.BonusStartedElapsedMs = null;
+    }
+
+    private static void ReopenRun(RunRecord run)
+    {
+        run.Status = RunStatus.Active;
+        run.FinishedAt = null;
         run.PausedFromPhase = null;
         run.Phase = RunPhase.Normal;
         run.BonusStartedElapsedMs = null;
@@ -2296,27 +2595,52 @@ public sealed class RunService
     {
         var competitorNames = _data.Competitors.ToDictionary(c => c.Id, c => c.Name);
         var rows = _data.Runs
-            .Where(r => r.EditionId == _edition.EditionId && r.IsCountedOfficial)
+            .Where(run => run.EditionId == _edition.EditionId &&
+                run.SupersededByRunId is null &&
+                run.Status is not RunStatus.Aborted and not RunStatus.Superseded &&
+                (run.Category == RunCategory.Official && run.IsCountedOfficial ||
+                 run.Category == RunCategory.Playoff && run.IsRecorded ||
+                 run.Category == RunCategory.Exhibition && _data.ShowExhibitionsOnLeaderboard && run.IsRecorded))
             .Select(r => new LeaderboardRow
             {
                 CompetitorName = competitorNames.GetValueOrDefault(r.CompetitorId, "Unknown competitor"),
+                DisplayName = competitorNames.GetValueOrDefault(r.CompetitorId, "Unknown competitor"),
                 Points = r.TotalPoints,
                 Category = r.Category,
                 Status = r.Status,
                 RunId = r.Id
             })
-            .OrderByDescending(row => row.Points)
+            .ToList();
+
+        rows = rows.OrderBy(row => row.Category switch { RunCategory.Playoff => 0, RunCategory.Official => 1, _ => 2 })
+            .ThenByDescending(row => row.Points)
             .ThenBy(row => row.CompetitorName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        var runById = _data.Runs.ToDictionary(run => run.Id, StringComparer.Ordinal);
+        foreach (var exhibitionGroup in rows.Where(row => row.Category == RunCategory.Exhibition)
+                     .GroupBy(row => row.CompetitorName, StringComparer.OrdinalIgnoreCase))
+        {
+            var ordered = exhibitionGroup.OrderBy(row => runById[row.RunId!].CreatedAt).ThenBy(row => row.RunId, StringComparer.Ordinal).ToList();
+            if (ordered.Count > 1)
+            {
+                for (var index = 0; index < ordered.Count; index++)
+                {
+                    ordered[index].DisplayName = $"{ordered[index].CompetitorName} (Exhibition {index + 1})";
+                }
+            }
+        }
+
         var lastPoints = int.MinValue;
+        RunCategory? lastCategory = null;
         var lastRank = 0;
         for (var index = 0; index < rows.Count; index++)
         {
-            if (rows[index].Points != lastPoints)
+            if (rows[index].Points != lastPoints || rows[index].Category != lastCategory)
             {
                 lastRank = index + 1;
                 lastPoints = rows[index].Points;
+                lastCategory = rows[index].Category;
             }
             rows[index].Rank = lastRank;
         }

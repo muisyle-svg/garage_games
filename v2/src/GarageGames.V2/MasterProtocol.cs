@@ -11,6 +11,7 @@ public sealed record MasterRunStatus(string State, int RemainingSeconds);
 public sealed record MasterGarageStatus(string Token, string State);
 
 public sealed record MasterPhysicalPress(string BootToken, string RunToken, string DeviceId, uint Sequence);
+public sealed record MasterButtonTestPress(string BootToken, string DeviceId, uint Sequence);
 
 public sealed record MasterPhysicalPressResult(string State, MessageDisposition Disposition, string Reason);
 
@@ -21,7 +22,9 @@ public sealed record MasterConnectionSnapshot(
     string? Port,
     IReadOnlyList<string> AvailablePorts,
     string? Mode,
-    string? LastMessage);
+    string? LastMessage,
+    string? LastTestDeviceId = null,
+    DateTimeOffset? LastTestAt = null);
 
 public static class MasterProtocolCodec
 {
@@ -60,6 +63,29 @@ public static class MasterProtocolCodec
 
     public static string FormatPhysicalPressResult(MasterPhysicalPress press, string state) =>
         $"GG1 RESULT {press.RunToken} {press.DeviceId} {press.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)} {state}";
+
+    public static string FormatButtonTest(MasterButtonTestPress press) =>
+        $"GG1 TEST {press.BootToken} {press.DeviceId} {press.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+    public static string FormatIdentifyCommand(string deviceId, uint sequence) =>
+        $"GG1 IDENTIFY {deviceId.ToUpperInvariant()} {sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+    public static bool TryParseButtonTest(string line, out MasterButtonTestPress press)
+    {
+        press = null!;
+        if (line.Length > MaximumLineLength) return false;
+        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length != 5 || parts[0] != "GG1" || parts[1] != "TEST" ||
+            !IsValidBootToken(parts[2]) || !IsUpperHex(parts[3], 12) ||
+            !uint.TryParse(parts[4], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var sequence) || sequence == 0)
+        {
+            return false;
+        }
+
+        press = new MasterButtonTestPress(parts[2], parts[3], sequence);
+        return true;
+    }
 
     public static bool TryParsePhysicalPress(string line, out MasterPhysicalPress press)
     {

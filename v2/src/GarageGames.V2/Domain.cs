@@ -79,7 +79,8 @@ public enum MessageDisposition
     InvalidSignal,
     BonusNotReady,
     InvalidEnvelope,
-    StaleSequence
+    StaleSequence,
+    Undone
 }
 
 public sealed class ScoringRule
@@ -269,6 +270,7 @@ public sealed class CompetitorRecord
     public required string Name { get; set; }
     public required string EditionId { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+    public bool IsArchived { get; set; }
 }
 
 public sealed class QueueItemRecord
@@ -409,8 +411,10 @@ public sealed class OperatorSnapshot
     public required string EditionName { get; set; }
     public int DurationLimitSeconds { get; set; }
     public bool SimulationMode { get; set; }
+    public bool ShowExhibitionsOnLeaderboard { get; set; }
     public string SelectedCompetitorId { get; set; } = "";
     public RunCategory? SelectedRunCategory { get; set; }
+    public DateTimeOffset? DeviceScanCheckedAt { get; set; }
     public RunRecord? CurrentRun { get; set; }
     public required List<EventSnapshot> Events { get; set; }
     public required List<CompetitorRecord> Competitors { get; set; }
@@ -427,6 +431,7 @@ public sealed class ScoreboardSnapshot
     public required string EditionName { get; set; }
     public int DurationLimitSeconds { get; set; }
     public bool SimulationMode { get; set; }
+    public bool ShowExhibitionsOnLeaderboard { get; set; }
     public ScoreboardRun? CurrentRun { get; set; }
     public string? OnDeckName { get; set; }
     public required List<LeaderboardRow> Leaderboard { get; set; }
@@ -459,6 +464,7 @@ public sealed class LeaderboardRow
 {
     public int Rank { get; set; }
     public required string CompetitorName { get; set; }
+    public string? DisplayName { get; set; }
     public int Points { get; set; }
     public RunCategory Category { get; set; }
     public RunStatus Status { get; set; }

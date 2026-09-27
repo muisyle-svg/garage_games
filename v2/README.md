@@ -7,7 +7,9 @@ timestamps, automatic event points with editable overrides and bonus scoring,
 and a history that can be corrected later.
 Timed-out runs remain as incomplete history and do not prevent starting the next
 competitor. The original Garage Games app and firmware remain untouched;
-existing historical data is not used or modified.
+older event records remain untouched. A prior v2 data folder is copied only
+when needed to move it to the standard Windows data location; its original
+folder is retained.
 
 The app supports virtual Start without a connected master and can also connect a
 manually attached XIAO ESP32-C3 over USB serial. A short physical button press
@@ -33,17 +35,17 @@ From the repository root in PowerShell:
 ```powershell
 $env:DOTNET_CLI_HOME = (Resolve-Path .tools).Path
 $env:APPDATA = (Resolve-Path .tools).Path + '\appdata'
-$env:LOCALAPPDATA = (Resolve-Path .tools).Path + '\localappdata'
 $env:NUGET_PACKAGES = (Resolve-Path .tools).Path + '\nuget-packages'
 & .tools/dotnet/dotnet.exe restore v2/GarageGames.V2.slnx --configfile NuGet.Config
-& .tools/dotnet/dotnet.exe run --project v2/src/GarageGames.V2/GarageGames.V2.csproj -- --data-path "$env:LOCALAPPDATA\GarageGamesV2" --urls http://127.0.0.1:5187
+& .tools/dotnet/dotnet.exe run --project v2/src/GarageGames.V2/GarageGames.V2.csproj -- --legacy-data-path "$PWD\.tools\localappdata\GarageGamesV2" --urls http://127.0.0.1:5187
 ```
 
 Open `http://127.0.0.1:5187/` for the operator view and use **Open scoreboard**
 to open the separate spectator view at `/scoreboard` (the alias is also directly
 usable). The default data path is
-`%LOCALAPPDATA%\GarageGamesV2`; pass `--data-path` to isolate a test or event
-store. The app enforces loopback-only URLs; a `--urls` value such as `0.0.0.0`
+`%LOCALAPPDATA%\GarageGamesV2` for both the tray launcher and direct launches;
+pass `--data-path` only when intentionally isolating a test or event store. The
+app enforces loopback-only URLs; a `--urls` value such as `0.0.0.0`
 is rejected rather than exposed. For normal Windows use, double-click
 `v2\Start Garage Games V2.cmd`. It opens the operator view in your browser and
 leaves Garage Games in the Windows notification area (system tray). Right-click
@@ -52,27 +54,34 @@ also opens the app. Closing the browser only closes that window. Choosing Exit
 asks the server started by this tray session to shut down cleanly so the local
 database can close safely. The tray launcher is single-instance for the
 current Windows user, creates no Windows startup entry, and stores launcher logs under
-`v2\.tools\logs`.
+`.tools\logs`.
 
-If the launcher finds a healthy server that was already running before this
-tray session, it reuses that server. In that case the tray menu says
-**Exit (leave existing server running)** and will not stop it or any unrelated
-process. If shutdown of a server owned by this tray session cannot be confirmed,
+Before reusing an existing server, the launcher verifies its build fingerprint,
+application folder, and data folder. If any identity is missing or does not
+match, it will not connect or start a second copy; close the other Garage Games
+instance cleanly and retry. A verified server that was already running before
+this tray session is reused, and the tray menu says
+**Exit (leave existing server running)**. The launcher will not stop it or any
+unrelated process. If shutdown of a server owned by this tray session cannot be confirmed,
 the launcher will not force-kill it; the tray stays available so Exit can be
 retried. If a startup problem appears, check the `.out.log` and `.err.log` files
-under `v2\.tools\logs`.
+under `.tools\logs`.
 
-The launcher uses the repository-local toolchain and a distinct `GarageGamesV2`
-data directory. If a published executable exists at
-`v2\publish\win-x64\GarageGames.V2.exe`, the launcher uses it directly.
-This takes precedence over the source project, so an old published executable
-can hide newer source changes until it is republished or otherwise removed.
-Because the launcher deliberately redirects its local .NET environment, its
-data path is `v2\.tools\localappdata\GarageGamesV2` in this repository. A
-direct command-line launch without those environment overrides uses the normal
-Windows `%LOCALAPPDATA%\GarageGamesV2` path instead.
+The launcher uses the repository-local .NET toolchain but stores run data in
+`%LOCALAPPDATA%\GarageGamesV2`, outside the repository and Git history. If the
+older repo-local data folder at `.tools\localappdata\GarageGamesV2` exists
+and the standard folder does not, the app copies the database and its backups
+to the standard folder after confirming the old app no longer holds its data
+lock. The old folder is retained unchanged. If both folders already contain a
+database, the standard `%LOCALAPPDATA%` store is used and the repo-local copy
+is left untouched.
 
-When the launcher falls back to the source project, it runs with
+The normal shortcut runs the current source project, so a stale published
+executable cannot silently hide source updates. To intentionally launch a
+published build, run `& 'v2\Start Garage Games V2.ps1' -UsePublished`; the tray still
+checks that build's identity before reuse.
+
+The standard source launch runs with
 `--no-restore`. The app now references `System.IO.Ports`, so run the restore
 command above with the repository `NuGet.Config` before launching the source
 build; the launcher does not restore packages itself. Exit the current tray
@@ -155,8 +164,8 @@ operation.
 
 1. Exit the current Garage Games tray instance so the next launch loads the
    updated application. Make sure the source project has been restored as
-   described above; if `v2\publish\win-x64\GarageGames.V2.exe` exists, the
-   launcher will prefer that published executable.
+   described above. The standard shortcut now runs the source project; a
+   published build is used only when explicitly requested with `-UsePublished`.
 2. In Arduino IDE, open
    `v2\firmware\garage_games_master\garage_games_master.ino`. Install the
    ESP32 Arduino board package and `TM1637Display`, select board
@@ -210,7 +219,6 @@ time; recovery still pauses the run and never awards the uncertain downtime.
 ```powershell
 $env:DOTNET_CLI_HOME = (Resolve-Path .tools).Path
 $env:APPDATA = (Resolve-Path .tools).Path + '\appdata'
-$env:LOCALAPPDATA = (Resolve-Path .tools).Path + '\localappdata'
 $env:NUGET_PACKAGES = (Resolve-Path .tools).Path + '\nuget-packages'
 & .tools/dotnet/dotnet.exe restore v2/GarageGames.V2.slnx --configfile NuGet.Config
 & .tools/dotnet/dotnet.exe build v2/GarageGames.V2.slnx -c Release --no-restore
@@ -224,7 +232,8 @@ For a self-contained Windows build, run:
 & .tools/dotnet/dotnet.exe publish v2/src/GarageGames.V2/GarageGames.V2.csproj -c Release -r win-x64 --self-contained true -o v2/publish/win-x64
 ```
 
-The launcher will then use `v2/publish/win-x64/GarageGames.V2.exe`. The
+To run the published executable, explicitly start the PowerShell launcher with
+`-UsePublished`. The
 `--hardware-mode` flag disables simulated device availability and simulator
 clock/input routes, while retaining the physical USB serial master transport
 and operator controls, including virtual Start and virtual event presses. The

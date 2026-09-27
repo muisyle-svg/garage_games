@@ -8,6 +8,7 @@ namespace GarageGames.V2;
 public sealed class StoreSnapshot
 {
     public List<CompetitorRecord> Competitors { get; } = [];
+    public HashSet<string> ArchivedCompetitorIds { get; set; } = new(StringComparer.Ordinal);
     public List<QueueItemRecord> Queue { get; } = [];
     public List<DeviceRecord> Devices { get; } = [];
     public List<RunRecord> Runs { get; } = [];
@@ -15,6 +16,8 @@ public sealed class StoreSnapshot
     public List<EditRecord> Edits { get; } = [];
     public string? SelectedCompetitorId { get; set; }
     public RunCategory? SelectedRunCategory { get; set; }
+    public DateTimeOffset? DeviceScanCheckedAt { get; set; }
+    public bool ShowExhibitionsOnLeaderboard { get; set; }
 }
 
 public sealed class RunStore : IDisposable
@@ -96,6 +99,12 @@ public sealed class RunStore : IDisposable
         });
     }
 
+    public void SaveLeaderboardPreference(bool showExhibitions)
+    {
+        ExecuteTransaction((connection, transaction) =>
+            SetMetaValue(connection, transaction, "show_exhibitions_on_leaderboard", showExhibitions ? "true" : "false"));
+    }
+
     public void EnsureDevices(EditionDefinition edition)
     {
         ThrowIfDisposed();
@@ -104,13 +113,17 @@ public sealed class RunStore : IDisposable
             EnsureDeviceRows(connection, transaction, edition.Events));
     }
 
-    public void SaveDevices(IReadOnlyCollection<DeviceRecord> devices)
+    public void SaveDevices(IReadOnlyCollection<DeviceRecord> devices, DateTimeOffset? checkedAt = null)
     {
         ExecuteTransaction((connection, transaction) =>
         {
             foreach (var device in devices)
             {
                 UpsertDevice(connection, transaction, device);
+            }
+            if (checkedAt is DateTimeOffset timestamp)
+            {
+                SetMetaValue(connection, transaction, "device_scan_checked_at", FormatDate(timestamp));
             }
         });
     }
@@ -123,18 +136,38 @@ public sealed class RunStore : IDisposable
 
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "SELECT key, value FROM meta WHERE key IN ('selected_competitor_id', 'selected_run_category')";
+            command.CommandText = "SELECT key, value FROM meta WHERE key IN ('selected_competitor_id', 'selected_run_category', 'archived_competitor_ids_json', 'device_scan_checked_at', 'show_exhibitions_on_leaderboard')";
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
                 var value = reader.GetString(1);
-                if (reader.GetString(0) == "selected_competitor_id")
+                var key = reader.GetString(0);
+                if (key == "selected_competitor_id")
                 {
                     snapshot.SelectedCompetitorId = string.IsNullOrEmpty(value) ? null : value;
                 }
-                else if (!string.IsNullOrEmpty(value))
+                else if (key == "selected_run_category" && !string.IsNullOrEmpty(value))
                 {
                     snapshot.SelectedRunCategory = ParseEnum<RunCategory>(value, "selected run category");
+                }
+                else if (key == "archived_competitor_ids_json")
+                {
+                    try
+                    {
+                        snapshot.ArchivedCompetitorIds = JsonSerializer.Deserialize<HashSet<string>>(value, JsonDefaults.Options) ?? [];
+                    }
+                    catch (JsonException exception)
+                    {
+                        throw new InvalidDataException("Archived competitor metadata is invalid; the database was not changed.", exception);
+                    }
+                }
+                else if (key == "device_scan_checked_at" && !string.IsNullOrEmpty(value))
+                {
+                    snapshot.DeviceScanCheckedAt = ParseDate(value);
+                }
+                else if (key == "show_exhibitions_on_leaderboard")
+                {
+                    snapshot.ShowExhibitionsOnLeaderboard = string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
                 }
             }
         }
@@ -150,7 +183,8 @@ public sealed class RunStore : IDisposable
                     Id = reader.GetString(0),
                     Name = reader.GetString(1),
                     EditionId = reader.GetString(2),
-                    CreatedAt = ParseDate(reader.GetString(3))
+                    CreatedAt = ParseDate(reader.GetString(3)),
+                    IsArchived = snapshot.ArchivedCompetitorIds.Contains(reader.GetString(0))
                 });
             }
         }
@@ -331,6 +365,51 @@ public sealed class RunStore : IDisposable
         });
     }
 
+    public void AddCompetitors(IReadOnlyCollection<CompetitorRecord> competitors)
+    {
+        ExecuteTransaction((connection, transaction) =>
+        {
+            foreach (var competitor in competitors)
+            {
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = "INSERT INTO competitors(id, name, edition_id, created_at) VALUES($id, $name, $edition_id, $created_at)";
+                command.Parameters.AddWithValue("$id", competitor.Id);
+                command.Parameters.AddWithValue("$name", competitor.Name);
+                command.Parameters.AddWithValue("$edition_id", competitor.EditionId);
+                command.Parameters.AddWithValue("$created_at", FormatDate(competitor.CreatedAt));
+                command.ExecuteNonQuery();
+            }
+        });
+    }
+
+    public void RenameCompetitor(string competitorId, string name)
+    {
+        ExecuteTransaction((connection, transaction) =>
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "UPDATE competitors SET name = $name WHERE id = $id";
+            command.Parameters.AddWithValue("$id", competitorId);
+            command.Parameters.AddWithValue("$name", name);
+            if (command.ExecuteNonQuery() != 1)
+            {
+                throw new InvalidOperationException("The competitor disappeared before the rename could be saved.");
+            }
+        });
+    }
+
+    public void SaveArchivedCompetitorIds(IEnumerable<string> competitorIds, string? selectedCompetitorId, RunCategory? selectedRunCategory)
+    {
+        var json = JsonSerializer.Serialize(competitorIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(), JsonDefaults.Options);
+        ExecuteTransaction((connection, transaction) =>
+        {
+            SetMetaValue(connection, transaction, "archived_competitor_ids_json", json);
+            SetMetaValue(connection, transaction, "selected_competitor_id", selectedCompetitorId ?? "");
+            SetMetaValue(connection, transaction, "selected_run_category", selectedRunCategory?.ToString() ?? "");
+        });
+    }
+
     public void SaveQueue(IReadOnlyCollection<QueueItemRecord> queue)
     {
         ExecuteTransaction((connection, transaction) =>
@@ -461,6 +540,42 @@ public sealed class RunStore : IDisposable
             idCommand.Transaction = transaction;
             idCommand.CommandText = "SELECT last_insert_rowid()";
             edit.Id = Convert.ToInt64(idCommand.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        });
+    }
+
+    public void AddEditAndUndoMessage(RunRecord run, EditRecord edit, MessageRecord message)
+    {
+        ExecuteTransaction((connection, transaction) =>
+        {
+            UpsertRun(connection, transaction, run);
+            using (var update = connection.CreateCommand())
+            {
+                update.Transaction = transaction;
+                update.CommandText = "UPDATE messages SET disposition = $disposition, reason = $reason WHERE id = $id AND disposition = $accepted";
+                update.Parameters.AddWithValue("$disposition", MessageDisposition.Undone.ToString());
+                update.Parameters.AddWithValue("$reason", message.Reason ?? "Event button press was undone by the operator.");
+                update.Parameters.AddWithValue("$id", message.Id);
+                update.Parameters.AddWithValue("$accepted", MessageDisposition.Accepted.ToString());
+                if (update.ExecuteNonQuery() != 1)
+                {
+                    throw new InvalidOperationException("The event press changed before it could be undone.");
+                }
+            }
+
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "INSERT INTO edits(run_id, created_at, reason, before_json, after_json, undone_edit_id) VALUES($run_id, $created_at, $reason, $before, $after, NULL)";
+            command.Parameters.AddWithValue("$run_id", edit.RunId);
+            command.Parameters.AddWithValue("$created_at", FormatDate(edit.CreatedAt));
+            command.Parameters.AddWithValue("$reason", edit.Reason);
+            command.Parameters.AddWithValue("$before", edit.BeforeJson);
+            command.Parameters.AddWithValue("$after", edit.AfterJson);
+            command.ExecuteNonQuery();
+
+            using var idCommand = connection.CreateCommand();
+            idCommand.Transaction = transaction;
+            idCommand.CommandText = "SELECT last_insert_rowid()";
+            edit.Id = Convert.ToInt64(idCommand.ExecuteScalar(), CultureInfo.InvariantCulture);
         });
     }
 

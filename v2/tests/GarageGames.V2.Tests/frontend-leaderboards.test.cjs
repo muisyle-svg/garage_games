@@ -17,7 +17,7 @@ function event(
   return { eventId, startElapsedMs, finishElapsedMs, score, scoreOverride, status };
 }
 
-test("event leaderboards use official leaderboard run IDs and configured events", () => {
+test("event leaderboards use visible category runs and configured events", () => {
   const events = [{ eventId: "pour", name: "Perfect Pour" }, { eventId: "darts", name: "Row Darts" }];
   const leaderboard = [
     { runId: "official-a", competitorName: "Alex", category: "official" },
@@ -32,14 +32,16 @@ test("event leaderboards use official leaderboard run IDs and configured events"
 
   const boards = buildEventLeaderboards(events, leaderboard, history);
   assert.deepEqual(boards.map((board) => board.name), ["Perfect Pour", "Row Darts"]);
-  assert.deepEqual(boards[0].rows.map((row) => [row.competitorName, row.rank, row.points, row.durationMs]), [
-    ["Blair", 1, 45, 5_000],
-    ["Alex", 2, 45, 10_000]
+  assert.deepEqual(boards[0].rows.map((row) => [row.competitorName, row.category, row.rank, row.points, row.durationMs]), [
+    ["Casey", "playoff", 1, 50, 1_000],
+    ["Blair", "official", 1, 45, 5_000],
+    ["Alex", "official", 2, 45, 10_000]
   ]);
-  assert.deepEqual(boards[1].rows.map((row) => [row.competitorName, row.status, row.rank, row.points, row.durationMs]), [
-    ["Alex", "dnf", null, null, null],
-    ["Blair", "dnf", null, null, null]
-  ], "counted official competitors without a completed event appear as DNF");
+  assert.deepEqual(boards[1].rows.map((row) => [row.competitorName, row.category, row.status, row.rank, row.points, row.durationMs]), [
+    ["Casey", "playoff", "dnf", null, null, null],
+    ["Alex", "official", "dnf", null, null, null],
+    ["Blair", "official", "dnf", null, null, null]
+  ], "visible competitors without a completed event appear as DNF within their category");
 });
 
 test("event leaderboard ties require equal points and equal duration", () => {
@@ -63,7 +65,7 @@ test("event leaderboard ties require equal points and equal duration", () => {
   ]);
 });
 
-test("event leaderboards include completed score-only results and exclude unfinished and non-official runs", () => {
+test("event leaderboards include score-only, playoff, exhibition, and DNF results", () => {
   const events = [{ eventId: "pour", name: "Perfect Pour" }];
   const leaderboard = [
     { runId: "fast", competitorName: "Fast", category: "official" },
@@ -85,12 +87,14 @@ test("event leaderboards include completed score-only results and exclude unfini
   ];
 
   const rows = buildEventLeaderboards(events, leaderboard, history)[0].rows;
-  assert.deepEqual(rows.map((row) => [row.competitorName, row.status, row.rank, row.points, row.durationMs]), [
-    ["Fast", "completed", 1, 50, 10_000],
-    ["Slow", "completed", 2, 50, 15_000],
-    ["Manual", "completed", 3, 50, null],
-    ["Lower", "completed", 4, 45, 5_000],
-    ["Unfinished", "dnf", null, null, null]
+  assert.deepEqual(rows.map((row) => [row.competitorName, row.category, row.status, row.rank, row.points, row.durationMs]), [
+    ["Playoff", "playoff", "dnf", null, null, null],
+    ["Fast", "official", "completed", 1, 50, 10_000],
+    ["Slow", "official", "completed", 2, 50, 15_000],
+    ["Manual", "official", "completed", 3, 50, null],
+    ["Lower", "official", "completed", 4, 45, 5_000],
+    ["Unfinished", "official", "dnf", null, null, null],
+    ["Exhibition", "exhibition", "dnf", null, null, null]
   ]);
 });
 
@@ -110,15 +114,32 @@ test("event leaderboard puts DNF after finishers and labels absent or incomplete
   ];
 
   const rows = buildEventLeaderboards(events, leaderboard, history)[0].rows;
-  assert.deepEqual(rows.map((row) => [row.competitorName, row.status]), [
-    ["Blair", "completed"],
-    ["Alex", "dnf"],
-    ["Casey", "dnf"]
+  assert.deepEqual(rows.map((row) => [row.competitorName, row.category, row.status]), [
+    ["Drew", "playoff", "dnf"],
+    ["Blair", "official", "completed"],
+    ["Alex", "official", "dnf"],
+    ["Casey", "official", "dnf"]
   ]);
-  assert.deepEqual(rows.slice(1).map((row) => [row.rank, row.points, row.durationMs]), [
+  assert.deepEqual([rows[0], rows[2], rows[3]].map((row) => [row.rank, row.points, row.durationMs]), [
+    [null, null, null],
     [null, null, null],
     [null, null, null]
   ]);
-  assert.deepEqual(eventLeaderboardDisplayRow(rows[1]), { rank: "DNF", durationMs: null, points: "—" });
-  assert.deepEqual(eventLeaderboardDisplayRow(rows[0]), { rank: "1", durationMs: 10_000, points: "40" });
+  assert.deepEqual(eventLeaderboardDisplayRow(rows[0]), { rank: "DNF", durationMs: null, points: "—", category: "playoff" });
+  assert.deepEqual(eventLeaderboardDisplayRow(rows[1]), { rank: "1", durationMs: 10_000, points: "40", category: "official" });
+});
+
+test("exhibition rows preserve server-assigned incremental names", () => {
+  const events = [{ eventId: "pour", name: "Perfect Pour" }];
+  const leaderboard = [
+    { runId: "exhibition-1", competitorName: "Alex", displayName: "Alex (Exhibition 1)", category: "exhibition" },
+    { runId: "exhibition-2", competitorName: "Alex", displayName: "Alex (Exhibition 2)", category: "exhibition" }
+  ];
+  const history = [
+    run("exhibition-1", "a", "exhibition", [event("pour", 0, 10_000, 40)]),
+    run("exhibition-2", "a", "exhibition", [event("pour", 0, 5_000, 45)])
+  ];
+  const rows = buildEventLeaderboards(events, leaderboard, history)[0].rows;
+  assert.deepEqual(rows.map((row) => row.displayName), ["Alex (Exhibition 2)", "Alex (Exhibition 1)"]);
+  assert.ok(rows.every((row) => row.category === "exhibition"));
 });

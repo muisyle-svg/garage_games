@@ -23,6 +23,7 @@ var tests = new (string Name, Action Run)[]
     ("HTTP arm request duration flows into the saved run and ten-second timeout", ArmRequestDurationHandoff),
     ("custom run duration snapshots timeout and preserves edition leaderboard identity", PerRunDurationSnapshot),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
+    ("competitor rename, archive, restore, and import preserve identity", CompetitorRosterManagement),
     ("MVP timing fields clear and manual score overrides add to total", MvpEditableScorecard),
     ("recorded exhibition correction extends timeline and can be undone", RecordedExhibitionCorrectionTimeline),
     ("early-finished correction extends timeline while explicit and invalid times remain enforced", FinishedCorrectionTimeline),
@@ -31,6 +32,8 @@ var tests = new (string Name, Action Run)[]
     ("recording atomically promotes and persists the next on-deck competitor", RecordPromotesNextCompetitor),
     ("reordering on-deck queue persists the requested order", QueueReorderPersists),
     ("regular events automatically finish and freeze the clock until recorded", MvpAutoFinishAndRecord),
+    ("undo button presses restores the previous event state and reopens the run", UndoLastButtonPress),
+    ("clearing an event resets all event data and permits a new press", ClearEventResult),
     ("completing a current scorecard correction automatically finishes", MvpCorrectionAutoFinish),
     ("finishing and recording are distinct and recording releases the next run", FinishIsIdempotent),
     ("duplicate and per-event stale input", DuplicateAndStale),
@@ -44,11 +47,15 @@ var tests = new (string Name, Action Run)[]
     ("bonus records signals without automatic points", BonusSignal),
     ("restart lineage and one official result", RestartAndOfficialRule),
     ("category exclusion and shared tie rank", CategoryAndTieRank),
+    ("leaderboard preference persists and playoffs precede official and exhibition rows", LeaderboardPreferenceAndCategories),
     ("persistent recovery and exclusive data lock", RecoveryAndLock),
     ("danger-zone clear backs up first and resets persisted and runtime state", ClearDatabaseSafety),
     ("failed backup prevents database clearing", ClearDatabaseBackupFailurePreservesData),
+    ("legacy migration preserves old data and prefers an existing current store", LegacyDataMigrationSafety),
+    ("build identity follows source content and ignores build output", BuildIdentityFingerprint),
     ("live edit isolation, history edit, undo, and stale undo", EditsAndIsolation),
-    ("unknown database is rejected", UnknownDatabase)
+    ("unknown database is rejected", UnknownDatabase),
+    ("static asset versions track content and stamp HTML references", StaticAssetVersioningTests.ContentDerivedVersionAndStamping)
 };
 
 var failures = new List<string>();
@@ -446,6 +453,13 @@ static void MasterProtocolAndSpeedInterlock()
 
 static void PhysicalSpokeProtocolAndSession()
 {
+    var testPress = new MasterButtonTestPress("boot-A_1", "AABBCCDDEEFF", 12);
+    Assert.Equal("GG1 TEST boot-A_1 AABBCCDDEEFF 12", MasterProtocolCodec.FormatButtonTest(testPress));
+    Assert.True(MasterProtocolCodec.TryParseButtonTest("GG1 TEST boot-A_1 AABBCCDDEEFF 12", out var parsedTest));
+    Assert.Equal(testPress, parsedTest);
+    Assert.True(!MasterProtocolCodec.TryParseButtonTest("GG1 TEST boot-A_1 aabbccddeeff 12", out _));
+    Assert.True(!MasterProtocolCodec.TryParseButtonTest("GG1 TEST boot-A_1 AABBCCDDEEFF 0", out _));
+    Assert.Equal("GG1 IDENTIFY AABBCCDDEEFF 9", MasterProtocolCodec.FormatIdentifyCommand("aabbccddeeff", 9));
     Assert.Equal("0011223344556677",
         MasterProtocolCodec.GetGarageRunToken("run-00112233445566778899AABBCCDDEEFF"));
     Assert.True(MasterProtocolCodec.TryParsePhysicalPress(
@@ -910,6 +924,35 @@ static void MvpRosterAndVirtualPresses()
     Assert.Equal(MessageDisposition.AlreadyCompleted, h.Service.PressEvent(run.Id, "event-01").Disposition);
 }
 
+static void CompetitorRosterManagement()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    var imported = h.Service.ImportCompetitors(["Alex", "  alex   ", "", "Taylor"]);
+    Assert.Equal(2, imported.Added.Count);
+    Assert.Equal(2, imported.Skipped.Count);
+    Assert.True(imported.Skipped.Any(item => item.Contains("duplicate", StringComparison.OrdinalIgnoreCase)));
+
+    var alex = imported.Added.Single(item => item.Name == "Alex");
+    var taylor = imported.Added.Single(item => item.Name == "Taylor");
+    Assert.Throws<CommandException>(() => h.Service.RenameCompetitor(taylor.Id, "  aLeX "));
+    var renamed = h.Service.RenameCompetitor(taylor.Id, "Taylor New");
+    Assert.Equal(taylor.Id, renamed.Id);
+    Assert.Equal("Taylor New", renamed.Name);
+
+    h.Service.SetCompetitorArchived(alex.Id, true);
+    Assert.True(h.Service.GetOperatorSnapshot().Competitors.Single(item => item.Id == alex.Id).IsArchived);
+    Assert.Throws<CommandException>(() => h.Service.AddToQueue(alex.Id, RunCategory.Exhibition));
+    h.Service.SetCompetitorArchived(alex.Id, false);
+    Assert.True(!h.Service.GetOperatorSnapshot().Competitors.Single(item => item.Id == alex.Id).IsArchived);
+
+    h.Service.SetCompetitorArchived(alex.Id, true);
+    h.Store.Dispose();
+    using var reopened = new RunStore(h.Path);
+    var persisted = reopened.Load().Competitors.Single(item => item.Id == alex.Id);
+    Assert.True(persisted.IsArchived);
+    Assert.Equal("Taylor New", reopened.Load().Competitors.Single(item => item.Id == taylor.Id).Name);
+}
+
 static void MvpEditableScorecard()
 {
     using var h = new TestHarness(MakeMvpEdition(durationSeconds: 20), NewPath());
@@ -1300,6 +1343,76 @@ static void MvpAutoFinishAndRecord()
     Assert.Equal(RunStatus.Completed, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
 }
 
+static void UndoLastButtonPress()
+{
+    var edition = new EditionDefinition
+    {
+        EditionId = "undo-button-edition",
+        Name = "Undo button test",
+        DurationLimitSeconds = 60,
+        Scoring = new ScoringRule(),
+        Events = [new EventDefinition { EventId = "one", Name = "One event", DeviceId = "station-01", Type = EventKind.Standard }]
+    };
+    using var h = new TestHarness(edition, NewPath());
+    var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
+    h.StartRun();
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "one").Disposition);
+    h.Clock.Advance(TimeSpan.FromSeconds(2));
+    Assert.Equal(RunStatus.Finished, h.Service.PressEvent(run.Id, "one").Run!.Status);
+
+    var undoneFinish = h.Service.UndoLastEventPress();
+    Assert.Equal(RunStatus.Active, undoneFinish.Status);
+    Assert.Equal(EventStatus.Active, undoneFinish.Events.Single().Status);
+    Assert.Equal(0L, undoneFinish.Events.Single().StartElapsedMs);
+    Assert.Equal(null, undoneFinish.Events.Single().FinishElapsedMs);
+    Assert.Contains(h.Service.GetOperatorSnapshot().Messages, message => message.Type == "event-press" &&
+        message.ElapsedMilliseconds == 2_000 && message.Disposition == MessageDisposition.Undone);
+
+    var undoneStart = h.Service.UndoLastEventPress();
+    Assert.Equal(RunStatus.Active, undoneStart.Status);
+    Assert.Equal(EventStatus.Pending, undoneStart.Events.Single().Status);
+    Assert.Equal(null, undoneStart.Events.Single().StartElapsedMs);
+    Assert.Equal(2, h.Service.GetOperatorSnapshot().Edits.Count(edit => edit.RunId == run.Id));
+    Assert.Equal(0, h.Service.GetOperatorSnapshot().Messages.Count(message => message.Type == "event-press" && message.Disposition == MessageDisposition.Accepted));
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "one").Disposition);
+}
+
+static void ClearEventResult()
+{
+    var edition = new EditionDefinition
+    {
+        EditionId = "clear-event-edition",
+        Name = "Clear event test",
+        DurationLimitSeconds = 60,
+        Scoring = new ScoringRule(),
+        Events = [new EventDefinition { EventId = "one", Name = "One event", DeviceId = "station-01", Type = EventKind.Standard }]
+    };
+    using var h = new TestHarness(edition, NewPath());
+    var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
+    h.StartRun();
+    h.Service.PressEvent(run.Id, "one");
+    h.Clock.Advance(TimeSpan.FromSeconds(2));
+    var finished = h.Service.PressEvent(run.Id, "one").Run!;
+    Assert.Equal(RunStatus.Finished, finished.Status);
+
+    var cleared = h.Service.ClearEvent(run.Id, "one", finished.Revision);
+    Assert.Equal(RunStatus.Active, cleared.Status);
+    Assert.Equal(EventStatus.Pending, cleared.Events.Single().Status);
+    Assert.Equal(null, cleared.Events.Single().StartElapsedMs);
+    Assert.Equal(null, cleared.Events.Single().FinishElapsedMs);
+    Assert.Equal(1, h.Service.GetOperatorSnapshot().Edits.Count(edit => edit.RunId == run.Id));
+    Assert.Equal(2, h.Service.GetOperatorSnapshot().Messages.Count(message => message.Type == "event-press" && message.Disposition == MessageDisposition.Accepted));
+
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "one").Disposition);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    h.Service.PressEvent(run.Id, "one");
+    var recorded = h.Service.Record();
+    var historicallyCleared = h.Service.ClearEvent(run.Id, "one", recorded.Revision);
+    Assert.True(historicallyCleared.IsRecorded, "Clearing a recorded result must not erase its recorded status.");
+    Assert.Equal(EventStatus.Pending, historicallyCleared.Events.Single().Status);
+    Assert.Equal(2, h.Service.GetOperatorSnapshot().Edits.Count(edit => edit.RunId == run.Id));
+}
+
 static void MvpCorrectionAutoFinish()
 {
     using var h = new TestHarness(MakeMvpEdition(durationSeconds: 90), NewPath());
@@ -1527,11 +1640,18 @@ static void DeviceScanReadiness()
     Assert.Equal(DeviceAvailability.Online, h.Service.GetOperatorSnapshot().Devices.Single(device => device.EventId == "event-01").Availability);
     Assert.Equal(DeviceAvailability.Offline, h.Service.GetOperatorSnapshot().Devices.Single(device => device.EventId == "event-02").Availability);
     Assert.Equal(DeviceAvailability.Unverified, h.Service.GetOperatorSnapshot().Devices.Single(device => device.EventId == "event-03").Availability);
+    var completedCheckTime = h.Service.GetOperatorSnapshot().DeviceScanCheckedAt;
+    Assert.Equal(h.Clock.UtcNow, completedCheckTime);
 
     var disconnected = h.Service.RecordDeviceScan(false, false, ["AABBCCDDEEFF"]);
     Assert.True(!disconnected.Connected && !disconnected.Completed);
     Assert.True(h.Service.GetOperatorSnapshot().Devices.All(device =>
         device.Availability == DeviceAvailability.Unverified && device.LastSeenAt is null));
+    Assert.Equal(completedCheckTime, h.Service.GetOperatorSnapshot().DeviceScanCheckedAt);
+    var databasePath = h.Path;
+    h.Store.Dispose();
+    using var reopened = new RunStore(databasePath);
+    Assert.Equal(completedCheckTime, reopened.Load().DeviceScanCheckedAt);
 }
 
 static void DeviceScanProtocol()
@@ -1644,6 +1764,47 @@ static void CategoryAndTieRank()
     var leaderboard = h.Service.GetScoreboard().Leaderboard;
     Assert.Equal(2, leaderboard.Count);
     Assert.True(leaderboard.All(row => row.Rank == 1));
+}
+
+static void LeaderboardPreferenceAndCategories()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+
+    h.ArmAndStart(RunCategory.Playoff);
+    h.Service.Finish();
+    h.Service.Record();
+
+    var officialCompetitor = h.AddCompetitor("Official player");
+    h.Service.AddToQueue(officialCompetitor.Id, RunCategory.Official);
+    h.Service.ArmCompetitor(officialCompetitor.Id, RunCategory.Official);
+    h.StartRun();
+    h.Service.Finish();
+    h.Service.Record();
+
+    h.ArmAndStart(RunCategory.Exhibition);
+    h.Service.Finish();
+    h.Service.Record();
+    h.ArmAndStart(RunCategory.Exhibition);
+    h.Service.Finish();
+    h.Service.Record();
+
+    var hidden = h.Service.GetOperatorSnapshot();
+    Assert.Equal(false, hidden.ShowExhibitionsOnLeaderboard);
+    Assert.Equal(2, hidden.Leaderboard.Count);
+    Assert.Equal(RunCategory.Playoff, hidden.Leaderboard[0].Category);
+    Assert.Equal(RunCategory.Official, hidden.Leaderboard[1].Category);
+
+    h.Service.SetLeaderboardPreference(true);
+    var included = h.Service.GetOperatorSnapshot();
+    Assert.Equal(true, included.ShowExhibitionsOnLeaderboard);
+    Assert.True(included.Leaderboard.Select(row => row.Category).SequenceEqual(
+        [RunCategory.Playoff, RunCategory.Official, RunCategory.Exhibition, RunCategory.Exhibition]));
+    Assert.True(included.Leaderboard.Skip(2).Select(row => row.DisplayName).ToHashSet(StringComparer.Ordinal)
+        .SetEquals(["Primary competitor (Exhibition 1)", "Primary competitor (Exhibition 2)"]));
+    Assert.Equal(true, h.Store.Load().ShowExhibitionsOnLeaderboard);
+
+    h.Service.SetLeaderboardPreference(false);
+    Assert.Equal(2, h.Service.GetOperatorSnapshot().Leaderboard.Count);
 }
 
 static void RecoveryAndLock()
@@ -1873,6 +2034,94 @@ static void UnknownDatabase()
 
     Assert.Throws<InvalidDataException>(() => new RunStore(path));
     Cleanup(path);
+}
+
+static void LegacyDataMigrationSafety()
+{
+    var root = NewPath();
+    var legacy = Path.Combine(root, "legacy");
+    var current = Path.Combine(root, "current");
+    var legacyDatabase = Path.Combine(legacy, "garage-games-v2.db");
+    var currentDatabase = Path.Combine(current, "garage-games-v2.db");
+    try
+    {
+        string backupPath;
+        using (var store = new RunStore(legacy))
+        {
+            _ = new RunService(store, MakeMvpEdition(), new TestClock()).AddCompetitor("Preserved competitor");
+            backupPath = store.CreateBackup();
+        }
+
+        Assert.True(DataDirectoryMigration.CopyLegacyDataIfNeeded(current, legacy));
+        Assert.True(File.Exists(legacyDatabase), "Migration must retain the original database.");
+        Assert.Equal(
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(legacyDatabase))),
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(currentDatabase))));
+        Assert.True(File.Exists(Path.Combine(current, "backups", Path.GetFileName(backupPath))),
+            "Migration must copy existing database backups too.");
+        var currentHashBeforeConflict = File.ReadAllBytes(currentDatabase);
+
+        using (var copiedStore = new RunStore(current))
+        {
+            Assert.Equal("Preserved competitor", copiedStore.Load().Competitors.Single().Name);
+        }
+
+        using (var legacyStore = new RunStore(legacy))
+        {
+            _ = new RunService(legacyStore, MakeMvpEdition(), new TestClock()).AddCompetitor("Legacy-only competitor");
+        }
+
+        SqliteConnection.ClearAllPools();
+        var legacyHashBeforeConflict = File.ReadAllBytes(legacyDatabase);
+        Assert.True(!DataDirectoryMigration.CopyLegacyDataIfNeeded(current, legacy));
+        Assert.True(File.Exists(legacyDatabase), "Conflict handling must retain the legacy database.");
+        Assert.Equal(Convert.ToHexString(currentHashBeforeConflict),
+            Convert.ToHexString(File.ReadAllBytes(currentDatabase)));
+        Assert.Equal(Convert.ToHexString(legacyHashBeforeConflict),
+            Convert.ToHexString(File.ReadAllBytes(legacyDatabase)));
+
+        using (var currentStore = new RunStore(current))
+        {
+            Assert.Equal("Preserved competitor", currentStore.Load().Competitors.Single().Name);
+        }
+        using (var legacyStore = new RunStore(legacy))
+        {
+            Assert.Contains(legacyStore.Load().Competitors, competitor => competitor.Name == "Legacy-only competitor");
+        }
+    }
+    finally
+    {
+        Cleanup(root);
+    }
+}
+
+static void BuildIdentityFingerprint()
+{
+    var root = NewPath();
+    var application = Path.Combine(root, "application");
+    var edition = Path.Combine(root, "edition");
+    try
+    {
+        Directory.CreateDirectory(application);
+        Directory.CreateDirectory(edition);
+        File.WriteAllText(Path.Combine(application, "Program.cs"), "source-v1");
+        File.WriteAllText(Path.Combine(edition, "edition.json"), "edition-v1");
+        var roots = new[] { ("application", application), ("edition", edition) };
+        var first = BuildIdentity.Compute(roots);
+        Assert.Equal(first, BuildIdentity.Compute(roots));
+        Assert.Equal(64, first.Length);
+
+        Directory.CreateDirectory(Path.Combine(application, "bin"));
+        File.WriteAllText(Path.Combine(application, "bin", "ignored.dll"), "generated-v1");
+        Assert.Equal(first, BuildIdentity.Compute(roots));
+
+        File.WriteAllText(Path.Combine(application, "Program.cs"), "source-v2");
+        Assert.True(first != BuildIdentity.Compute(roots), "Changing app source must change the build identity.");
+    }
+    finally
+    {
+        Cleanup(root);
+    }
 }
 
 static void CompleteAllEvents(TestHarness h, RunRecord run)

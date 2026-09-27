@@ -266,6 +266,9 @@ uint32_t lastGarageStateMs = 0;
 uint8_t garageMasterMac[6] = {};
 bool garageMasterLocked = false;
 uint32_t garagePressSequence = 0;
+uint32_t diagnosticPressSequence = 0;
+uint32_t lastIdentifySequence = 0;
+uint32_t lastIdentifyAtMs = 0;
 uint32_t pendingGarageSequence = 0;
 bool garagePressAwaitingResult = false;
 uint8_t garagePressRetriesLeft = 0;
@@ -396,6 +399,41 @@ bool parseGarageResultPacket(const char* message, char* token, uint32_t& sequenc
     resultMac[i] = value;
   }
   return validStationMac(resultMac);
+}
+
+bool parseIdentifyPacket(const RxPacket& packet, uint8_t* mac, uint32_t& sequence) {
+  static const char prefix[] = "GIDENTIFY:3:";
+  if (!mac || packet.len <= sizeof(prefix) - 1 ||
+      memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, sizeof(prefix) - 1) != 0) return false;
+  const char* cursor = packet.data + sizeof(prefix) - 1;
+  const char* end = packet.data + packet.len;
+  const char* separator = static_cast<const char*>(memchr(cursor, ':', (size_t)(end - cursor)));
+  if (!separator || separator - cursor != 12) return false;
+  char macText[13];
+  memcpy(macText, cursor, 12);
+  macText[12] = '\0';
+  const size_t sequenceLength = (size_t)(end - separator - 1);
+  if (sequenceLength == 0 || sequenceLength >= 11) return false;
+  char sequenceText[11];
+  memcpy(sequenceText, separator + 1, sequenceLength);
+  sequenceText[sequenceLength] = '\0';
+  return hexToMac(macText, mac) && validStationMac(mac) &&
+      parseGarageSequence(sequenceText, sequence) && sequence != 0;
+}
+
+void handleIdentify(const RxPacket& packet) {
+  uint8_t targetMac[6];
+  uint32_t sequence = 0;
+  if (gameActive || !garageStateFresh(millis()) ||
+      (garageModeState != GARAGE_MODE_NONE && !isGarageTerminalState(garageModeState)) ||
+      !parseIdentifyPacket(packet, targetMac, sequence) ||
+      !acceptGarageMasterSource(packet) || !macEqual(targetMac, ownMac)) return;
+  const uint32_t now = millis();
+  if (sequence == lastIdentifySequence && (uint32_t)(now - lastIdentifyAtMs) < 1000) return;
+  lastIdentifySequence = sequence;
+  lastIdentifyAtMs = now;
+  startBlink(true, false, true, 120, 850);
 }
 
 void clearGarageMode(bool clearVisual) {
@@ -562,7 +600,7 @@ void updateGarageVisual() {
   else if (key == 9) {
     setSolid(true, false, false, GARAGE_TERMINAL_LED_MS - terminalElapsedMs);
   }
-  else if (key == 10) setSolid(true, true, false);
+  else if (key == 10) startBlink(true, true, false, 500);
   else if (key == 7) setSolid(true, false, false);
   else if (key == 11) startBlink(true, false, false, 100);
   else if (key == 12) {
@@ -846,6 +884,10 @@ void processRx() {
       handleGarageResult(packet);
       continue;
     }
+    if (strncmp(packet.data, "GIDENTIFY:", 10) == 0) {
+      handleIdentify(packet);
+      continue;
+    }
     if (strncmp(packet.data, "DISCOVER:", 9) == 0) {
       handleDiscover(packet);
     } else if (strncmp(packet.data, "RUN:", 4) == 0) {
@@ -870,6 +912,22 @@ void processRx() {
 
 void handlePress() {
   uint32_t now = millis();
+  if (!gameActive && garageStateFresh(now) &&
+      (garageModeState == GARAGE_MODE_NONE || isGarageTerminalState(garageModeState))) {
+    ++diagnosticPressSequence;
+    if (diagnosticPressSequence == 0) ++diagnosticPressSequence;
+    char macText[13];
+    macToHex(ownMac, macText, sizeof(macText));
+    char message[40];
+    const int length = snprintf(message, sizeof(message), "GTEST:%u:%s:%lu",
+        PROTOCOL_VERSION, macText, (unsigned long)diagnosticPressSequence);
+    if (length > 0 && (size_t)length < sizeof(message)) {
+      sendBroadcast(message);
+      startBlink(true, false, true, 120, 850);
+    }
+    return;
+  }
+
   if (!gameActive && garageStateFresh(now) && garageModeState != GARAGE_MODE_NONE) {
     if (garageModeState != GARAGE_MODE_ACTIVE || garageCompleted || garageAckUnknown ||
         garagePressAwaitingResult) return;

@@ -14,6 +14,7 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 var simulationMode = !args.Contains("--hardware-mode", StringComparer.OrdinalIgnoreCase);
 var dataPath = GetOption(args, "--data-path") ?? Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GarageGamesV2");
+DataDirectoryMigration.CopyLegacyDataIfNeeded(dataPath, GetOption(args, "--legacy-data-path"));
 var editionPath = GetOption(args, "--edition-config") ?? Path.Combine(AppContext.BaseDirectory, "config", "edition-2026.json");
 if (!File.Exists(editionPath))
 {
@@ -43,6 +44,20 @@ builder.Services.AddHostedService<RunCheckpointHostedService>();
 builder.WebHost.UseUrls(urls);
 
 var app = builder.Build();
+var webRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot");
+var staticAssetVersion = StaticAssetVersioning.ComputeVersion(webRootPath);
+var buildId = GetOption(args, "--build-id") ??
+    BuildIdentity.TryComputeForSourceProject(AppContext.BaseDirectory) ??
+    System.Reflection.Assembly.GetExecutingAssembly().ManifestModule.ModuleVersionId.ToString("N");
+var healthIdentity = new
+{
+    status = "ok",
+    simulationMode,
+    buildId,
+    dataDirectory = store.DataDirectory,
+    applicationDirectory = Path.GetFullPath(AppContext.BaseDirectory),
+    processId = Environment.ProcessId
+};
 app.UseExceptionHandler(errorApp =>
 {
     errorApp.Run(async context =>
@@ -64,7 +79,35 @@ app.UseExceptionHandler(errorApp =>
         await context.Response.WriteAsJsonAsync(new { error = message });
     });
 });
-app.UseDefaultFiles();
+app.Use(async (context, next) =>
+{
+    var pageName = context.Request.Path.Value?.ToLowerInvariant() switch
+    {
+        "/" or "/index.html" or "/advanced" => "index.html",
+        "/scoreboard" or "/scoreboard.html" => "scoreboard.html",
+        "/mvp" or "/mvp.html" => "mvp.html",
+        _ => null
+    };
+    if (pageName is null)
+    {
+        await next();
+        return;
+    }
+
+    var pagePath = Path.Combine(webRootPath, pageName);
+    if (!File.Exists(pagePath))
+    {
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        return;
+    }
+
+    context.Response.ContentType = "text/html; charset=utf-8";
+    context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+    context.Response.Headers.Pragma = "no-cache";
+    context.Response.Headers.Expires = "0";
+    var html = await File.ReadAllTextAsync(pagePath, context.RequestAborted);
+    await context.Response.WriteAsync(StaticAssetVersioning.StampHtml(html, staticAssetVersion), context.RequestAborted);
+});
 app.UseStaticFiles(new StaticFileOptions
 {
     OnPrepareResponse = context =>
@@ -77,7 +120,7 @@ app.UseStaticFiles(new StaticFileOptions
     }
 });
 
-app.MapGet("/api/health", () => Results.Ok(new { status = "ok", simulationMode }));
+app.MapGet("/api/health", () => Results.Ok(healthIdentity));
 app.MapGet("/api/master", (PhysicalMasterSerialService master) => Results.Ok(master.GetSnapshot()));
 app.MapPost("/api/master/scan", async (PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
     Results.Ok(await master.ScanDevicesAsync(cancellationToken)));
@@ -85,6 +128,9 @@ app.MapPost("/api/master/connect", (ConnectMasterRequest request, PhysicalMaster
     Results.Ok(master.Connect(request.Port)));
 app.MapPost("/api/master/disconnect", (PhysicalMasterSerialService master) =>
     Results.Ok(master.Disconnect()));
+app.MapPost("/api/master/identify", async (IdentifyButtonRequest request, PhysicalMasterSerialService master,
+    CancellationToken cancellationToken) =>
+    Results.Ok(await master.IdentifyButtonAsync(request.DeviceId, cancellationToken)));
 var trayShutdownToken = Environment.GetEnvironmentVariable("GARAGE_GAMES_V2_SHUTDOWN_TOKEN");
 if (!string.IsNullOrWhiteSpace(trayShutdownToken))
 {
@@ -105,7 +151,7 @@ if (!string.IsNullOrWhiteSpace(trayShutdownToken))
 
     app.MapGet("/api/internal/tray-health", (HttpContext context) =>
         IsTrayControlAuthorized(context)
-            ? Results.Ok(new { status = "ok" })
+            ? Results.Ok(healthIdentity)
             : Results.NotFound());
 
     app.MapPost("/api/internal/shutdown", async (HttpContext context, IHostApplicationLifetime lifetime) =>
@@ -131,11 +177,14 @@ app.MapGet("/api/setup", (RunService runs) => Results.Ok(runs.GetSetup()));
 app.MapPut("/api/setup", (EditionSetup request, RunService runs) => Results.Ok(runs.UpdateSetup(request)));
 app.MapGet("/api/run/countdown-state", (RunService runs) => Results.Ok(runs.GetCountdownState()));
 app.MapGet("/api/export", (RunService runs) => Results.Json(runs.GetOperatorSnapshot(simulationMode), JsonDefaults.Options));
-app.MapGet("/scoreboard", () => Results.File(Path.Combine(AppContext.BaseDirectory, "wwwroot", "scoreboard.html"), "text/html"));
-app.MapGet("/advanced", () => Results.File(Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html"), "text/html"));
-
 app.MapPost("/api/competitors", (AddCompetitorRequest request, RunService runs) =>
     Results.Ok(runs.AddCompetitor(request.Name)));
+app.MapPut("/api/competitors/{competitorId}", (string competitorId, RenameCompetitorRequest request, RunService runs) =>
+    Results.Ok(runs.RenameCompetitor(competitorId, request.Name)));
+app.MapPost("/api/competitors/import", (ImportCompetitorsRequest request, RunService runs) =>
+    Results.Ok(runs.ImportCompetitors(request.Names ?? [])));
+app.MapPost("/api/competitors/{competitorId}/archive", (string competitorId, SetCompetitorArchivedRequest request, RunService runs) =>
+    Results.Ok(runs.SetCompetitorArchived(competitorId, request.IsArchived)));
 app.MapPost("/api/queue", (AddQueueRequest request, RunService runs) =>
     Results.Ok(runs.AddToQueue(request.CompetitorId, request.Category, request.ReplaceExistingOfficial, request.Reason)));
 app.MapDelete("/api/queue/{queueId}", (string queueId, RunService runs) =>
@@ -180,6 +229,12 @@ app.MapPost("/api/run/resume", (RunService runs) => Results.Ok(runs.Resume()));
 app.MapPost("/api/run/finish", (RunService runs) => Results.Ok(runs.Finish()));
 app.MapPost("/api/run/record", (RunService runs) => Results.Ok(runs.Record()));
 app.MapPost("/api/run/abort", (ActionReasonRequest request, RunService runs) => Results.Ok(runs.Abort(request.Reason)));
+app.MapPost("/api/run/undo-last-press", (RunService runs) => Results.Ok(runs.UndoLastEventPress()));
+app.MapPut("/api/leaderboards/preferences", (SetLeaderboardPreferencesRequest request, RunService runs) =>
+{
+    runs.SetLeaderboardPreference(request.ShowExhibitionsOnLeaderboard);
+    return Results.Ok(runs.GetOperatorSnapshot(simulationMode));
+});
 app.MapPut("/api/run/edit", (EditRunRequest request, RunService runs) =>
     Results.Ok(runs.EditCurrentRun(request)));
 app.MapPost("/api/run/undo", (UndoRequest request, RunService runs) =>
@@ -192,6 +247,8 @@ app.MapPost("/api/runs/{runId}/record", (string runId, RunService runs) =>
     Results.Ok(runs.RecordHistoricalRun(runId)));
 app.MapPost("/api/runs/{runId}/events/{eventId}/press", (string runId, string eventId, RunService runs) =>
     Results.Ok(runs.PressEvent(runId, eventId)));
+app.MapPost("/api/runs/{runId}/events/{eventId}/clear", (string runId, string eventId, ClearEventRequest request, RunService runs) =>
+    Results.Ok(runs.ClearEvent(runId, eventId, request.ExpectedRevision)));
 app.MapPost("/api/runs/{runId}/undo", (string runId, UndoRequest request, RunService runs) =>
     Results.Ok(runs.IsCurrentRun(runId)
         ? runs.UndoCurrentEdit(request.EditId, request.ExpectedRevision, request.Reason)

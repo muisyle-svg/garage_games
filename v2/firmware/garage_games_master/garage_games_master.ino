@@ -889,6 +889,73 @@ bool parseHostScanCommand(const char* line, char* scanId, size_t scanIdSize) {
   return true;
 }
 
+bool parseIdentifyCommand(const char* line, uint8_t* mac, uint32_t& sequence) {
+  static const char prefix[] = "GG1 IDENTIFY ";
+  if (!line || !mac || strncmp(line, prefix, sizeof(prefix) - 1) != 0) return false;
+  const char* cursor = line + sizeof(prefix) - 1;
+  char macText[13];
+  char sequenceText[11];
+  if (!readProtocolToken(cursor, macText, sizeof(macText)) ||
+      !readProtocolToken(cursor, sequenceText, sizeof(sequenceText)) || *cursor != '\0' ||
+      !parseUpperHexMac(macText, mac) || !validStationMac(mac) ||
+      !parseUint32Token(sequenceText, sequence) || sequence == 0) return false;
+  return true;
+}
+
+bool canIdentifyButtons(uint32_t now) {
+  const bool hostIdle = hostStatus == HOST_STATUS_NONE || hostStatus == HOST_STATUS_FINISHED;
+  const bool garageIdle = garageStatus == GARAGE_STATUS_NONE ||
+      garageStatus == GARAGE_STATUS_FINISHED || garageStatus == GARAGE_STATUS_TIMED_OUT;
+  return radioReady && gameState == IDLE && !hostScanActive && hostStatusFresh(now) &&
+      garageStatusFresh(now) && hostIdle && garageIdle;
+}
+
+void handleIdentifyCommand(const char* line) {
+  uint8_t mac[6];
+  uint32_t sequence = 0;
+  const uint32_t now = millis();
+  if (!parseIdentifyCommand(line, mac, sequence) || !canIdentifyButtons(now)) return;
+  char macText[13];
+  macToHex(mac, macText, sizeof(macText));
+  char packet[40];
+  const int length = snprintf(packet, sizeof(packet), "GIDENTIFY:%u:%s:%lu",
+      PROTOCOL_VERSION, macText, (unsigned long)sequence);
+  if (length > 0 && length <= 63) sendBroadcastTwice(packet);
+}
+
+bool parseButtonTestPacket(const RxPacket& packet, uint8_t* mac, uint32_t& sequence) {
+  static const char prefix[] = "GTEST:3:";
+  if (!mac || packet.len <= sizeof(prefix) - 1 ||
+      memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, sizeof(prefix) - 1) != 0) return false;
+  const char* cursor = packet.data + sizeof(prefix) - 1;
+  const char* end = packet.data + packet.len;
+  const char* separator = static_cast<const char*>(memchr(cursor, ':', (size_t)(end - cursor)));
+  if (!separator || separator - cursor != 12) return false;
+  char macText[13];
+  memcpy(macText, cursor, 12);
+  macText[12] = '\0';
+  const size_t sequenceLength = (size_t)(end - separator - 1);
+  if (sequenceLength == 0 || sequenceLength >= 11) return false;
+  char sequenceText[11];
+  memcpy(sequenceText, separator + 1, sequenceLength);
+  sequenceText[sequenceLength] = '\0';
+  return parseUpperHexMac(macText, mac) && validStationMac(mac) &&
+      parseUint32Token(sequenceText, sequence) && sequence != 0;
+}
+
+void handleButtonTest(const RxPacket& packet) {
+  uint8_t mac[6];
+  uint32_t sequence = 0;
+  const uint32_t now = millis();
+  if (!parseButtonTestPacket(packet, mac, sequence) || !validStationMac(packet.source) ||
+      !macEqual(mac, packet.source) || !canIdentifyButtons(now)) return;
+  char macText[13];
+  macToHex(packet.source, macText, sizeof(macText));
+  Serial.printf("GG1 TEST %lu %s %lu\n", (unsigned long)bootToken,
+      macText, (unsigned long)sequence);
+}
+
 void beginHostScan(const char* scanId) {
   if (!scanId) return;
   uint32_t now = millis();
@@ -950,6 +1017,13 @@ void processHostSerialLine(const char* line) {
                           resultToken, (unsigned long)resultSequence,
                           resultState, macText);
     if (length > 0 && length <= 63) sendBroadcastTwice(message);
+    return;
+  }
+
+  uint8_t identifyMac[6];
+  uint32_t identifySequence = 0;
+  if (parseIdentifyCommand(line, identifyMac, identifySequence)) {
+    handleIdentifyCommand(line);
     return;
   }
 
@@ -1660,6 +1734,10 @@ void handleGaragePress(const RxPacket& packet) {
 void processRx() {
   RxPacket packet;
   while (rxQueue && xQueueReceive(rxQueue, &packet, 0) == pdTRUE) {
+    if (strncmp(packet.data, "GTEST:", 6) == 0) {
+      handleButtonTest(packet);
+      continue;
+    }
     if (strncmp(packet.data, "GPRESS:", 7) == 0) {
       handleGaragePress(packet);
       continue;

@@ -1,3 +1,5 @@
+param([switch]$UsePublished)
+
 $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -7,9 +9,15 @@ $script:scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:repoRoot = (Resolve-Path (Join-Path $script:scriptRoot '..')).Path
 $script:toolRoot = Join-Path $script:repoRoot '.tools'
 $script:dotnet = Join-Path $script:toolRoot 'dotnet\dotnet.exe'
-$script:dataPath = Join-Path $script:toolRoot 'localappdata\GarageGamesV2'
+$script:localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+$script:dataPath = Join-Path $script:localAppData 'GarageGamesV2'
+$script:legacyDataPath = Join-Path $script:toolRoot 'localappdata\GarageGamesV2'
 $script:published = Join-Path $script:scriptRoot 'publish\win-x64\GarageGames.V2.exe'
 $script:project = Join-Path $script:scriptRoot 'src\GarageGames.V2\GarageGames.V2.csproj'
+$script:sourceAssemblyDirectory = Join-Path (Join-Path $script:scriptRoot 'src\GarageGames.V2') 'bin\Release\net10.0'
+$script:usePublished = [bool]$UsePublished
+$script:expectedApplicationDirectory = if ($script:usePublished) { Split-Path -Parent $script:published } else { $script:sourceAssemblyDirectory }
+$script:buildId = $null
 $script:url = 'http://127.0.0.1:5187/'
 $script:health = $script:url + 'api/health'
 $script:trayHealth = $script:url + 'api/internal/tray-health'
@@ -25,6 +33,38 @@ $script:mutex = $null
 $script:ownsMutex = $false
 $script:outputLog = $null
 $script:errorLog = $null
+$script:serverIdentityError = ''
+
+function Get-TreeBuildId([object[]]$Roots) {
+    $records = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($root in $Roots) {
+        $rootPath = [System.IO.Path]::GetFullPath([string]$root.Path)
+        if (-not (Test-Path -LiteralPath $rootPath -PathType Container)) {
+            throw "Build identity input folder was not found: $rootPath"
+        }
+        foreach ($file in (Get-ChildItem -LiteralPath $rootPath -File -Recurse -Force | Sort-Object -Property FullName)) {
+            $relativePath = $file.FullName.Substring($rootPath.Length).TrimStart('\', '/')
+            if ($relativePath -match '(^|[\\/])(bin|obj)([\\/]|$)') { continue }
+            if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            $contentHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $records.Add(([string]$root.Name + '/' + $relativePath.Replace('\', '/') + '|' + $contentHash))
+        }
+    }
+    $records.Sort([System.StringComparer]::Ordinal)
+    $payload = [System.Text.Encoding]::UTF8.GetBytes([string]::Join("`n", $records))
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($algorithm.ComputeHash($payload)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+        [Array]::Clear($payload, 0, $payload.Length)
+    }
+}
+
+function Get-NormalizedPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+}
 
 function Show-Notice([string]$Message, [string]$Title = 'Garage Games v2', [System.Windows.Forms.MessageBoxIcon]$Icon = [System.Windows.Forms.MessageBoxIcon]::Information) {
     [void][System.Windows.Forms.MessageBox]::Show(
@@ -44,6 +84,7 @@ function Show-StartupFailure([string]$Message) {
 }
 
 function Test-ServerHealthy([switch]$Owned) {
+    $script:serverIdentityError = ''
     $parameters = @{
         UseBasicParsing = $true
         Uri = $(if ($Owned) { $script:trayHealth } else { $script:health })
@@ -53,9 +94,33 @@ function Test-ServerHealthy([switch]$Owned) {
         $parameters.Headers = @{ $script:shutdownHeader = $script:shutdownToken }
     }
     try {
-        $response = Invoke-WebRequest @parameters
-        return ($response.StatusCode -eq 200)
+        $response = Invoke-RestMethod @parameters
+        $mismatches = New-Object 'System.Collections.Generic.List[string]'
+        if ($response.status -ne 'ok') {
+            $mismatches.Add('health response is not a recognized Garage Games server')
+        }
+        if ($response.buildId -ne $script:buildId) {
+            $reportedBuild = if ($response.buildId) { [string]$response.buildId } else { 'unknown (older server)' }
+            $mismatches.Add("version/build does not match (running: $reportedBuild; expected: $($script:buildId))")
+        }
+        if ((Get-NormalizedPath ([string]$response.dataDirectory)) -ne (Get-NormalizedPath $script:dataPath)) {
+            $reportedData = if ($response.dataDirectory) { [string]$response.dataDirectory } else { 'unknown (older server)' }
+            $mismatches.Add("data folder does not match (running: $reportedData; expected: $($script:dataPath))")
+        }
+        if ((Get-NormalizedPath ([string]$response.applicationDirectory)) -ne (Get-NormalizedPath $script:expectedApplicationDirectory)) {
+            $reportedDirectory = if ($response.applicationDirectory) { [string]$response.applicationDirectory } else { 'unknown (older server)' }
+            $mismatches.Add("application folder does not match (running: $reportedDirectory; expected: $($script:expectedApplicationDirectory))")
+        }
+
+        if ($mismatches.Count -gt 0) {
+            $script:serverIdentityError = "Another Garage Games server is responding, but it cannot be verified as this version using this computer's standard data folder:`n`n$([string]::Join("`n", $mismatches))`n`nTo protect your results, this launcher did not connect to it or start a second copy. Close the older Garage Games instance cleanly, then start this shortcut again. Neither data folder was changed."
+            return $false
+        }
+        return $true
     } catch {
+        if ($_.Exception.Response) {
+            $script:serverIdentityError = "Another local server is responding at $($script:url), but it did not provide a verifiable Garage Games identity. To protect your results, this launcher did not connect to it or start a second copy. Close the other server or Garage Games instance, then retry. No data folder was changed."
+        }
         return $false
     }
 }
@@ -86,7 +151,6 @@ function Start-OwnedServer {
     $environment = @{
         DOTNET_CLI_HOME = $script:toolRoot
         APPDATA = (Join-Path $script:toolRoot 'appdata')
-        LOCALAPPDATA = (Join-Path $script:toolRoot 'localappdata')
         NUGET_PACKAGES = (Join-Path $script:toolRoot 'nuget-packages')
         DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
         GARAGE_GAMES_V2_SHUTDOWN_TOKEN = $script:shutdownToken
@@ -99,10 +163,16 @@ function Start-OwnedServer {
     }
 
     try {
-        if (Test-Path -LiteralPath $script:published) {
+        if ($script:usePublished) {
+            if (-not (Test-Path -LiteralPath $script:published)) {
+                throw "The published Garage Games app was not found at: $($script:published)"
+            }
             $filePath = $script:published
             $workingDirectory = $script:scriptRoot
-            $arguments = '--data-path ' + (Quote-ProcessArgument $script:dataPath) + ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))
+            $arguments = '--data-path ' + (Quote-ProcessArgument $script:dataPath) +
+                ' --legacy-data-path ' + (Quote-ProcessArgument $script:legacyDataPath) +
+                ' --build-id ' + (Quote-ProcessArgument $script:buildId) +
+                ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))
         } else {
             if (-not (Test-Path -LiteralPath $script:dotnet)) {
                 throw "The bundled .NET runtime was not found at: $($script:dotnet)"
@@ -112,7 +182,11 @@ function Start-OwnedServer {
             }
             $filePath = $script:dotnet
             $workingDirectory = $script:repoRoot
-            $arguments = 'run --configuration Release --no-restore --project ' + (Quote-ProcessArgument $script:project) + ' -- --data-path ' + (Quote-ProcessArgument $script:dataPath) + ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))
+            $arguments = 'run --configuration Release --no-restore --project ' + (Quote-ProcessArgument $script:project) +
+                ' -- --data-path ' + (Quote-ProcessArgument $script:dataPath) +
+                ' --legacy-data-path ' + (Quote-ProcessArgument $script:legacyDataPath) +
+                ' --build-id ' + (Quote-ProcessArgument $script:buildId) +
+                ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))
         }
 
         return Start-Process `
@@ -132,6 +206,10 @@ function Start-OwnedServer {
 
 function Open-GarageGames {
     if (-not (Test-ServerHealthy -Owned:$script:ownsServer)) {
+        if ($script:serverIdentityError) {
+            Show-Notice $script:serverIdentityError 'Garage Games version or data folder mismatch' ([System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
         if ($script:ownsServer -and $script:serverProcess -and -not $script:serverProcess.HasExited) {
             Show-Notice "Garage Games is still starting or is not responding yet. You can try Open again shortly.`n`nStartup logs are in:`n$($script:outputLog)`n$($script:errorLog)"
         } else {
@@ -207,10 +285,21 @@ function New-TrayIcon {
 }
 
 try {
+    if ([string]::IsNullOrWhiteSpace($script:localAppData)) {
+        throw 'Windows did not provide the current user Local AppData folder.'
+    }
+    if ($script:usePublished) {
+        $script:buildId = Get-TreeBuildId @(@{ Name = 'published'; Path = (Split-Path -Parent $script:published) })
+    } else {
+        $script:buildId = Get-TreeBuildId @(
+            @{ Name = 'application'; Path = (Join-Path $script:scriptRoot 'src\GarageGames.V2') },
+            @{ Name = 'edition'; Path = (Join-Path $script:scriptRoot 'config') }
+        )
+    }
+
     foreach ($directory in @(
         $script:toolRoot,
         (Join-Path $script:toolRoot 'appdata'),
-        (Join-Path $script:toolRoot 'localappdata'),
         (Join-Path $script:toolRoot 'nuget-packages'),
         (Join-Path $script:toolRoot 'logs')
     )) {
@@ -233,6 +322,8 @@ try {
         }
         if ($ready) {
             Start-Process -FilePath $script:url
+        } elseif ($script:serverIdentityError) {
+            Show-Notice $script:serverIdentityError 'Garage Games version or data folder mismatch' ([System.Windows.Forms.MessageBoxIcon]::Warning)
         } else {
             Show-Notice 'Another Garage Games tray instance is already running. No second server or tray instance was started.' 'Garage Games v2 is already open' ([System.Windows.Forms.MessageBoxIcon]::Information)
         }
@@ -244,8 +335,11 @@ try {
     $script:errorLog = Join-Path (Join-Path $script:toolRoot 'logs') "garage-games-v2-$logStamp-$PID.err.log"
 
     if (Test-ServerHealthy) {
-        # A server not started by this tray session is deliberately never stopped by its Exit command.
+        # Only reuse an instance that reports this build and the canonical data directory.
         $script:ownsServer = $false
+    } elseif ($script:serverIdentityError) {
+        Show-Notice $script:serverIdentityError 'Garage Games version or data folder mismatch' ([System.Windows.Forms.MessageBoxIcon]::Warning)
+        return
     } else {
         $script:shutdownToken = New-ShutdownToken
         $script:serverProcess = Start-OwnedServer

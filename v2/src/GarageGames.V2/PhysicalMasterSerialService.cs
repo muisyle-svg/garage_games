@@ -15,6 +15,9 @@ public sealed class PhysicalMasterSerialService : BackgroundService
     private SerialPort? _port;
     private CancellationTokenSource? _connectionCancellation;
     private ScanWaiter? _pendingScan;
+    private string? _lastTestDeviceId;
+    private DateTimeOffset? _lastTestAt;
+    private uint _identifySequence;
 
     public PhysicalMasterSerialService(RunService runs, ILogger<PhysicalMasterSerialService> logger)
     {
@@ -43,8 +46,42 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                 _port?.IsOpen == true ? _port.PortName : null,
                 availablePorts,
                 _protocol.Mode?.ToString().ToUpperInvariant(),
-                _protocol.LastMessage);
+                _protocol.LastMessage,
+                _lastTestDeviceId,
+                _lastTestAt);
         }
+    }
+
+    public async Task<MasterConnectionSnapshot> IdentifyButtonAsync(string deviceId, CancellationToken cancellationToken = default)
+    {
+        var normalizedId = (deviceId ?? string.Empty).Trim().ToUpperInvariant();
+        if (!MasterProtocolCodec.IsValidDeviceId(normalizedId))
+        {
+            throw new CommandException("Choose an event assigned to a physical button before identifying it.");
+        }
+        if (!_runs.CanIdentifyPhysicalButtons())
+        {
+            throw new CommandException("Button identification is available only when no run is underway.");
+        }
+
+        SerialPort port;
+        uint sequence;
+        lock (_gate)
+        {
+            _protocol.EnsureArmAllowed();
+            if (_protocol.Mode != MasterMode.Idle)
+            {
+                throw new CommandException("Connect the master in Garage Games idle mode before identifying a button.");
+            }
+            port = _port is { IsOpen: true } connectedPort
+                ? connectedPort
+                : throw new CommandException("Connect the physical master before identifying a button.");
+            _identifySequence = _identifySequence == uint.MaxValue ? 1 : _identifySequence + 1;
+            sequence = _identifySequence;
+        }
+
+        await SendProtocolLineAsync(port, MasterProtocolCodec.FormatIdentifyCommand(normalizedId, sequence), cancellationToken);
+        return GetSnapshot();
     }
 
     public MasterConnectionSnapshot Connect(string portName)
@@ -372,6 +409,18 @@ public sealed class PhysicalMasterSerialService : BackgroundService
 
             try
             {
+                if (MasterProtocolCodec.TryParseButtonTest(line, out var testPress))
+                {
+                    if (_protocol.Mode == MasterMode.Idle &&
+                        string.Equals(_protocol.BootToken, testPress.BootToken, StringComparison.Ordinal) &&
+                        _runs.CanIdentifyPhysicalButtons())
+                    {
+                        _lastTestDeviceId = testPress.DeviceId;
+                        _lastTestAt = DateTimeOffset.UtcNow;
+                    }
+                    return;
+                }
+
                 if (MasterProtocolCodec.TryParseScanReply(line, out var scanReply))
                 {
                     if (_pendingScan is { } scan && string.Equals(scan.ScanId, scanReply.ScanId, StringComparison.Ordinal))

@@ -4,6 +4,7 @@
   const state = {
     snapshot: null,
     connected: false,
+    displayError: "",
     busy: false,
     master: null,
     masterError: "",
@@ -20,6 +21,7 @@
     leaderboardSelectionInitialized: false,
     selectPromotedAfterRecord: false,
     competitorSignature: "",
+    showArchivedCompetitors: false,
     leaderboardCompetitorSignature: "",
     historySignature: "",
     queueSignature: "",
@@ -50,13 +52,28 @@
     appliedSnapshotRequestId: 0,
     armScanPending: false,
     armScanAfterSnapshotRequestId: null,
-    armScanRequestVersion: 0
+    armScanRequestVersion: 0,
+    lastIdentifyTestAt: null,
+    exhibitionPreferenceDraft: null,
+    latestEventPressMessageId: null,
+    buttonHighlightDeviceId: null,
+    buttonHighlightUntil: 0
   };
 
   const clearDatabasePhrase = "CLEAR ALL DATA";
   const $ = (id) => document.getElementById(id);
   const scorekeeperTime = window.GarageGamesScorekeeperTime;
-  const masterActions = window.GarageGamesMasterActions;
+  const loadedMasterActions = window.GarageGamesMasterActions || {};
+  const isRunDurationLocked = typeof loadedMasterActions.isRunDurationLocked === "function"
+    ? loadedMasterActions.isRunDurationLocked
+    : (run) => Boolean(run && ["armed", "countdown", "active", "paused", "finished"].includes(run.status));
+  const masterActions = {
+    ...loadedMasterActions,
+    isRunDurationLocked,
+    shouldResetRunDuration: typeof loadedMasterActions.shouldResetRunDuration === "function"
+      ? loadedMasterActions.shouldResetRunDuration
+      : (run, lastResetRunId) => Boolean(run?.id && !isRunDurationLocked(run) && run.id !== lastResetRunId)
+  };
   const runActions = window.GarageGamesRunActions;
   const setupTools = window.GarageGamesScorekeeperSetup;
   const scorecardOrder = window.GarageGamesScorecardOrder;
@@ -80,6 +97,13 @@
     queueList: $("on-deck-list"),
     addForm: $("add-competitor-form"),
     newCompetitor: $("new-competitor-name"),
+    competitorDuplicateWarning: $("competitor-duplicate-warning"),
+    showArchivedCompetitors: $("show-archived-competitors"),
+    competitorRosterList: $("competitor-roster-list"),
+    competitorImportForm: $("competitor-import-form"),
+    competitorImportText: $("competitor-import-text"),
+    competitorImportFile: $("competitor-import-file"),
+    competitorImportResult: $("competitor-import-result"),
     start: $("start-run-button"),
     armPhysical: $("arm-physical-button"),
     durationInput: $("run-duration-input"),
@@ -93,6 +117,7 @@
     masterLastMessage: $("master-last-message"),
     physicalStartHelp: $("physical-start-help"),
     pause: $("pause-run-button"),
+    undoPress: $("undo-last-event-press"),
     finish: $("finish-run-button"),
     record: $("record-run-button"),
     discard: $("discard-run-button"),
@@ -131,6 +156,7 @@
     playerLeaderboardBody: $("player-leaderboard-body"),
     playerLeaderboardTotal: $("player-leaderboard-total"),
     eventLeaderboardsGrid: $("event-leaderboards-grid"),
+    showExhibitionsOnLeaderboard: $("show-exhibitions-on-leaderboard"),
     clearDatabaseConfirmation: $("clear-database-confirmation"),
     clearDatabaseButton: $("clear-database-button"),
     clearDatabaseResult: $("clear-database-result"),
@@ -148,6 +174,8 @@
     setupAddEvent: $("setup-add-event"),
     setupValidation: $("setup-validation"),
     setupEventList: $("setup-event-list"),
+    setupPreviewSummary: $("setup-preview-summary"),
+    setupPreviewList: $("setup-preview-list"),
     setupSaveState: $("setup-save-state")
   };
 
@@ -236,7 +264,9 @@
     ui.connection.classList.toggle("is-online", online);
     ui.connection.classList.toggle("is-offline", !online);
     const label = ui.connection.querySelector("span");
-    if (label) label.textContent = online ? "Connected" : "Offline";
+    if (label) label.textContent = online
+      ? (state.displayError ? "Connected · display issue" : "Connected")
+      : "Offline";
   }
 
   function renderMasterControls() {
@@ -294,7 +324,18 @@
     if (state.masterLoading) return false;
     state.masterLoading = true;
     try {
-      state.master = await request("/api/master");
+      const master = await request("/api/master");
+      if (master.lastTestAt && master.lastTestAt !== state.lastIdentifyTestAt) {
+        state.lastIdentifyTestAt = master.lastTestAt;
+        state.buttonHighlightDeviceId = String(master.lastTestDeviceId || "").toUpperCase();
+        state.buttonHighlightUntil = Date.now() + 1400;
+        window.setTimeout(() => {
+          if (Date.now() >= state.buttonHighlightUntil) {
+            document.querySelectorAll(".virtual-button.is-physical-press").forEach((button) => button.classList.remove("is-physical-press"));
+          }
+        }, 1450);
+      }
+      state.master = master;
       state.masterError = "";
       return true;
     } catch (error) {
@@ -311,25 +352,77 @@
 
   async function loadSnapshot(silent = false) {
     const requestId = ++state.snapshotRequestId;
+    let snapshot;
     try {
-      const snapshot = await request("/api/operator");
-      if (requestId < state.appliedSnapshotRequestId) return true;
-      state.appliedSnapshotRequestId = requestId;
-      state.snapshot = snapshot;
-      state.receivedAt = Date.now();
-      if (state.armScanPending && state.armScanAfterSnapshotRequestId !== null && requestId > state.armScanAfterSnapshotRequestId) {
-        state.armScanPending = false;
-        state.armScanAfterSnapshotRequestId = null;
-        state.virtualKey = null;
-      }
-      state.timeoutRefreshRunId = null;
-      setConnection(true);
-      ui.lastUpdated.textContent = new Date(state.receivedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
-      render();
-      return true;
+      snapshot = await request("/api/operator");
     } catch (error) {
       setConnection(false);
       if (!silent) showAlert(`Could not load scorekeeper data: ${error.message}`);
+      return false;
+    }
+
+    if (requestId < state.appliedSnapshotRequestId) return true;
+
+    const latestEventPress = (snapshot.messages || [])
+      .filter((message) => message.type === "event-press" && String(message.messageId || "").startsWith("spoke-press:"))
+      .sort((left, right) => Number(right.id) - Number(left.id))[0];
+    const latestEventPressId = latestEventPress ? String(latestEventPress.id) : null;
+    if (state.snapshot && latestEventPress && latestEventPressId !== state.latestEventPressMessageId &&
+        String(latestEventPress.disposition).toLowerCase() === "accepted") {
+      state.buttonHighlightDeviceId = String(latestEventPress.deviceId || "").toUpperCase();
+      state.buttonHighlightUntil = Date.now() + 1400;
+      window.setTimeout(() => {
+        if (Date.now() >= state.buttonHighlightUntil) {
+          document.querySelectorAll(".virtual-button.is-physical-press").forEach((button) => button.classList.remove("is-physical-press"));
+        }
+      }, 1450);
+    }
+    state.latestEventPressMessageId = latestEventPressId;
+
+    const previous = {
+      snapshot: state.snapshot,
+      receivedAt: state.receivedAt,
+      appliedSnapshotRequestId: state.appliedSnapshotRequestId,
+      timeoutRefreshRunId: state.timeoutRefreshRunId,
+      armScanPending: state.armScanPending,
+      armScanAfterSnapshotRequestId: state.armScanAfterSnapshotRequestId,
+      virtualKey: state.virtualKey,
+      lastUpdated: ui.lastUpdated.textContent
+    };
+    state.appliedSnapshotRequestId = requestId;
+    state.snapshot = snapshot;
+    state.receivedAt = Date.now();
+    if (state.armScanPending && state.armScanAfterSnapshotRequestId !== null && requestId > state.armScanAfterSnapshotRequestId) {
+      state.armScanPending = false;
+      state.armScanAfterSnapshotRequestId = null;
+      state.virtualKey = null;
+    }
+    state.timeoutRefreshRunId = null;
+    setConnection(true);
+    ui.lastUpdated.textContent = new Date(state.receivedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+    try {
+      render();
+      state.displayError = "";
+      setConnection(true);
+      return true;
+    } catch (error) {
+      state.displayError = error?.message || "An unexpected display error occurred.";
+      if (previous.snapshot) {
+        state.snapshot = previous.snapshot;
+        state.receivedAt = previous.receivedAt;
+        state.appliedSnapshotRequestId = previous.appliedSnapshotRequestId;
+        state.timeoutRefreshRunId = previous.timeoutRefreshRunId;
+        state.armScanPending = previous.armScanPending;
+        state.armScanAfterSnapshotRequestId = previous.armScanAfterSnapshotRequestId;
+        state.virtualKey = previous.virtualKey;
+        ui.lastUpdated.textContent = previous.lastUpdated;
+        try { render(); } catch (restoreError) {
+          console.error("The previous scorekeeper screen could not be redrawn after a display error.", restoreError);
+        }
+      }
+      setConnection(true);
+      console.error("Scorekeeper data was received, but the screen could not be rendered.", error);
+      if (!silent) showAlert(`Scorekeeper data is connected, but the screen could not refresh: ${state.displayError}`);
       return false;
     }
   }
@@ -379,7 +472,8 @@
     if (!state.setupDraft) return;
     const busy = state.setupLoading || state.setupSaving || state.setupScanLoading || state.busy;
     ui.setupEventCount.textContent = `${state.setupDraft.events.length} ${state.setupDraft.events.length === 1 ? "event" : "events"}`;
-    ui.setupScanSummary.textContent = setupTools.scanSummary(state.setupScan, state.setupScanFresh);
+    const checkedAt = setupCheckedAt();
+    ui.setupScanSummary.textContent = `${setupTools.scanSummary(state.setupScan, state.setupScanFresh)}${checkedAt ? ` Most recent check: ${formatLocalDateTime(checkedAt)}; this is a point-in-time check, not live monitoring.` : ""}`;
     if (state.setupScanError) ui.setupScanSummary.textContent += ` ${state.setupScanError}`;
     if (state.setupDirty && !state.setupScanFresh) ui.setupScanSummary.textContent += " Save setup before scanning the current assignments.";
     ui.setupSaveState.textContent = state.setupSaving
@@ -450,6 +544,7 @@
   }
 
   function renderSetupReadiness() {
+    const checkedAt = setupCheckedAt();
     ui.setupEventList.querySelectorAll(".setup-event-row").forEach((row) => {
       const event = setupEvent(row.dataset.eventId);
       const status = row.querySelector("[data-setup-readiness]");
@@ -457,6 +552,10 @@
       const readiness = physicalReadiness(event);
       status.className = `setup-readiness ${readiness.key}`;
       status.textContent = readiness.label;
+      const checked = row.querySelector("[data-setup-readiness-checked]");
+      if (checked) checked.textContent = checkedAt
+        ? `Last checked ${formatLocalDateTime(checkedAt)}`
+        : "No completed scan yet";
       const check = row.querySelector('[data-setup-action="check"]');
       if (check) check.disabled = state.setupLoading || state.setupSaving || state.setupScanLoading || state.setupDirty || state.busy;
     });
@@ -576,6 +675,9 @@
       check.dataset.setupEventId = event.eventId;
       check.setAttribute("aria-label", `Run a fresh physical scan for ${event.name}`);
       readiness.append(readinessBadge, check);
+      const checkedLabel = make("small", "setup-readiness-checked", "No completed scan yet");
+      checkedLabel.dataset.setupReadinessChecked = "true";
+      readiness.appendChild(checkedLabel);
       deviceRow.append(assignmentLabel, unassign, readiness);
 
       const internalId = make("p", "setup-event-id", `Event ID · ${event.eventId}`);
@@ -584,6 +686,38 @@
     });
     renderSetupSelection();
     renderSetupReadiness();
+    renderSetupPreview();
+  }
+
+  function setupCheckedAt() {
+    if (state.setupScanFresh && state.setupScanAt) return state.setupScanAt;
+    return state.snapshot?.deviceScanCheckedAt || null;
+  }
+
+  function renderSetupPreview() {
+    if (!ui.setupPreviewList) return;
+    const events = state.setupDraft?.events || [];
+    ui.setupPreviewList.replaceChildren();
+    ui.setupPreviewSummary.textContent = `${events.length} ${events.length === 1 ? "event" : "events"} · order shown is the scorekeeper button order. Changes here are previews until you save setup.`;
+    events.forEach((event, index) => {
+      const effectiveNumber = (value, fallback) => {
+        const candidate = value ?? fallback;
+        return candidate === "" || !Number.isFinite(Number(candidate)) ? null : Number(candidate);
+      };
+      const starting = effectiveNumber(event.basePoints, state.setupDraft.scoringDefaults.basePoints);
+      const minimum = effectiveNumber(event.minimumPoints, state.setupDraft.scoringDefaults.minimumPoints);
+      const decay = effectiveNumber(event.decayPoints, state.setupDraft.scoringDefaults.decayPoints);
+      const interval = effectiveNumber(event.decayEverySeconds, state.setupDraft.scoringDefaults.decayEverySeconds);
+      const grace = effectiveNumber(event.graceSeconds, 0);
+      const firstDrop = grace > 0 ? grace : interval;
+      const deviceId = setupTools.hardwareId(event.assignmentValue || "");
+      const kind = ({ standard: "Regular", keypad: "Keypad", magneticArcade: "Arcade" })[event.type] || titleCase(event.type);
+      const details = `${kind} · ${starting ?? "—"} start · −${decay ?? "—"} at ${firstDrop ?? "—"}s, then every ${interval ?? "—"}s · min ${minimum ?? "—"} · ${deviceId ? `Button ${deviceId}` : "Virtual only"}`;
+      const row = make("li", "setup-preview-item");
+      row.append(make("span", "setup-preview-order", String(index + 1)), make("span", "setup-preview-event"));
+      row.querySelector(".setup-preview-event").append(make("strong", "", event.name || `Event ${index + 1}`), make("small", "", details));
+      ui.setupPreviewList.appendChild(row);
+    });
   }
 
   function renderSetup() {
@@ -602,6 +736,7 @@
     renderSetupDiscovery();
     renderSetupControls();
     renderSetupSelection();
+    renderSetupPreview();
   }
 
   function markSetupChanged() {
@@ -611,6 +746,7 @@
     renderSetupControls();
     renderSetupDiscovery();
     renderSetupReadiness();
+    renderSetupPreview();
     if (state.snapshot) renderVirtualButtons(state.snapshot.currentRun);
   }
 
@@ -749,8 +885,9 @@
   }
 
   function renderCompetitors() {
-    const competitors = state.snapshot?.competitors || [];
-    const signature = competitors.map((item) => `${item.id}:${item.name}`).join("|");
+    const allCompetitors = state.snapshot?.competitors || [];
+    const competitors = allCompetitors.filter((item) => !item.isArchived);
+    const signature = allCompetitors.map((item) => `${item.id}:${item.name}:${item.isArchived ? 1 : 0}`).join("|");
     const previousValue = ui.competitor.value;
     const previousQueueValue = ui.queueCompetitor.value;
     if (signature !== state.competitorSignature) {
@@ -790,6 +927,105 @@
     } else if (competitors.some((item) => item.id === previousQueueValue)) {
       ui.queueCompetitor.value = previousQueueValue;
     }
+    renderCompetitorRoster();
+    updateDuplicateCompetitorWarning();
+  }
+
+  function normalizedCompetitorName(value) {
+    return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+  }
+
+  function updateDuplicateCompetitorWarning() {
+    const value = normalizedCompetitorName(ui.newCompetitor.value);
+    const match = (state.snapshot?.competitors || []).find((item) => normalizedCompetitorName(item.name) === value);
+    ui.competitorDuplicateWarning.hidden = !value || !match;
+    ui.competitorDuplicateWarning.textContent = match
+      ? `A player named “${match.name}” already exists${match.isArchived ? " (archived)" : ""}. Add anyway only if these are different people.`
+      : "";
+  }
+
+  function renderCompetitorRoster() {
+    const all = state.snapshot?.competitors || [];
+    const filtered = all
+      .filter((item) => state.showArchivedCompetitors || !item.isArchived)
+      .slice().sort((left, right) => left.name.localeCompare(right.name));
+    ui.competitorRosterList.replaceChildren();
+    if (!filtered.length) {
+      ui.competitorRosterList.appendChild(make("li", "empty-state", all.length
+        ? "No active players. Turn on “Show archived players” to include archived names."
+        : "No players yet."));
+      return;
+    }
+    filtered.forEach((competitor) => {
+      const row = make("li", `competitor-roster-row${competitor.isArchived ? " is-archived" : ""}`);
+      const identity = make("span", "competitor-roster-identity");
+      identity.append(make("strong", "", competitor.name), make("small", "", competitor.isArchived ? "Archived · history retained" : "Active player"));
+      const actions = make("span", "competitor-roster-actions");
+      const rename = make("button", "button button-quiet", "Rename");
+      rename.type = "button";
+      rename.dataset.rosterAction = "rename";
+      rename.dataset.competitorId = competitor.id;
+      rename.setAttribute("aria-label", `Rename ${competitor.name}`);
+      actions.appendChild(rename);
+      const archive = make("button", "button button-quiet", competitor.isArchived ? "Restore" : "Archive");
+      archive.type = "button";
+      archive.dataset.rosterAction = competitor.isArchived ? "restore" : "archive";
+      archive.dataset.competitorId = competitor.id;
+      archive.setAttribute("aria-label", `${competitor.isArchived ? "Restore" : "Archive"} ${competitor.name}`);
+      actions.appendChild(archive);
+      row.append(identity, actions);
+      ui.competitorRosterList.appendChild(row);
+    });
+  }
+
+  function parseCompetitorCsv(text) {
+    text = String(text || "").replace(/^\uFEFF/, "");
+    const rows = [];
+    let row = [];
+    let field = "";
+    let quoted = false;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (quoted) {
+        if (char === '"' && text[index + 1] === '"') { field += '"'; index += 1; }
+        else if (char === '"') quoted = false;
+        else field += char;
+      } else if (char === '"' && field.length === 0) quoted = true;
+      else if (char === ",") { row.push(field); field = ""; }
+      else if (char === "\n" || char === "\r") {
+        row.push(field);
+        if (row.some((cell) => cell.trim())) rows.push(row);
+        row = []; field = "";
+        if (char === "\r" && text[index + 1] === "\n") index += 1;
+      } else field += char;
+    }
+    row.push(field);
+    if (row.some((cell) => cell.trim())) rows.push(row);
+    if (rows.length && /^(name|player|competitor)( name)?$/i.test(rows[0][0]?.trim() || "")) rows.shift();
+    return rows.map((cells) => cells[0]?.trim() || "").filter(Boolean);
+  }
+
+  async function handleRosterAction(event) {
+    const button = event.target.closest("button[data-roster-action]");
+    if (!button || button.disabled) return;
+    const competitor = (state.snapshot?.competitors || []).find((item) => item.id === button.dataset.competitorId);
+    if (!competitor) return;
+    if (button.dataset.rosterAction === "rename") {
+      const value = window.prompt(`Rename ${competitor.name}. Their existing run history will stay linked and will display the new name.`, competitor.name);
+      if (value === null || !value.trim() || value.trim() === competitor.name) return;
+      await performAction(() => request(`/api/competitors/${encodeURIComponent(competitor.id)}`, {
+        method: "PUT", body: JSON.stringify({ name: value.trim() })
+      }), "Player renamed; past runs remain linked to this player.");
+      return;
+    }
+    const restoring = button.dataset.rosterAction === "restore";
+    const prompt = restoring
+      ? `Restore ${competitor.name} to the active player list? Their saved history is unchanged.`
+      : `Archive ${competitor.name}? This hides them from new runs but keeps all of their history. Nothing will be deleted.`;
+    if (!window.confirm(prompt)) return;
+    await performAction(() => request(`/api/competitors/${encodeURIComponent(competitor.id)}/archive`, {
+      method: "POST", body: JSON.stringify({ isArchived: !restoring })
+    }), restoring ? "Player restored." : "Player archived; saved history was kept.");
   }
 
   function categoryLabel(category) {
@@ -900,6 +1136,14 @@
   function formatDuration(milliseconds) {
     if (milliseconds === null || milliseconds === undefined || milliseconds < 0) return "—";
     return scorekeeperTime.formatClockMs(milliseconds);
+  }
+
+  function formatLocalDateTime(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return "time unavailable";
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit"
+    }).format(date);
   }
 
   function displayedValue(run, event, field) {
@@ -1085,17 +1329,44 @@
       const durationCell = make("td", "duration-cell", "—");
       const pointsCell = make("td");
       const statusCell = make("td", "event-status", "Pending");
+      const actionsCell = make("td", "event-actions-cell");
       durationCell.dataset.eventId = event.eventId;
       statusCell.dataset.eventId = event.eventId;
       startCell.appendChild(buildTimeInput(run, event, "start", editable));
       finishCell.appendChild(buildTimeInput(run, event, "finish", editable));
       pointsCell.appendChild(buildScoreInput(run, event, editable));
-      row.append(nameCell, startCell, finishCell, durationCell, pointsCell, statusCell);
+      if (run) {
+        const clearButton = make("button", "button button-quiet event-clear-button", "Clear");
+        clearButton.type = "button";
+        clearButton.dataset.clearEvent = "true";
+        clearButton.dataset.eventId = event.eventId;
+        clearButton.dataset.runId = run.id;
+        clearButton.dataset.revision = String(run.revision);
+        clearButton.setAttribute("aria-label", `Clear all results for ${event.name}`);
+        clearButton.disabled = state.busy;
+        actionsCell.appendChild(clearButton);
+      }
+      row.append(nameCell, startCell, finishCell, durationCell, pointsCell, statusCell, actionsCell);
       row.dataset.eventId = event.eventId;
       tbody.appendChild(row);
       rowTiming(row, run);
     });
     updateTableTotal(kind, run);
+  }
+
+  function undoableEventPress(run) {
+    if (!run || !["active", "paused", "finished", "timedOut"].includes(run.status)) return null;
+    const eventsByDevice = new Map((run.events || [])
+      .filter((event) => String(event.type || "standard").toLowerCase() === "standard")
+      .map((event) => [String(event.deviceId || "").toUpperCase(), event]));
+    return (state.snapshot?.messages || [])
+      .filter((message) => message.runId === run.id && message.type === "event-press" && String(message.disposition).toLowerCase() === "accepted")
+      .map((message) => ({ message, event: eventsByDevice.get(String(message.deviceId || "").toUpperCase()) }))
+      .filter(({ message, event }) => event && event.lastSignalElapsedMs === message.elapsedMilliseconds && (
+        String(event.status).toLowerCase() === "completed" && event.finishElapsedMs === message.elapsedMilliseconds ||
+        String(event.status).toLowerCase() === "active" && event.startElapsedMs === message.elapsedMilliseconds && event.finishElapsedMs == null
+      ))
+      .sort((left, right) => Number(right.message.id) - Number(left.message.id))[0] || null;
   }
 
   function captureFocus() {
@@ -1129,12 +1400,17 @@
 
   function setSaveStates() {
     const current = state.snapshot?.currentRun;
-    const currentDirty = current && (hasDrafts(current.id) || hasBonusDraft(current.id));
+    const currentDirty = Boolean(current && (hasDrafts(current.id) || hasBonusDraft(current.id)));
     const currentEditable = Boolean(current && isLiveLock(current));
     ui.currentSave.disabled = state.busy || !currentDirty || !currentEditable;
     ui.currentSaveState.textContent = currentDirty
       ? (currentEditable ? "Unsaved edits" : "Use the history editor to correct this saved run")
       : "No unsaved edits";
+    ui.record.disabled = state.busy || !current || current.isRecorded || currentDirty || !["armed", "active", "paused", "finished", "timedOut"].includes(current.status);
+    ui.record.textContent = current?.isRecorded
+      ? "Already recorded"
+      : currentDirty ? "Save edits before recording" : "Record result";
+    ui.record.title = currentDirty ? "Save your scorecard corrections before recording this run." : "";
 
     const selected = (state.snapshot?.history || []).find((run) => run.id === state.selectedHistoryId);
     const historyDirty = selected && (hasDrafts(selected.id) || hasBonusDraft(selected.id));
@@ -1179,7 +1455,9 @@
         countdown: "Countdown audio is playing. The run timer and event buttons start when it ends.",
         active: "Run in progress. Event timestamps count down from the run limit.",
         paused: "Run paused. Resume when the competitor is ready.",
-        finished: "All events complete. Timer stopped · finished, not recorded.",
+        finished: (run.events || []).every((event) => event.status === "completed")
+          ? "All events complete. Timer stopped · finished, not recorded."
+          : "Run finished early. Timer stopped · unfinished events remain; not recorded.",
         completed: "Run finished · recorded.",
         timedOut: run.isRecorded ? "Time expired · incomplete result recorded." : "Time expired · incomplete result not recorded.",
         aborted: "Run discarded · retained in history · not recorded or counted toward results.",
@@ -1199,7 +1477,7 @@
     const physicalSummary = physicalAvailabilitySummary(events);
     renderPhysicalReadiness(events);
     const note = !run
-      ? "Start a run to enable virtual presses. They remain available independently of physical hardware readiness."
+      ? "No run is underway. Tap an assigned event tile to flash its physical button; press a physical spoke to highlight its matching tile."
       : run.status === "active"
         ? "Times count down from the run limit. Virtual presses remain available even when physical hardware is unassigned or unverified. Press once to start an event and again to finish it."
         : run.status === "countdown"
@@ -1208,38 +1486,56 @@
           ? "Resume the run before recording event presses."
         : run.status === "armed"
             ? "Start the run to enable event presses."
-            : "This run no longer accepts event presses. Review or correct it in history.";
+            : "No run is underway. Tap an assigned event tile to flash its physical button; press a physical spoke to highlight its matching tile.";
     ui.virtualNote.textContent = `${note} ${physicalSummary.text}`;
-    const key = run ? `${run.id}:${run.revision}:${run.status}:${state.busy}:${physicalSignature}` : `no-run:${eventRosterSignature()}:${state.busy}:${physicalSignature}`;
+    const key = `${run ? `${run.id}:${run.revision}:${run.status}` : `no-run:${eventRosterSignature()}`}:${state.busy}:${physicalSignature}:${state.master?.connected}:${state.master?.mode}:${state.masterBusy}:${state.buttonHighlightDeviceId}:${state.buttonHighlightUntil}`;
     if (key === state.virtualKey) return;
     ui.virtualButtons.replaceChildren();
     const canPress = Boolean(run && run.status === "active" && !state.busy);
+    const identificationMode = !run || !["armed", "countdown", "active", "paused"].includes(run.status);
     events.forEach((event, index) => {
       const button = make("button", "virtual-button");
       button.type = "button";
-      button.disabled = !canPress || event.status === "completed";
+      const configured = physicalConfiguration(event);
+      const deviceId = setupTools.hardwareId(configured.assignmentValue || configured.deviceId || event.deviceId || "");
+      const canIdentify = Boolean(deviceId && state.master?.connected && state.master?.mode === "IDLE" && !state.masterBusy);
+      button.dataset.eventId = event.eventId;
+      button.dataset.deviceId = deviceId || "";
+      button.disabled = state.busy || (identificationMode ? !canIdentify : !canPress || event.status === "completed");
+      if (identificationMode) button.classList.add("is-identification-mode");
+      if (event.status === "active") button.classList.add("is-started");
+      if (deviceId && deviceId === state.buttonHighlightDeviceId && Date.now() < state.buttonHighlightUntil) button.classList.add("is-physical-press");
       const actionLabel = event.status === "active" ? "finish event" : event.status === "completed" ? "complete" : "start event";
       const readiness = physicalReadiness(event);
       const status = virtualDeviceStatus(readiness);
       const useVirtual = readiness.key !== "responding" && readiness.key !== "unassigned";
       button.classList.add(`device-${status.key}`);
       let actionHint = "Start";
-      if (event.status === "active") {
+      if (identificationMode) {
+        actionHint = !deviceId ? "No physical button assigned"
+          : !state.master?.connected ? "Connect the master to identify"
+            : state.master?.mode !== "IDLE" ? "Master must be in Garage Games idle mode"
+              : "Identify physical button";
+      } else if (event.status === "active") {
         const remainingMs = Math.max(0, runDurationSeconds(run) * 1000 - currentElapsedMs(run));
         actionHint = `Stop · ${formatSeconds(remainingMs)} left`;
       } else if (event.status === "completed") {
         actionHint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
       }
-      if (useVirtual && event.status !== "completed") actionHint = `Use virtual · ${actionHint}`;
-      button.setAttribute("aria-label", `${event.name}: physical button ${status.label}. ${actionHint}. Press to ${actionLabel}.`);
-      button.title = `${event.name} · ${status.label} · ${actionHint}`;
+      if (!identificationMode && useVirtual && event.status !== "completed") actionHint = `Use virtual · ${actionHint}`;
+      button.setAttribute("aria-label", identificationMode
+        ? `${event.name}: ${actionHint}.`
+        : `${event.name}: physical button ${status.label}. ${actionHint}. Press to ${actionLabel}.`);
+      button.title = identificationMode ? `${event.name} · ${actionHint}` : `${event.name} · ${status.label} · ${actionHint}`;
       const name = make("strong", "", `${String(index + 1).padStart(2, "0")} · ${event.name}`);
       const stateLabel = make("small", "virtual-device-status", status.label);
       const action = make("small", "virtual-action-hint", actionHint);
       const metadata = make("span", "virtual-button-meta");
       metadata.append(stateLabel, action);
       button.append(name, metadata);
-      button.addEventListener("click", () => pressEvent(run, event));
+      button.addEventListener("click", () => identificationMode
+        ? identifyPhysicalButton(event, deviceId)
+        : pressEvent(run, event));
       ui.virtualButtons.appendChild(button);
     });
     state.virtualKey = key;
@@ -1307,7 +1603,9 @@
     const prefix = checking
       ? "Checking assigned physical buttons…"
       : `${responding} responding · ${missing} not responding · ${unverified} unverified`;
-    return { text: `${prefix} · virtual event buttons remain available.`, entries };
+    const checkedAt = state.snapshot?.deviceScanCheckedAt;
+    const checkedLabel = checkedAt ? ` Last checked ${formatLocalDateTime(checkedAt)} (point-in-time, not live).` : " No completed scan is recorded yet.";
+    return { text: `${prefix}.${checkedLabel} Virtual event buttons remain available.`, entries, checkedAt };
   }
 
   function renderPhysicalReadiness(events) {
@@ -1324,7 +1622,8 @@
       const identity = make("span", "physical-readiness-identity");
       identity.append(
         make("strong", "physical-readiness-event", event.name),
-        make("small", "physical-readiness-device", `Button ${deviceId}`)
+        make("small", "physical-readiness-device", `Button ${deviceId}`),
+        make("small", "physical-readiness-checked", summary.checkedAt ? `Checked ${formatLocalDateTime(summary.checkedAt)}` : "Not checked yet")
       );
       item.append(identity, make("strong", "physical-readiness-label", status.label));
       ui.physicalReadinessList.appendChild(item);
@@ -1414,7 +1713,7 @@
   function renderOverallLeaderboard(rows) {
     ui.overallLeaderboardCount.textContent = `${rows.length} ${rows.length === 1 ? "result" : "results"}`;
     if (!rows.length) {
-      appendEmptyTableRow(ui.overallLeaderboardBody, 3, "No counted official results for this edition yet.");
+      appendEmptyTableRow(ui.overallLeaderboardBody, 4, "No visible results for this edition yet.");
       return;
     }
     const fragment = document.createDocumentFragment();
@@ -1422,7 +1721,8 @@
       const row = make("tr");
       row.append(
         make("td", "leaderboard-rank", String(item.rank)),
-        make("td", "leaderboard-player", item.competitorName),
+        make("td", "leaderboard-player", item.displayName || item.competitorName),
+        make("td", `leaderboard-category category-${String(item.category).toLowerCase()}`, categoryLabel(item.category)),
         make("td", "leaderboard-points", String(item.points))
       );
       fragment.appendChild(row);
@@ -1522,7 +1822,7 @@
       const table = make("table", "score-table leaderboard-table");
       const thead = document.createElement("thead");
       const headerRow = document.createElement("tr");
-      ["Rank", "Player", "Time", "Points"].forEach((label) => {
+      ["Rank", "Player", "Type", "Time", "Points"].forEach((label) => {
         const cell = make("th", "", label);
         cell.scope = "col";
         headerRow.appendChild(cell);
@@ -1530,7 +1830,7 @@
       thead.appendChild(headerRow);
       const tbody = document.createElement("tbody");
       if (!board.rows.length) {
-        appendEmptyTableRow(tbody, 4, "No completed official results for this event yet.");
+        appendEmptyTableRow(tbody, 5, "No visible results for this event yet.");
       } else {
         board.rows.forEach((item) => {
           const row = make("tr");
@@ -1538,7 +1838,8 @@
           const display = leaderboardTools.eventLeaderboardDisplayRow(item);
           row.append(
             make("td", "leaderboard-rank", display.rank),
-            make("td", "leaderboard-player", item.competitorName),
+            make("td", "leaderboard-player", item.displayName || item.competitorName),
+            make("td", `leaderboard-category category-${String(item.category).toLowerCase()}`, categoryLabel(item.category)),
             make("td", "duration-cell", display.durationMs === null ? "—" : formatDuration(display.durationMs)),
             make("td", "leaderboard-points", display.points)
           );
@@ -1557,13 +1858,14 @@
   function renderLeaderboards() {
     const snapshot = state.snapshot;
     if (!snapshot) return;
-    const officialRows = snapshot.leaderboard || [];
+    const leaderboardRows = snapshot.leaderboard || [];
     const officialRuns = officialLeaderboardRuns();
+    ui.showExhibitionsOnLeaderboard.checked = state.exhibitionPreferenceDraft ?? Boolean(snapshot.showExhibitionsOnLeaderboard);
     renderLeaderboardPlayerOptions(officialRuns);
 
-    const overallKey = JSON.stringify(officialRows);
+    const overallKey = JSON.stringify(leaderboardRows);
     if (overallKey !== state.overallLeaderboardKey) {
-      renderOverallLeaderboard(officialRows);
+      renderOverallLeaderboard(leaderboardRows);
       state.overallLeaderboardKey = overallKey;
     }
 
@@ -1573,7 +1875,7 @@
       state.playerLeaderboardKey = playerKey;
     }
 
-    const boards = leaderboardTools.buildEventLeaderboards(snapshot.events || [], officialRows, snapshot.history || []);
+    const boards = leaderboardTools.buildEventLeaderboards(snapshot.events || [], leaderboardRows, snapshot.history || []);
     const eventKey = JSON.stringify(boards);
     if (eventKey !== state.eventLeaderboardsKey) {
       renderEventLeaderboards(boards);
@@ -1674,9 +1976,8 @@
       : `Arm ${masterActions.formatRunDuration(durationSeconds || 300)} run`;
     ui.pause.disabled = state.busy || !run || !["active", "paused"].includes(run.status);
     ui.pause.textContent = run?.status === "paused" ? "Resume" : "Pause";
+    ui.undoPress.disabled = state.busy || !undoableEventPress(run);
     ui.finish.disabled = state.busy || !run || !["armed", "active", "paused"].includes(run.status);
-    ui.record.disabled = state.busy || !run || run.isRecorded || !["armed", "active", "paused", "finished", "timedOut"].includes(run.status);
-    ui.record.textContent = run?.isRecorded ? "Already recorded" : "Record result";
     ui.discard.hidden = !runActions.isDiscardableRun(run);
     ui.discard.disabled = state.busy || !state.connected;
     ui.clearDatabaseButton.disabled = state.busy || !state.connected || ui.clearDatabaseConfirmation.value !== clearDatabasePhrase;
@@ -1740,6 +2041,9 @@
   async function recordCurrentRun() {
     const run = state.snapshot?.currentRun;
     if (!run) throw new Error("There is no run to record.");
+    if (hasDrafts(run.id) || hasBonusDraft(run.id)) {
+      throw new Error("Save your scorecard corrections before recording. The current edits have not been submitted yet.");
+    }
     if (run.status === "timedOut") {
       await request(`/api/runs/${encodeURIComponent(run.id)}/record`, { method: "POST" });
       state.selectPromotedAfterRecord = true;
@@ -1851,6 +2155,53 @@
     await performAction(
       () => request(`/api/runs/${encodeURIComponent(run.id)}/events/${encodeURIComponent(event.eventId)}/press`, { method: "POST" }),
       event.status === "active" ? `${event.name} finished.` : `${event.name} started.`
+    );
+  }
+
+  async function identifyPhysicalButton(event, deviceId) {
+    if (!deviceId || state.busy || state.masterBusy) return;
+    state.masterBusy = true;
+    updateControls();
+    try {
+      state.master = await request("/api/master/identify", {
+        method: "POST",
+        body: JSON.stringify({ deviceId })
+      });
+      state.masterError = "";
+      showAlert(`Identification flash requested for ${event.name} (${deviceId}).`, "success");
+    } catch (error) {
+      showAlert(error.message || "The physical button could not be identified.");
+    } finally {
+      state.masterBusy = false;
+      await loadMaster(true);
+      updateControls();
+    }
+  }
+
+  function onClearEventClick(event) {
+    const button = event.target.closest("button[data-clear-event]");
+    if (!button || state.busy) return;
+    const runId = button.dataset.runId;
+    const eventId = button.dataset.eventId;
+    const run = state.snapshot?.currentRun?.id === runId
+      ? state.snapshot.currentRun
+      : (state.snapshot?.history || []).find((item) => item.id === runId);
+    const eventResult = run?.events?.find((item) => item.eventId === eventId);
+    if (!run || !eventResult) return;
+    if (!window.confirm(`Clear all times, points, and notes for “${eventResult.name}” in ${competitorName(run.competitorId)}’s ${categoryLabel(run.category)} run? This is saved as an audited correction.`)) return;
+    performAction(
+      async () => {
+        await request(`/api/runs/${encodeURIComponent(runId)}/events/${encodeURIComponent(eventId)}/clear`, {
+          method: "POST",
+          body: JSON.stringify({ expectedRevision: Number(button.dataset.revision) })
+        });
+        const runDrafts = state.drafts.get(runId);
+        if (runDrafts) {
+          runDrafts.delete(eventId);
+          if (runDrafts.size === 0) state.drafts.delete(runId);
+        }
+      },
+      `${eventResult.name} cleared. It is available to start again.`
     );
   }
 
@@ -2067,6 +2418,10 @@
       const path = state.snapshot?.currentRun?.status === "paused" ? "/api/run/resume" : "/api/run/pause";
       performAction(() => request(path, { method: "POST" }), path.endsWith("resume") ? "Run resumed." : "Run paused.");
     });
+    ui.undoPress.addEventListener("click", () => performAction(
+      () => request("/api/run/undo-last-press", { method: "POST" }),
+      "The last event-button press was undone."
+    ));
     ui.finish.addEventListener("click", () => performAction(
       () => request("/api/run/finish", { method: "POST" }),
       "Run finished · not recorded yet."
@@ -2102,18 +2457,58 @@
     ui.historySave.addEventListener("click", saveHistoryEdits);
     ui.currentBody.addEventListener("input", onScoreInput);
     ui.historyBody.addEventListener("input", onScoreInput);
+    ui.currentBody.addEventListener("click", onClearEventClick);
+    ui.historyBody.addEventListener("click", onClearEventClick);
     ui.currentBonus.addEventListener("input", onBonusInput);
     ui.historyBonus.addEventListener("input", onBonusInput);
     ui.addForm.addEventListener("submit", (event) => {
       event.preventDefault();
       const name = ui.newCompetitor.value.trim();
       if (!name) return;
+      const duplicate = (state.snapshot?.competitors || []).find((item) => normalizedCompetitorName(item.name) === normalizedCompetitorName(name));
+      if (duplicate && !window.confirm(`“${duplicate.name}” already exists${duplicate.isArchived ? " in the archived list" : ""}. Add another player with the same name anyway?`)) return;
       performAction(async () => {
         const competitor = await request("/api/competitors", { method: "POST", body: JSON.stringify({ name }) });
         state.selectedCompetitorAfterRefresh = competitor.id;
         state.queueCompetitorAfterRefresh = competitor.id;
         ui.newCompetitor.value = "";
+        ui.competitorDuplicateWarning.hidden = true;
       }, "Competitor added.");
+    });
+    ui.newCompetitor.addEventListener("input", updateDuplicateCompetitorWarning);
+    ui.showArchivedCompetitors.addEventListener("change", () => {
+      state.showArchivedCompetitors = ui.showArchivedCompetitors.checked;
+      renderCompetitorRoster();
+    });
+    ui.competitorRosterList.addEventListener("click", handleRosterAction);
+    ui.competitorImportFile.addEventListener("change", async () => {
+      const file = ui.competitorImportFile.files?.[0];
+      if (!file) return;
+      try {
+        ui.competitorImportText.value = await file.text();
+        ui.competitorImportResult.textContent = `${file.name} loaded. Review the names, then choose Import names.`;
+      } catch (error) {
+        ui.competitorImportResult.textContent = `Could not read that file: ${error.message || "unknown error"}`;
+      }
+    });
+    ui.competitorImportForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const names = parseCompetitorCsv(ui.competitorImportText.value);
+      if (!names.length) {
+        ui.competitorImportResult.textContent = "Paste or choose a list containing at least one name first.";
+        return;
+      }
+      if (names.length > 500) {
+        ui.competitorImportResult.textContent = "Import is limited to 500 rows at a time.";
+        return;
+      }
+      performAction(async () => {
+        const result = await request("/api/competitors/import", { method: "POST", body: JSON.stringify({ names }) });
+        ui.competitorImportText.value = "";
+        ui.competitorImportFile.value = "";
+        const skipped = result.skipped || [];
+        ui.competitorImportResult.textContent = `${result.added?.length || 0} added · ${skipped.length} skipped${skipped.length ? `: ${skipped.slice(0, 5).join("; ")}${skipped.length > 5 ? `; and ${skipped.length - 5} more` : ""}` : ""}`;
+      }, "Player list imported. Existing and repeated names were skipped.");
     });
     ui.queueForm.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -2138,6 +2533,22 @@
       state.selectedLeaderboardCompetitorId = ui.leaderboardPlayerSelect.value;
       state.playerLeaderboardKey = null;
       renderLeaderboards();
+    });
+    ui.showExhibitionsOnLeaderboard.addEventListener("change", () => {
+      const showExhibitionsOnLeaderboard = ui.showExhibitionsOnLeaderboard.checked;
+      state.exhibitionPreferenceDraft = showExhibitionsOnLeaderboard;
+      performAction(async () => {
+        try {
+          await request("/api/leaderboards/preferences", {
+            method: "PUT",
+            body: JSON.stringify({ showExhibitionsOnLeaderboard })
+          });
+          state.exhibitionPreferenceDraft = null;
+        } catch (error) {
+          state.exhibitionPreferenceDraft = null;
+          throw error;
+        }
+      }, showExhibitionsOnLeaderboard ? "Exhibition runs are now included on the leaderboards." : "Exhibition runs are hidden from the leaderboards.");
     });
     ui.clearDatabaseConfirmation.addEventListener("input", updateControls);
     ui.clearDatabaseButton.addEventListener("click", clearDatabaseForTesting);

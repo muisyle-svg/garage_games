@@ -933,6 +933,12 @@
     setMode(!!snapshot.simulationMode, snapshot.editionName, "#scoreboard-mode");
     text(q("#scoreboard-edition"), snapshot.editionName || "Scoreboard");
     text(q("#scoreboard-footer-edition"), snapshot.editionName || "Local scoreboard");
+    text(q("#scoreboard-footer-category"), snapshot.showExhibitionsOnLeaderboard
+      ? "Playoff · official · exhibition standings"
+      : "Playoff · official standings");
+    text(q("#scoreboard-leaderboard-note"), snapshot.showExhibitionsOnLeaderboard
+      ? "Playoffs first · exhibitions shown"
+      : "Playoffs listed first");
     const run = snapshot.currentRun;
     const total = run ? Number(run.totalEvents || 0) : 13;
     const completed = run ? Number(run.completedEvents || 0) : 0;
@@ -964,10 +970,10 @@
 
   function renderLeaderboard(rows) {
     const container = q("#scoreboard-leaderboard"); clear(container);
-    if (!rows.length) { container.appendChild(make("div", "tv-empty", "No official results yet.")); return; }
+    if (!rows.length) { container.appendChild(make("div", "tv-empty", "No leaderboard results yet.")); return; }
     rows.forEach((row) => {
       const line = make("div", "tv-rank-row"); line.appendChild(make("span", "tv-rank", row.rank));
-      const name = make("div"); name.appendChild(make("div", "tv-rank-name", row.competitorName)); name.appendChild(make("div", "tv-rank-meta", `${pretty(row.category)} · ${pretty(row.status)}`)); line.appendChild(name); line.appendChild(make("span", "tv-points", row.points)); container.appendChild(line);
+      const name = make("div"); name.appendChild(make("div", "tv-rank-name", row.displayName || row.competitorName)); name.appendChild(make("div", "tv-rank-meta", `${pretty(row.category)} · ${pretty(row.status)}`)); line.appendChild(name); line.appendChild(make("span", "tv-points", row.points)); container.appendChild(line);
     });
   }
 
