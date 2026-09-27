@@ -466,14 +466,41 @@ public sealed class RunService
         }
     }
 
-    public (MasterRunStatus Status, MasterGarageStatus GarageStatus) GetMasterStatuses()
+    public (MasterRunStatus Status, MasterGarageStatus GarageStatus, MasterGarageEventSnapshot EventSnapshot) GetMasterStatuses()
     {
         lock (_gate)
         {
             RefreshActiveClock();
             var run = _current ?? _lastDisplayedRun;
-            return (BuildMasterRunStatus(run), BuildGarageStatus(run));
+            return (BuildMasterRunStatus(run), BuildGarageStatus(run), BuildGarageEventSnapshot(_current));
         }
+    }
+
+    private static MasterGarageEventSnapshot BuildGarageEventSnapshot(RunRecord? run)
+    {
+        if (run is null || run.Status != RunStatus.Active)
+        {
+            return new MasterGarageEventSnapshot(null, []);
+        }
+
+        var token = MasterProtocolCodec.GetGarageRunToken(run.Id);
+        if (token is null)
+        {
+            return new MasterGarageEventSnapshot(null, []);
+        }
+
+        var events = run.Events
+            .Where(eventResult => eventResult.Type == EventKind.Standard && MasterProtocolCodec.IsValidDeviceId(eventResult.DeviceId))
+            .OrderBy(eventResult => eventResult.DeviceId, StringComparer.OrdinalIgnoreCase)
+            .Select(eventResult => new MasterGarageEventStatus(token, run.Revision, eventResult.DeviceId,
+                eventResult.Status switch
+                {
+                    EventStatus.Active => "ACTIVE",
+                    EventStatus.Completed => "COMPLETED",
+                    _ => "PENDING"
+                }))
+            .ToList();
+        return new MasterGarageEventSnapshot($"{run.Id}:{run.Revision}", events);
     }
 
     private static MasterRunStatus BuildMasterRunStatus(RunRecord? run)

@@ -14,6 +14,7 @@ var tests = new (string Name, Action Run)[]
     ("physical master protocol validates boot tokens and SPEED interlock", MasterProtocolAndSpeedInterlock),
     ("physical spoke parser and handshake session are strict", PhysicalSpokeProtocolAndSession),
     ("physical spoke presses deduplicate across master boots and mix with virtual presses", PhysicalSpokeDedupesAndMixesWithVirtual),
+    ("physical button state snapshots follow virtual presses, undo, and finish", PhysicalButtonStateSnapshotTracksMixedInputs),
     ("countdown freezes time and rejects input and run actions", CountdownFreezesTimeAndRejectsActions),
     ("countdown completion is durable, idempotent, and run-scoped", CountdownCompletionIsRunScopedAndIdempotent),
     ("countdown recovery waits for replayed audio", CountdownRecovery),
@@ -510,6 +511,9 @@ static void PhysicalSpokeProtocolAndSession()
     Assert.Equal(true, allowedValues[^1]);
     Assert.Equal("GG1 RESULT 0011223344556677 AABBCCDDEEFF 42 ACTIVE",
         MasterProtocolCodec.FormatPhysicalPressResult(press, "ACTIVE"));
+    Assert.Equal("GG1 EVENT 0011223344556677 17 AABBCCDDEEFF PENDING",
+        MasterProtocolCodec.FormatGarageEventStatus(new MasterGarageEventStatus(
+            "0011223344556677", 17, "aabbccddeeff", "PENDING")));
 }
 
 static void PhysicalSpokeDedupesAndMixesWithVirtual()
@@ -583,6 +587,49 @@ static void PhysicalSpokeDedupesAndMixesWithVirtual()
     protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 4", ReceiveStart, ReceivePress);
     Assert.Equal(MessageDisposition.Duplicate, received!.Disposition);
     Assert.Equal("COMPLETED", received.State);
+}
+
+static void PhysicalButtonStateSnapshotTracksMixedInputs()
+{
+    const string firstMac = "AABBCCDDEEFF";
+    const string secondMac = "001122334455";
+    using var h = new TestHarness(MakeSpokeEdition(), NewPath(), simulatedDevicesOnline: false);
+    h.Service.RecordDeviceScan(true, true, [firstMac, secondMac]);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var runToken = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+
+    var snapshot = h.Service.GetMasterStatuses().EventSnapshot;
+    Assert.True(snapshot.Version is not null);
+    Assert.Equal(2, snapshot.Events.Count);
+    Assert.True(snapshot.Events.All(item => item.State == "PENDING"));
+
+    var physicalStart = h.Service.ReceivePhysicalSpokePress(
+        new MasterPhysicalPress("boot-test", runToken, firstMac, 1), sessionAllowed: true);
+    Assert.Equal(MessageDisposition.Accepted, physicalStart.Disposition);
+    Assert.Equal("ACTIVE", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
+
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "spoke-event-01").Disposition);
+    Assert.Equal("COMPLETED", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
+
+    var undoFinish = h.Service.UndoLastEventPress();
+    Assert.Equal(EventStatus.Active, undoFinish.Events.Single(item => item.DeviceId == firstMac).Status);
+    Assert.Equal("ACTIVE", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
+
+    var undoStart = h.Service.UndoLastEventPress();
+    Assert.Equal(EventStatus.Pending, undoStart.Events.Single(item => item.DeviceId == firstMac).Status);
+    Assert.Equal("PENDING", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
+
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "spoke-event-01").Disposition);
+    var physicalFinish = h.Service.ReceivePhysicalSpokePress(
+        new MasterPhysicalPress("boot-test", runToken, firstMac, 2), sessionAllowed: true);
+    Assert.Equal(MessageDisposition.Accepted, physicalFinish.Disposition);
+    Assert.Equal("COMPLETED", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
+
+    h.Service.Finish();
+    var finishedSnapshot = h.Service.GetMasterStatuses().EventSnapshot;
+    Assert.Equal(null, finishedSnapshot.Version);
+    Assert.Equal(0, finishedSnapshot.Events.Count);
 }
 
 static EditionDefinition MakeSpokeEdition() => new()

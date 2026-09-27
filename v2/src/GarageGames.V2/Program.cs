@@ -224,35 +224,86 @@ app.MapPost("/api/run/arm", async (StartCompetitorRunRequest request, RunService
     await master.SendCurrentStatusAsync(cancellationToken);
     return Results.Ok(run);
 });
-app.MapPost("/api/run/pause", (RunService runs) => Results.Ok(runs.Pause()));
-app.MapPost("/api/run/resume", (RunService runs) => Results.Ok(runs.Resume()));
-app.MapPost("/api/run/finish", (RunService runs) => Results.Ok(runs.Finish()));
-app.MapPost("/api/run/record", (RunService runs) => Results.Ok(runs.Record()));
-app.MapPost("/api/run/abort", (ActionReasonRequest request, RunService runs) => Results.Ok(runs.Abort(request.Reason)));
-app.MapPost("/api/run/undo-last-press", (RunService runs) => Results.Ok(runs.UndoLastEventPress()));
+app.MapPost("/api/run/pause", async (RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.Pause();
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
+app.MapPost("/api/run/resume", async (RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.Resume();
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
+app.MapPost("/api/run/finish", async (RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.Finish();
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
+app.MapPost("/api/run/record", async (RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.Record();
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
+app.MapPost("/api/run/abort", async (ActionReasonRequest request, RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.Abort(request.Reason);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
+app.MapPost("/api/run/undo-last-press", async (RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.UndoLastEventPress();
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
 app.MapPut("/api/leaderboards/preferences", (SetLeaderboardPreferencesRequest request, RunService runs) =>
 {
     runs.SetLeaderboardPreference(request.ShowExhibitionsOnLeaderboard);
     return Results.Ok(runs.GetOperatorSnapshot(simulationMode));
 });
-app.MapPut("/api/run/edit", (EditRunRequest request, RunService runs) =>
-    Results.Ok(runs.EditCurrentRun(request)));
-app.MapPost("/api/run/undo", (UndoRequest request, RunService runs) =>
-    Results.Ok(runs.UndoCurrentEdit(request.EditId, request.ExpectedRevision, request.Reason)));
+app.MapPut("/api/run/edit", async (EditRunRequest request, RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.EditCurrentRun(request);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
+app.MapPost("/api/run/undo", async (UndoRequest request, RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.UndoCurrentEdit(request.EditId, request.ExpectedRevision, request.Reason);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
 app.MapPost("/api/runs/{runId}/restart", (string runId, ActionReasonRequest request, RunService runs) =>
     Results.Ok(runs.Restart(runId, request.Reason)));
 app.MapPut("/api/runs/{runId}/edit", (string runId, EditRunRequest request, RunService runs) =>
     Results.Ok(runs.EditHistoricalRun(runId, request)));
 app.MapPost("/api/runs/{runId}/record", (string runId, RunService runs) =>
     Results.Ok(runs.RecordHistoricalRun(runId)));
-app.MapPost("/api/runs/{runId}/events/{eventId}/press", (string runId, string eventId, RunService runs) =>
-    Results.Ok(runs.PressEvent(runId, eventId)));
-app.MapPost("/api/runs/{runId}/events/{eventId}/clear", (string runId, string eventId, ClearEventRequest request, RunService runs) =>
-    Results.Ok(runs.ClearEvent(runId, eventId, request.ExpectedRevision)));
-app.MapPost("/api/runs/{runId}/undo", (string runId, UndoRequest request, RunService runs) =>
-    Results.Ok(runs.IsCurrentRun(runId)
+app.MapPost("/api/runs/{runId}/events/{eventId}/press", async (string runId, string eventId, RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var result = runs.PressEvent(runId, eventId);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(result);
+});
+app.MapPost("/api/runs/{runId}/events/{eventId}/clear", async (string runId, string eventId, ClearEventRequest request, RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.ClearEvent(runId, eventId, request.ExpectedRevision);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
+app.MapPost("/api/runs/{runId}/undo", async (string runId, UndoRequest request, RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var isCurrent = runs.IsCurrentRun(runId);
+    var run = isCurrent
         ? runs.UndoCurrentEdit(request.EditId, request.ExpectedRevision, request.Reason)
-        : runs.UndoHistoricalEdit(runId, request.EditId, request.ExpectedRevision, request.Reason)));
+        : runs.UndoHistoricalEdit(runId, request.EditId, request.ExpectedRevision, request.Reason);
+    if (isCurrent) await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
 
 app.MapPost("/api/devices/preflight", (RunService runs) => Results.Ok(runs.Preflight()));
 app.MapPost("/api/devices/{deviceId}/availability", (string deviceId, AvailabilityRequest request, RunService runs) =>
@@ -277,13 +328,15 @@ app.MapPost("/api/testing/clear-database", (ClearDatabaseRequest request, HttpCo
     return Results.Ok(new { backupPath });
 });
 
-app.MapPost("/api/simulator/input", (InputEnvelope envelope, RunService runs) =>
+app.MapPost("/api/simulator/input", async (InputEnvelope envelope, RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
 {
     if (!simulationMode)
     {
         return Results.NotFound();
     }
-    return Results.Ok(runs.Receive(envelope));
+    var result = runs.Receive(envelope);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(result);
 });
 app.MapPost("/api/simulator/advance-clock", (AdvanceClockRequest request) =>
 {

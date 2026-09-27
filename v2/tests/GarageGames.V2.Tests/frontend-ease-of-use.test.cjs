@@ -54,6 +54,7 @@ test("scorekeeper exposes audited press recovery, physical-button identification
   assert.match(source, /data-clear-event/);
   assert.match(source, /is-physical-press/);
   assert.match(source, /is-started/);
+  assert.match(source, /run\?\.status === "active" && event\.status === "active"/);
   assert.match(source, /api\/leaderboards\/preferences/);
   assert.match(html, /Playoff scores are listed first/);
 });

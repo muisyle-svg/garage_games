@@ -1503,9 +1503,11 @@
       button.dataset.deviceId = deviceId || "";
       button.disabled = state.busy || (identificationMode ? !canIdentify : !canPress || event.status === "completed");
       if (identificationMode) button.classList.add("is-identification-mode");
-      if (event.status === "active") button.classList.add("is-started");
+      if (run?.status === "active" && event.status === "active") button.classList.add("is-started");
       if (deviceId && deviceId === state.buttonHighlightDeviceId && Date.now() < state.buttonHighlightUntil) button.classList.add("is-physical-press");
-      const actionLabel = event.status === "active" ? "finish event" : event.status === "completed" ? "complete" : "start event";
+      const actionLabel = event.status === "active"
+        ? (run?.status === "active" ? "finish event" : "resume the run before finishing")
+        : event.status === "completed" ? "complete" : "start event";
       const readiness = physicalReadiness(event);
       const status = virtualDeviceStatus(readiness);
       const useVirtual = readiness.key !== "responding" && readiness.key !== "unassigned";
@@ -1516,9 +1518,11 @@
           : !state.master?.connected ? "Connect the master to identify"
             : state.master?.mode !== "IDLE" ? "Master must be in Garage Games idle mode"
               : "Identify physical button";
-      } else if (event.status === "active") {
+      } else if (event.status === "active" && run?.status === "active") {
         const remainingMs = Math.max(0, runDurationSeconds(run) * 1000 - currentElapsedMs(run));
         actionHint = `Stop · ${formatSeconds(remainingMs)} left`;
+      } else if (event.status === "active") {
+        actionHint = "Started · run not active";
       } else if (event.status === "completed") {
         actionHint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
       }

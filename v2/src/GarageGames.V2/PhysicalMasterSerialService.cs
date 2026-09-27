@@ -12,12 +12,15 @@ public sealed class PhysicalMasterSerialService : BackgroundService
     private readonly ILogger<PhysicalMasterSerialService> _logger;
     private readonly MasterProtocolState _protocol = new();
     private static readonly TimeSpan StatusInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan EventSnapshotRetryInterval = TimeSpan.FromSeconds(3);
     private SerialPort? _port;
     private CancellationTokenSource? _connectionCancellation;
     private ScanWaiter? _pendingScan;
     private string? _lastTestDeviceId;
     private DateTimeOffset? _lastTestAt;
     private uint _identifySequence;
+    private string? _lastEventSnapshotVersion;
+    private DateTimeOffset? _lastEventSnapshotSentAt;
 
     public PhysicalMasterSerialService(RunService runs, ILogger<PhysicalMasterSerialService> logger)
     {
@@ -139,6 +142,8 @@ public sealed class PhysicalMasterSerialService : BackgroundService
             }
 
             _protocol.Reset();
+            _lastEventSnapshotVersion = null;
+            _lastEventSnapshotSentAt = null;
             _port = port;
             var connectionCancellation = new CancellationTokenSource();
             _connectionCancellation = connectionCancellation;
@@ -452,6 +457,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                     {
                         var result = _runs.ReceivePhysicalSpokePress(press, sessionAllowed);
                         reply = MasterProtocolCodec.FormatPhysicalPressResult(press, result.State);
+                        pushStatus |= result.Disposition == MessageDisposition.Accepted;
                         return result;
                     });
             }
@@ -506,17 +512,53 @@ public sealed class PhysicalMasterSerialService : BackgroundService
             return;
         }
 
-        var (status, garageStatus) = _runs.GetMasterStatuses();
-        var statusLines = MasterProtocolCodec.FormatStatus(status) + "\n" +
-            MasterProtocolCodec.FormatGarageStatus(garageStatus) + "\n";
-        var bytes = Encoding.ASCII.GetBytes(statusLines);
         try
         {
             await _writeGate.WaitAsync(cancellationToken);
             try
             {
+                lock (_gate)
+                {
+                    if (!ReferenceEquals(_port, port) || !port.IsOpen) return;
+                }
+
+                var (status, garageStatus, eventSnapshot) = _runs.GetMasterStatuses();
+                var lines = new StringBuilder()
+                    .Append(MasterProtocolCodec.FormatStatus(status)).Append('\n')
+                    .Append(MasterProtocolCodec.FormatGarageStatus(garageStatus)).Append('\n');
+                var syncEvents = false;
+                if (eventSnapshot.Version is not null && eventSnapshot.Events.Count > 0)
+                {
+                    lock (_gate)
+                    {
+                        var now = DateTimeOffset.UtcNow;
+                        var snapshotChanged = !string.Equals(_lastEventSnapshotVersion, eventSnapshot.Version, StringComparison.Ordinal);
+                        var retryElapsed = _lastEventSnapshotSentAt is null ||
+                            now - _lastEventSnapshotSentAt.Value >= EventSnapshotRetryInterval;
+                        syncEvents = ReferenceEquals(_port, port) && (snapshotChanged || retryElapsed);
+                    }
+                }
+                if (syncEvents)
+                {
+                    foreach (var eventStatus in eventSnapshot.Events)
+                    {
+                        lines.Append(MasterProtocolCodec.FormatGarageEventStatus(eventStatus)).Append('\n');
+                    }
+                }
+                var bytes = Encoding.ASCII.GetBytes(lines.ToString());
                 await port.BaseStream.WriteAsync(bytes.AsMemory(), cancellationToken);
                 await port.BaseStream.FlushAsync(cancellationToken);
+                if (syncEvents)
+                {
+                    lock (_gate)
+                    {
+                        if (ReferenceEquals(_port, port))
+                        {
+                            _lastEventSnapshotVersion = eventSnapshot.Version;
+                            _lastEventSnapshotSentAt = DateTimeOffset.UtcNow;
+                        }
+                    }
+                }
             }
             finally
             {

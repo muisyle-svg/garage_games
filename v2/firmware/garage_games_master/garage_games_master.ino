@@ -774,6 +774,45 @@ bool parseGarageResultLine(const char* line, char* token, uint8_t* mac,
          strcmp(resultState, "COMPLETED") == 0 || strcmp(resultState, "REJECTED") == 0;
 }
 
+bool parseGarageEventLine(const char* line, char* token, uint32_t& revision,
+                          uint8_t* mac, char* eventState, size_t stateSize) {
+  static const char prefix[] = "GG1 EVENT ";
+  if (!line || !token || !mac || !eventState ||
+      strncmp(line, prefix, sizeof(prefix) - 1) != 0) return false;
+  const char* cursor = line + sizeof(prefix) - 1;
+  char tokenText[17];
+  char revisionText[11];
+  char macText[13];
+  if (!readProtocolToken(cursor, tokenText, sizeof(tokenText)) ||
+      !readProtocolToken(cursor, revisionText, sizeof(revisionText)) ||
+      !readProtocolToken(cursor, macText, sizeof(macText)) ||
+      !readProtocolToken(cursor, eventState, stateSize) || *cursor != '\0' ||
+      !parseGarageToken(tokenText, token) || strcmp(token, "-") == 0 ||
+      !parseUint32Token(revisionText, revision) || revision == 0 ||
+      !parseUpperHexMac(macText, mac) || !validStationMac(mac)) return false;
+  return strcmp(eventState, "PENDING") == 0 || strcmp(eventState, "ACTIVE") == 0 ||
+         strcmp(eventState, "COMPLETED") == 0;
+}
+
+void handleGarageEventLine(const char* line) {
+  char token[17];
+  uint32_t revision = 0;
+  uint8_t mac[6];
+  char eventState[10];
+  const uint32_t now = millis();
+  if (!parseGarageEventLine(line, token, revision, mac, eventState, sizeof(eventState)) ||
+      gameState != IDLE || !hostStatusFresh(now) || hostStatus != HOST_STATUS_ACTIVE ||
+      !garageStatusFresh(now) || garageStatus != GARAGE_STATUS_ACTIVE ||
+      strcmp(token, garageToken) != 0) return;
+
+  char macText[13];
+  macToHex(mac, macText, sizeof(macText));
+  char packet[64];
+  const int length = snprintf(packet, sizeof(packet), "GSTATE:3:%s:%lu:%s:%s",
+      token, (unsigned long)revision, eventState, macText);
+  if (length > 0 && length <= 63) sendBroadcastTwice(packet);
+}
+
 void acceptHostStatus(HostStatus status, uint32_t remainingSeconds) {
   if (status == HOST_STATUS_COUNTDOWN && hostStatus != HOST_STATUS_COUNTDOWN) {
     quickTapCount = 0;
@@ -985,6 +1024,11 @@ void beginHostScan(const char* scanId) {
 }
 
 void processHostSerialLine(const char* line) {
+  if (line && strncmp(line, "GG1 EVENT ", 10) == 0) {
+    handleGarageEventLine(line);
+    return;
+  }
+
   char parsedGarageToken[17];
   GarageStatus parsedGarageStatus;
   if (parseGarageStatusLine(line, parsedGarageToken, parsedGarageStatus)) {

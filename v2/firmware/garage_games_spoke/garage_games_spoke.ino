@@ -277,6 +277,7 @@ char pendingGaragePressMessage[48] = {};
 char garageResultState[10] = {};
 bool garageCompleted = false;
 bool garageAckUnknown = false;
+uint32_t garageEventRevision = 0;
 uint32_t garageTerminalAtMs = 0;
 bool garageTerminalTimerStarted = false;
 int garageVisualAppliedKey = -100;
@@ -401,6 +402,60 @@ bool parseGarageResultPacket(const char* message, char* token, uint32_t& sequenc
   return validStationMac(resultMac);
 }
 
+bool parseGarageEventStatePacket(const RxPacket& packet, char* token, uint32_t& revision,
+                                 char* eventState, size_t stateSize, uint8_t* targetMac) {
+  static const char prefix[] = "GSTATE:3:";
+  if (!token || !eventState || !targetMac || packet.len <= sizeof(prefix) - 1 ||
+      memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, sizeof(prefix) - 1) != 0) return false;
+  const char* cursor = packet.data + sizeof(prefix) - 1;
+  char tokenText[17];
+  char revisionText[11];
+  char macText[13];
+  if (!readGarageTokenField(cursor, tokenText, sizeof(tokenText)) ||
+      !readGarageTokenField(cursor, revisionText, sizeof(revisionText)) ||
+      !readGarageTokenField(cursor, eventState, stateSize) ||
+      !readGarageTokenField(cursor, macText, sizeof(macText)) || *cursor != '\0' ||
+      !parseGarageToken(tokenText, token) || strcmp(token, "-") == 0 ||
+      !parseGarageSequence(revisionText, revision) || revision == 0 ||
+      strlen(macText) != 12 || !hexToMac(macText, targetMac) ||
+      !validStationMac(targetMac)) return false;
+  return strcmp(eventState, "PENDING") == 0 || strcmp(eventState, "ACTIVE") == 0 ||
+         strcmp(eventState, "COMPLETED") == 0;
+}
+
+void handleGarageEventState(const RxPacket& packet) {
+  char token[17];
+  uint32_t revision = 0;
+  char eventState[10];
+  uint8_t targetMac[6];
+  if (gameActive || !garageStateFresh(packet.receivedAtMs) ||
+      garageModeState != GARAGE_MODE_ACTIVE || !garageMasterLocked ||
+      !parseGarageEventStatePacket(packet, token, revision, eventState,
+                                   sizeof(eventState), targetMac) ||
+      !macEqual(targetMac, ownMac) || !macEqual(packet.source, garageMasterMac) ||
+      (masterReserved && !fromReservedMaster(packet)) ||
+      strcmp(token, garageToken) != 0 || revision <= garageEventRevision) return;
+
+  garageEventRevision = revision;
+  garagePressAwaitingResult = false;
+  garagePressRetriesLeft = 0;
+  pendingGarageSequence = 0;
+  nextGaragePressRetryMs = 0;
+  pendingGaragePressMessage[0] = '\0';
+  garageAckUnknown = false;
+  if (strcmp(eventState, "PENDING") == 0) {
+    // The authoritative app says the event has not been started. Clear any
+    // local press/lockout so the spoke returns to its normal available state.
+    garageResultState[0] = '\0';
+    garageCompleted = false;
+  } else {
+    strcpy(garageResultState, eventState);
+    garageCompleted = strcmp(eventState, "COMPLETED") == 0;
+  }
+  garageVisualAppliedKey = -100;
+}
+
 bool parseIdentifyPacket(const RxPacket& packet, uint8_t* mac, uint32_t& sequence) {
   static const char prefix[] = "GIDENTIFY:3:";
   if (!mac || packet.len <= sizeof(prefix) - 1 ||
@@ -508,6 +563,7 @@ void handleGarageMode(const RxPacket& packet) {
     garageResultState[0] = '\0';
     garageCompleted = false;
     garageAckUnknown = false;
+    garageEventRevision = 0;
     garageTerminalAtMs = 0;
     garageTerminalTimerStarted = false;
   }
@@ -882,6 +938,10 @@ void processRx() {
     }
     if (strncmp(packet.data, "GRESULT:", 8) == 0) {
       handleGarageResult(packet);
+      continue;
+    }
+    if (strncmp(packet.data, "GSTATE:", 7) == 0) {
+      handleGarageEventState(packet);
       continue;
     }
     if (strncmp(packet.data, "GIDENTIFY:", 10) == 0) {

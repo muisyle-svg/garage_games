@@ -33,4 +33,11 @@ each event button. For a standalone Speed Button setup, flash
 combined master's Speed game; start it with a five-second hold and confirm
 discovery, countdown, hits, and timeout.
 
+The current Garage firmware also accepts authoritative per-event state updates
+from the scorekeeper through the master. This keeps virtual presses, physical
+presses, undo, and event clearing aligned, including restoring the spoke's
+available state after undo. Reflash both combined Garage master and spoke
+sketches when testing this synchronization; older firmware does not recognize
+the event-state messages.
+
 No hardware test has been performed for the combined Garage spoke yet.

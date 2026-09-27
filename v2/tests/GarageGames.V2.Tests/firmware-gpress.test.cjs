@@ -52,3 +52,14 @@ test("idle spoke presses and virtual identification are relayed through the mast
   assert.match(spoke, /else if \(key == 10\) startBlink\(true, true, false, 500\)/,
     "an in-progress event flashes yellow rather than holding a solid yellow LED");
 });
+
+test("authoritative event-state sync lets virtual actions and undo reset physical spokes", () => {
+  assert.match(master, /bool parseGarageEventLine\(/);
+  assert.match(master, /GG1 EVENT/);
+  assert.match(master, /GSTATE:3:%s:%lu:%s:%s/);
+  assert.match(spoke, /void handleGarageEventState\(const RxPacket& packet\)/);
+  assert.match(spoke, /garagePressAwaitingResult = false;/);
+  assert.match(spoke, /garageCompleted = strcmp\(eventState, "COMPLETED"\) == 0/);
+  assert.match(spoke, /revision <= garageEventRevision/);
+  assert.match(spoke, /garageEventRevision = revision;/);
+});

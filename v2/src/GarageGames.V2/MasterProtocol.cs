@@ -10,6 +10,10 @@ public sealed record MasterRunStatus(string State, int RemainingSeconds);
 
 public sealed record MasterGarageStatus(string Token, string State);
 
+public sealed record MasterGarageEventStatus(string RunToken, int Revision, string DeviceId, string State);
+
+public sealed record MasterGarageEventSnapshot(string? Version, IReadOnlyList<MasterGarageEventStatus> Events);
+
 public sealed record MasterPhysicalPress(string BootToken, string RunToken, string DeviceId, uint Sequence);
 public sealed record MasterButtonTestPress(string BootToken, string DeviceId, uint Sequence);
 
@@ -60,6 +64,9 @@ public static class MasterProtocolCodec
 
     public static string FormatGarageStatus(MasterGarageStatus status) =>
         $"GG1 GARAGE {status.Token} {status.State}";
+
+    public static string FormatGarageEventStatus(MasterGarageEventStatus status) =>
+        $"GG1 EVENT {status.RunToken} {status.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)} {status.DeviceId.ToUpperInvariant()} {status.State}";
 
     public static string FormatPhysicalPressResult(MasterPhysicalPress press, string state) =>
         $"GG1 RESULT {press.RunToken} {press.DeviceId} {press.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)} {state}";
