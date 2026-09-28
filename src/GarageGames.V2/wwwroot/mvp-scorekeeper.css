@@ -242,6 +242,15 @@ select:disabled, input:disabled { opacity: .58; }
 /* The result box already shows a finished event's duration; drop the repeat below it. */
 .virtual-button.is-complete .virtual-action-hint { display: none; }
 
+/* Deleted runs are restorable from a collapsed list at the bottom of Run history. */
+.deleted-runs { margin: 0 .95rem .95rem; padding: .7rem .8rem; border: 1px dashed rgba(240, 135, 121, .35); border-radius: 10px; background: rgba(240, 135, 121, .04); }
+.deleted-runs > summary { display: flex; align-items: center; gap: .6rem; cursor: pointer; font-size: .8rem; }
+.deleted-runs > p { margin: .55rem 0; }
+.deleted-runs-list { display: grid; gap: .4rem; margin: 0; padding: 0; list-style: none; }
+.deleted-run-row { display: flex; align-items: center; justify-content: space-between; gap: .8rem; padding: .45rem .6rem; border: 1px solid var(--line); border-radius: 8px; background: rgba(0, 0, 0, .15); }
+.deleted-run-details { display: grid; gap: .1rem; min-width: 0; font-size: .74rem; }
+.deleted-run-details span { color: var(--muted); font-size: .66rem; }
+
 /* The full scorecard collapses like Hardware; its header keeps the total and unsaved state. */
 .scorecard-panel > summary { cursor: pointer; list-style: none; }
 .scorecard-panel > summary::-webkit-details-marker { display: none; }

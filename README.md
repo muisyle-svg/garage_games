@@ -228,11 +228,20 @@ the operator must resume explicitly. Unknown schema versions, missing required
 tables, failed integrity checks, or malformed persisted snapshots fail visibly;
 the app never resets the database.
 
-Schema version 2 persists when a run was recorded. On first start, a version 1
-database is backed up to `backups\garage-games-v2-pre-schema-2-*.db` and then
-upgraded in place; completed runs keep their recorded status. Timed-out runs
-recorded under version 1 were never saved as recorded, so record them again from
-History after upgrading. Older app builds refuse a version 2 database.
+The database schema is version 3. On first start, an older database is backed up
+to `backups\garage-games-v2-pre-schema-3-*.db` and then upgraded in place.
+Version 2 added when a run was recorded: completed runs keep their recorded
+status, but timed-out runs recorded under version 1 were never saved as recorded,
+so record them again from History after upgrading. Version 3 added run deletion.
+Older app builds refuse a newer database.
+
+To delete a saved run, select it in Run history and choose **Delete run**. It is
+removed from history, the leaderboards, and the TV scoreboard, but kept in the
+database with an audit entry and listed under **Deleted runs** at the bottom of
+Run history, where **Restore** brings it back. The run in progress can't be
+deleted (use Discard). Deleting a recorded redo or replacement makes the result it
+replaced count again, and restoring it replaces that result again. A run can't be
+restored if the competitor now has a different official result.
 
 To redo an official run, select the competitor with category Official and use
 Start or Arm as usual; the app asks you to confirm an official redo. A restart,

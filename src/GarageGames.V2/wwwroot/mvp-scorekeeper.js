@@ -59,7 +59,8 @@
     buttonHighlightDeviceId: null,
     buttonHighlightUntil: 0,
     tileUndoArmedEventId: null,
-    tileUndoTimer: null
+    tileUndoTimer: null,
+    deletedRunsSignature: ""
   };
 
   const clearDatabasePhrase = "CLEAR ALL DATA";
@@ -155,6 +156,10 @@
     historySave: $("save-history-edits"),
     historySaveState: $("history-save-state"),
     historyRecord: $("record-history-run"),
+    historyDelete: $("delete-history-run"),
+    deletedRunsPanel: $("deleted-runs-panel"),
+    deletedRunsCount: $("deleted-runs-count"),
+    deletedRunsList: $("deleted-runs-list"),
     leaderboardPlayerSelect: $("leaderboard-player-select"),
     overallLeaderboardCount: $("overall-leaderboard-count"),
     overallLeaderboardBody: $("overall-leaderboard-body"),
@@ -1985,7 +1990,57 @@
     }
   }
 
+  function renderDeletedRuns() {
+    const deleted = state.snapshot?.deletedRuns || [];
+    ui.deletedRunsPanel.hidden = deleted.length === 0;
+    ui.deletedRunsCount.textContent = String(deleted.length);
+    const signature = `${state.busy}:${deleted.map((run) => `${run.id}:${run.revision}`).join("|")}`;
+    if (signature === state.deletedRunsSignature) return;
+    state.deletedRunsSignature = signature;
+    ui.deletedRunsList.replaceChildren();
+    deleted.forEach((run) => {
+      const item = make("li", "deleted-run-row");
+      const details = make("span", "deleted-run-details");
+      details.append(
+        make("strong", "", `${competitorName(run.competitorId)} · ${categoryLabel(run.category)}`),
+        make("span", "", `${tableTotal(run)} pts · run ${shortDate(run.createdAt)} · deleted ${shortDate(run.deletedAt)}`)
+      );
+      const restore = make("button", "button button-quiet", "Restore");
+      restore.type = "button";
+      restore.disabled = state.busy;
+      restore.addEventListener("click", () => performAction(
+        () => request(`/api/runs/${encodeURIComponent(run.id)}/restore`, { method: "POST" }),
+        `${competitorName(run.competitorId)}'s ${categoryLabel(run.category)} run was restored.`
+      ));
+      item.append(details, restore);
+      ui.deletedRunsList.appendChild(item);
+    });
+  }
+
+  async function deleteHistoricalRun() {
+    const run = (state.snapshot?.history || []).find((item) => item.id === state.selectedHistoryId);
+    if (!run) return false;
+    const replaced = run.supersedesRunId && !run.supersededByRunId && run.isRecorded
+      ? "\n\nThis run replaced an earlier result; that earlier result will count again."
+      : "";
+    const confirmed = window.confirm(
+      `Delete ${competitorName(run.competitorId)}'s ${categoryLabel(run.category)} run (${tableTotal(run)} pts)?\n\n` +
+      `It will be removed from run history, the leaderboards, and the TV scoreboard. It stays in Deleted runs at the bottom of this tab so it can be restored.${replaced}`
+    );
+    if (!confirmed) return false;
+    await request(`/api/runs/${encodeURIComponent(run.id)}/delete`, {
+      method: "POST",
+      body: JSON.stringify({ expectedRevision: run.revision })
+    });
+    state.drafts.delete(run.id);
+    state.bonusDrafts.delete(run.id);
+    state.selectedHistoryId = null;
+    state.historySignature = "";
+    state.historyTableKey = null;
+  }
+
   function renderHistory() {
+    renderDeletedRuns();
     const history = state.snapshot?.history || [];
     ui.historyCount.textContent = `${history.length} ${history.length === 1 ? "run" : "runs"}`;
     if (!history.some((run) => run.id === state.selectedHistoryId)) {
@@ -2029,6 +2084,7 @@
       ui.historyStatus.textContent = "—";
       ui.historyMeta.textContent = "Choose a history entry to review or correct its event times and points.";
       ui.historyRecord.disabled = true;
+      ui.historyDelete.disabled = true;
       if (state.historyTableKey !== "no-history") {
         renderScoreTable(null, ui.historyBody, "history", false);
         state.historyTableKey = "no-history";
@@ -2051,6 +2107,9 @@
     }
     ui.historyRecord.disabled = state.busy || selected.isRecorded || isLiveLock(selected);
     ui.historyRecord.textContent = selected.isRecorded ? "Already recorded" : "Record result";
+    // The run in progress is discarded from the scorekeeping tab instead.
+    ui.historyDelete.disabled = state.busy || isLiveLock(selected);
+    ui.historyDelete.title = isLiveLock(selected) ? "The run in progress can't be deleted; use Discard on the scorekeeping tab." : "";
   }
 
   function shortDate(value) {
@@ -2595,6 +2654,7 @@
       "Run recorded."
     ));
     ui.historyRecord.addEventListener("click", () => performAction(recordHistoricalRun, "Saved run recorded."));
+    ui.historyDelete.addEventListener("click", () => performAction(deleteHistoricalRun, "Run deleted. It can be restored from Deleted runs."));
     ui.currentSave.addEventListener("click", saveCurrentEdits);
     ui.historySave.addEventListener("click", saveHistoryEdits);
     ui.currentBody.addEventListener("input", onScoreInput);

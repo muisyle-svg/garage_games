@@ -315,6 +315,15 @@ app.MapPut("/api/runs/{runId}/edit", (string runId, EditRunRequest request, RunS
     Results.Ok(runs.EditHistoricalRun(runId, request)));
 app.MapPost("/api/runs/{runId}/record", (string runId, RunService runs) =>
     Results.Ok(runs.RecordHistoricalRun(runId)));
+app.MapPost("/api/runs/{runId}/delete", async (string runId, DeleteRunRequest request, RunService runs,
+    PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.DeleteRun(runId, request.ExpectedRevision, request.Reason);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
+app.MapPost("/api/runs/{runId}/restore", (string runId, RunService runs) =>
+    Results.Ok(runs.RestoreRun(runId)));
 app.MapPost("/api/runs/{runId}/events/{eventId}/press", async (string runId, string eventId, RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
 {
     var result = runs.PressEvent(runId, eventId);

@@ -343,6 +343,12 @@ public sealed class RunRecord
     public DateTimeOffset? RecordedAt { get; set; }
     public string? SupersedesRunId { get; set; }
     public string? SupersededByRunId { get; set; }
+    // The status this run had before a replacement superseded it, so deleting the
+    // replacement can put this run back exactly as it was.
+    public RunStatus? SupersededFromStatus { get; set; }
+    // Deleted runs are hidden from history, leaderboards, and the TV but kept (with an
+    // audit edit) so they can be restored.
+    public DateTimeOffset? DeletedAt { get; set; }
     public string? PausedFromPhase { get; set; }
     public string? Notes { get; set; }
     public int Revision { get; set; } = 1;
@@ -357,12 +363,13 @@ public sealed class RunRecord
     [JsonIgnore]
     public int TotalPoints => Events.Sum(e => e.Score) + BonusPoints;
     public bool IsRecorded => RecordedAt is not null || Status == RunStatus.Completed;
+    public bool IsDeleted => DeletedAt is not null;
     [JsonIgnore]
     public int CompletedEventCount => Events.Count(e => e.Status == EventStatus.Completed);
     [JsonIgnore]
     public bool AllEventsCompleted => Events.Count > 0 && Events.All(e => e.Status == EventStatus.Completed);
     [JsonIgnore]
-    public bool IsCountedOfficial => IsRecorded && Category == RunCategory.Official && SupersededByRunId is null &&
+    public bool IsCountedOfficial => IsRecorded && !IsDeleted && Category == RunCategory.Official && SupersededByRunId is null &&
         Status is not RunStatus.Aborted and not RunStatus.Superseded;
 }
 
@@ -421,6 +428,7 @@ public sealed class OperatorSnapshot
     public required List<QueueItemRecord> Queue { get; set; }
     public required List<DeviceRecord> Devices { get; set; }
     public required List<RunRecord> History { get; set; }
+    public List<RunRecord> DeletedRuns { get; set; } = [];
     public required List<MessageRecord> Messages { get; set; }
     public required List<EditRecord> Edits { get; set; }
     public required List<LeaderboardRow> Leaderboard { get; set; }

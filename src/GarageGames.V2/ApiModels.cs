@@ -21,6 +21,7 @@ public sealed record ConnectMasterRequest(string Port);
 public sealed record IdentifyButtonRequest(string DeviceId);
 public sealed record SetLeaderboardPreferencesRequest(bool ShowExhibitionsOnLeaderboard);
 public sealed record ClearEventRequest(int ExpectedRevision);
+public sealed record DeleteRunRequest(int ExpectedRevision, string? Reason = null);
 public sealed record UndoRequest(long EditId, int ExpectedRevision, string Reason);
 public sealed record ActionReasonRequest(string? Reason = null);
 public sealed record CountdownFinishedRequest(string RunId);

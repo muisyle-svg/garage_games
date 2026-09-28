@@ -230,11 +230,17 @@
               <input id="history-bonus-points" type="number" min="0" step="1" inputmode="numeric" placeholder="0" disabled>
             </label>
             <span id="history-save-state" class="small-note">History edits are saved explicitly.</span>
+            <button id="delete-history-run" class="button button-discard" type="button" disabled>Delete run</button>
             <button id="record-history-run" class="button button-record" type="button" disabled>Record result</button>
             <button id="save-history-edits" class="button button-secondary" type="button" disabled>Save history edits</button>
           </div>
         </section>
       </div>
+      <details id="deleted-runs-panel" class="deleted-runs" hidden>
+        <summary><strong>Deleted runs</strong> <span id="deleted-runs-count" class="small-note">0</span></summary>
+        <p class="small-note">Deleted runs are hidden from history, leaderboards, and the TV scoreboard. Restore one to bring it back.</p>
+        <ul id="deleted-runs-list" class="deleted-runs-list"></ul>
+      </details>
     </section>
     </section>
 

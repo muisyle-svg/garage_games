@@ -92,7 +92,7 @@ public sealed class RunService
 
         _current = unfinished.SingleOrDefault();
         _lastDisplayedRun = _current is null
-            ? _data.Runs.OrderByDescending(r => r.CreatedAt).FirstOrDefault()
+            ? _data.Runs.Where(r => !r.IsDeleted).OrderByDescending(r => r.CreatedAt).FirstOrDefault()
             : null;
         if (_current is not null && _current.Status == RunStatus.Active)
         {
@@ -620,7 +620,8 @@ public sealed class RunService
                         string.Equals(device.DeviceId, eventDefinition.DeviceId, StringComparison.OrdinalIgnoreCase)))
                     .Select(Clone)
                     .ToList(),
-                History = _data.Runs.OrderByDescending(r => r.CreatedAt).Select(Clone).ToList(),
+                History = _data.Runs.Where(r => !r.IsDeleted).OrderByDescending(r => r.CreatedAt).Select(Clone).ToList(),
+                DeletedRuns = _data.Runs.Where(r => r.IsDeleted).OrderByDescending(r => r.DeletedAt).Select(Clone).ToList(),
                 Messages = _data.Messages.OrderByDescending(m => m.Id).Take(250).Select(Clone).ToList(),
                 Edits = _data.Edits.OrderByDescending(e => e.Id).Take(250).Select(Clone).ToList(),
                 Leaderboard = BuildLeaderboard()
@@ -1479,6 +1480,7 @@ public sealed class RunService
 
             var run = _data.Runs.SingleOrDefault(r => r.Id == runId)
                 ?? throw new CommandException("Run was not found.");
+            RequireNotDeleted(run);
             if (run.IsRecorded)
             {
                 return Clone(run);
@@ -1509,7 +1511,7 @@ public sealed class RunService
         var replacedSource = run.SupersedesRunId is null
             ? null
             : _data.Runs.SingleOrDefault(item => item.Id == run.SupersedesRunId && item.SupersededByRunId is null &&
-                item.Status != RunStatus.Superseded);
+                item.Status != RunStatus.Superseded && !item.IsDeleted);
         if (replacedSource is not null && replacedSource.IsCountedOfficial && run.Category != RunCategory.Official)
         {
             replacedSource = null;
@@ -1532,6 +1534,7 @@ public sealed class RunService
         run.Revision++;
         if (replacedSource is not null)
         {
+            replacedSource.SupersededFromStatus = replacedSource.Status;
             replacedSource.Status = RunStatus.Superseded;
             replacedSource.SupersededByRunId = run.Id;
             replacedSource.Revision++;
@@ -1611,6 +1614,7 @@ public sealed class RunService
         {
             var run = _data.Runs.SingleOrDefault(r => r.Id == runId)
                 ?? throw new CommandException("Run was not found.");
+            RequireNotDeleted(run);
             var actionReason = string.IsNullOrWhiteSpace(reason) ? "Operator requested a replacement attempt." : reason.Trim();
             if (_current?.Id == run.Id)
             {
@@ -1780,6 +1784,147 @@ public sealed class RunService
             UpdateDeviceLeds();
             return RecordAccepted(envelope, run, reason, payloadJson);
         }
+    }
+
+    // Deleting hides a saved run from history, leaderboards, and the TV. It is kept with an
+    // audit edit so it can be restored. Deleting a recorded replacement puts back the
+    // result it had replaced.
+    public RunRecord DeleteRun(string runId, int expectedRevision, string? reason = null)
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            if (_current?.Id == runId)
+            {
+                throw new CommandException("The run in progress can't be deleted. Discard it, or finish and record it first.");
+            }
+
+            var run = _data.Runs.SingleOrDefault(r => r.Id == runId)
+                ?? throw new CommandException("Run was not found.");
+            if (run.IsDeleted)
+            {
+                return Clone(run);
+            }
+            if (run.Revision != expectedRevision)
+            {
+                throw new CommandException("This run changed after it was opened. Reload it before deleting.");
+            }
+
+            var restoredSource = run.SupersededByRunId is null && run.SupersedesRunId is string sourceId
+                ? _data.Runs.SingleOrDefault(r => r.Id == sourceId && r.SupersededByRunId == run.Id && !r.IsDeleted)
+                : null;
+            var candidate = Clone(run);
+            candidate.DeletedAt = _clock.UtcNow;
+            candidate.Revision = run.Revision + 1;
+            var note = string.IsNullOrWhiteSpace(reason) ? "" : $" Reason: {reason.Trim()}";
+            var edit = new EditRecord
+            {
+                RunId = run.Id,
+                CreatedAt = _clock.UtcNow,
+                Reason = restoredSource is null
+                    ? $"Deleted from history.{note}"
+                    : $"Deleted from history; the earlier result it replaced counts again.{note}",
+                BeforeJson = Serialize(run),
+                AfterJson = Serialize(candidate)
+            };
+
+            ReplaceRun(run, candidate);
+            if (restoredSource is not null)
+            {
+                restoredSource.Status = restoredSource.SupersededFromStatus ?? InferStatusBeforeSupersede(restoredSource);
+                restoredSource.SupersededByRunId = null;
+                restoredSource.SupersededFromStatus = null;
+                restoredSource.Revision++;
+            }
+            try
+            {
+                _store.AddEdit(candidate, edit, restoredSource is null ? null : [restoredSource]);
+            }
+            catch
+            {
+                ReloadInMemoryAfterPersistenceFailure();
+                throw;
+            }
+            _data.Edits.Add(edit);
+            if (_lastDisplayedRun?.Id == run.Id)
+            {
+                _lastDisplayedRun = null;
+            }
+            UpdateDeviceLeds();
+            return Clone(candidate);
+        }
+    }
+
+    public RunRecord RestoreRun(string runId)
+    {
+        lock (_gate)
+        {
+            var run = _data.Runs.SingleOrDefault(r => r.Id == runId)
+                ?? throw new CommandException("Run was not found.");
+            if (!run.IsDeleted)
+            {
+                return Clone(run);
+            }
+
+            var candidate = Clone(run);
+            candidate.DeletedAt = null;
+            candidate.Revision = run.Revision + 1;
+
+            // A restored recorded replacement takes its source's place again.
+            var resuperseded = candidate.SupersededByRunId is null && candidate.IsRecorded && candidate.SupersedesRunId is string sourceId
+                ? _data.Runs.SingleOrDefault(r => r.Id == sourceId && !r.IsDeleted && r.SupersededByRunId is null && r.Status != RunStatus.Superseded)
+                : null;
+            if (resuperseded is not null && resuperseded.IsCountedOfficial && candidate.Category != RunCategory.Official)
+            {
+                resuperseded = null;
+            }
+            if (candidate.IsCountedOfficial)
+            {
+                var existing = FindAcceptedOfficial(candidate.CompetitorId, candidate.EditionId);
+                if (existing is not null && existing.Id != candidate.Id && existing.Id != resuperseded?.Id)
+                {
+                    throw new CommandException("This competitor already has an official result. Delete that run or change its category before restoring this one.");
+                }
+            }
+
+            var edit = new EditRecord
+            {
+                RunId = run.Id,
+                CreatedAt = _clock.UtcNow,
+                Reason = resuperseded is null ? "Restored from deleted runs." : "Restored from deleted runs; it replaces the earlier result again.",
+                BeforeJson = Serialize(run),
+                AfterJson = Serialize(candidate)
+            };
+            ReplaceRun(run, candidate);
+            if (resuperseded is not null)
+            {
+                resuperseded.SupersededFromStatus = resuperseded.Status;
+                resuperseded.Status = RunStatus.Superseded;
+                resuperseded.SupersededByRunId = candidate.Id;
+                resuperseded.Revision++;
+            }
+            try
+            {
+                _store.AddEdit(candidate, edit, resuperseded is null ? null : [resuperseded]);
+            }
+            catch
+            {
+                ReloadInMemoryAfterPersistenceFailure();
+                throw;
+            }
+            _data.Edits.Add(edit);
+            return Clone(candidate);
+        }
+    }
+
+    // Databases from before the superseded-from status was stored: recorded runs were
+    // completed or timed out; unrecorded superseded runs were discarded or timed out.
+    private static RunStatus InferStatusBeforeSupersede(RunRecord run)
+    {
+        var ranOutOfTime = run.ActiveElapsedMs >= run.Edition.DurationLimitSeconds * 1000L;
+        return run.RecordedAt is not null
+            ? ranOutOfTime ? RunStatus.TimedOut : RunStatus.Completed
+            : ranOutOfTime ? RunStatus.TimedOut : RunStatus.Aborted;
     }
 
     public RunRecord EditHistoricalRun(string runId, EditRunRequest request)
@@ -2571,6 +2716,7 @@ public sealed class RunService
         }
         if (replaced is not null && replaced.Id != original.Id)
         {
+            replaced.SupersededFromStatus = replaced.Status;
             replaced.Status = RunStatus.Superseded;
             replaced.SupersededByRunId = candidate.Id;
             replaced.Revision++;
@@ -2589,8 +2735,18 @@ public sealed class RunService
             throw new CommandException("Historical editing cannot target the active physical run.");
         }
 
-        return _data.Runs.SingleOrDefault(r => r.Id == runId)
+        var run = _data.Runs.SingleOrDefault(r => r.Id == runId)
             ?? throw new CommandException("Run was not found.");
+        RequireNotDeleted(run);
+        return run;
+    }
+
+    private static void RequireNotDeleted(RunRecord run)
+    {
+        if (run.IsDeleted)
+        {
+            throw new CommandException("This run was deleted. Restore it from Deleted runs before changing it.");
+        }
     }
 
     private void ReplaceRun(RunRecord original, RunRecord replacement)
@@ -2626,7 +2782,7 @@ public sealed class RunService
         _data.SelectedRunCategory = fresh.SelectedRunCategory;
         _data.DeviceScanCheckedAt = fresh.DeviceScanCheckedAt;
         _current = _data.Runs.SingleOrDefault(r => r.Status is RunStatus.Armed or RunStatus.Countdown or RunStatus.Active or RunStatus.Paused or RunStatus.Finished);
-        _lastDisplayedRun = _current ?? _data.Runs.OrderByDescending(r => r.CreatedAt).FirstOrDefault();
+        _lastDisplayedRun = _current ?? _data.Runs.Where(r => !r.IsDeleted).OrderByDescending(r => r.CreatedAt).FirstOrDefault();
         RestartClockAnchor();
     }
 
@@ -2777,7 +2933,7 @@ public sealed class RunService
         var rows = _data.Runs
             .Where(run => run.EditionId == _edition.EditionId &&
                 run.SupersededByRunId is null &&
-                run.Status is not RunStatus.Aborted and not RunStatus.Superseded &&
+                run.Status is not RunStatus.Aborted and not RunStatus.Superseded && !run.IsDeleted &&
                 (run.Category == RunCategory.Official && run.IsCountedOfficial ||
                  run.Category == RunCategory.Playoff && run.IsRecorded ||
                  run.Category == RunCategory.Exhibition && _data.ShowExhibitionsOnLeaderboard && run.IsRecorded))

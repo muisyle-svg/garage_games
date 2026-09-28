@@ -56,6 +56,8 @@ var tests = new (string Name, Action Run)[]
     ("corrections cannot create unfinished history or count paused time", CorrectionsCannotCorruptRunLifecycle),
     ("physical press age back-dates presses within the current active stretch", PhysicalPressAgeBackdatesWithinActiveTime),
     ("schema version 1 databases upgrade once after a backup", SchemaVersion1UpgradesWithBackup),
+    ("deleted runs leave history and standings, persist, and can be restored", DeletedRunsHideAndRestore),
+    ("deleting a recorded redo restores the result it replaced", DeletingRedoRestoresOriginal),
     ("category exclusion and shared tie rank", CategoryAndTieRank),
     ("leaderboard preference persists and playoffs precede official and exhibition rows", LeaderboardPreferenceAndCategories),
     ("persistent recovery and exclusive data lock", RecoveryAndLock),
@@ -2061,6 +2063,105 @@ static void PhysicalPressAgeBackdatesWithinActiveTime()
     Assert.Equal<long?>(7_000L, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == secondMac).StartElapsedMs);
 }
 
+static void DeletedRunsHideAndRestore()
+{
+    var path = NewPath();
+    var edition = MakeMvpEdition(durationSeconds: 2);
+    var clock = new TestClock();
+    var store = new RunStore(path);
+    var service = new RunService(store, edition, clock);
+    var alex = service.AddCompetitor("Alex");
+    var sam = service.AddCompetitor("Sam");
+
+    var official = service.ArmCompetitor(alex.Id, RunCategory.Official, 60);
+    service.CompleteCountdown(service.StartMaster().Id);
+    service.Finish();
+    official = service.Record();
+    var kept = service.ArmCompetitor(sam.Id, RunCategory.Official, 60);
+    service.CompleteCountdown(service.StartMaster().Id);
+    service.Finish();
+    service.Record();
+    Assert.Equal(2, service.GetScoreboard().Leaderboard.Count);
+
+    // The live run and stale revisions are refused.
+    var live = service.ArmCompetitor(sam.Id, RunCategory.Exhibition, 2);
+    Assert.Throws<CommandException>(() => service.DeleteRun(live.Id, live.Revision));
+    Assert.Throws<CommandException>(() => service.DeleteRun(official.Id, official.Revision - 1));
+
+    var deleted = service.DeleteRun(official.Id, official.Revision, "Test entry");
+    Assert.True(deleted.IsDeleted);
+    var snapshot = service.GetOperatorSnapshot();
+    Assert.DoesNotContain(snapshot.History, r => r.Id == official.Id);
+    Assert.Equal(official.Id, snapshot.DeletedRuns.Single().Id);
+    Assert.Equal(kept.Id, service.GetScoreboard().Leaderboard.Single().RunId);
+    Assert.Contains(snapshot.Edits, e => e.RunId == official.Id && e.Reason.Contains("Test entry"));
+    Assert.Throws<CommandException>(() => service.EditHistoricalRun(official.Id,
+        new EditRunRequest { ExpectedRevision = deleted.Revision, Reason = "Edit a deleted run" }));
+
+    // A deleted official no longer blocks a new official for the same competitor.
+    service.Abort("Make room");
+    var replacementOfficial = service.ArmCompetitor(alex.Id, RunCategory.Official, 60);
+    service.Abort("Not needed");
+
+    // Deleting the displayed timed-out run clears it from the TV.
+    var timedOut = service.ArmCompetitor(sam.Id, RunCategory.Exhibition, 2);
+    service.CompleteCountdown(service.StartMaster().Id);
+    clock.Advance(TimeSpan.FromSeconds(3));
+    Assert.Equal(RunStatus.TimedOut, service.GetScoreboard().CurrentRun!.Status);
+    service.DeleteRun(timedOut.Id, service.GetOperatorSnapshot().History.Single(r => r.Id == timedOut.Id).Revision);
+    Assert.Equal(null, service.GetScoreboard().CurrentRun);
+    store.Dispose();
+
+    // Deletion persists across a restart, and restoring brings the run back.
+    var reopenedStore = new RunStore(path);
+    var reopened = new RunService(reopenedStore, edition, new TestClock());
+    Assert.Equal(2, reopened.GetOperatorSnapshot().DeletedRuns.Count);
+    Assert.Equal(kept.Id, reopened.GetScoreboard().Leaderboard.Single().RunId);
+    reopened.RestoreRun(official.Id);
+    Assert.Contains(reopened.GetOperatorSnapshot().History, r => r.Id == official.Id);
+    Assert.Equal(2, reopened.GetScoreboard().Leaderboard.Count);
+
+    // Restoring can't create a second counted official for one competitor.
+    var twin = reopened.ArmCompetitor(sam.Id, RunCategory.Exhibition, 60);
+    reopened.Abort("Cleanup");
+    reopened.DeleteRun(official.Id, reopened.GetOperatorSnapshot().History.Single(r => r.Id == official.Id).Revision);
+    var second = reopened.ArmCompetitor(alex.Id, RunCategory.Official, 60);
+    reopened.CompleteCountdown(reopened.StartMaster().Id);
+    reopened.Finish();
+    reopened.Record();
+    Assert.Throws<CommandException>(() => reopened.RestoreRun(official.Id));
+    Assert.Equal(second.Id, reopened.GetScoreboard().Leaderboard.Single(r => r.CompetitorName == "Alex").RunId);
+    reopenedStore.Dispose();
+    Cleanup(path);
+}
+
+static void DeletingRedoRestoresOriginal()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+    var original = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 300);
+    h.StartRun();
+    h.Service.Finish();
+    h.Service.Record();
+    var redo = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 300, replaceExistingOfficial: true);
+    h.StartRun();
+    h.Service.Finish();
+    redo = h.Service.Record();
+    Assert.Equal(RunStatus.Superseded, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == original.Id).Status);
+
+    h.Service.DeleteRun(redo.Id, redo.Revision);
+    var restoredOriginal = h.Service.GetOperatorSnapshot().History.Single(r => r.Id == original.Id);
+    Assert.Equal(RunStatus.Completed, restoredOriginal.Status);
+    Assert.Equal(null, restoredOriginal.SupersededByRunId);
+    Assert.Equal(original.Id, h.Service.GetScoreboard().Leaderboard.Single().RunId);
+    Assert.Equal(RunStatus.Completed, h.Store.Load().Runs.Single(r => r.Id == original.Id).Status);
+
+    // Restoring the redo makes it replace the original again.
+    h.Service.RestoreRun(redo.Id);
+    Assert.Equal(RunStatus.Superseded, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == original.Id).Status);
+    Assert.Equal(redo.Id, h.Service.GetScoreboard().Leaderboard.Single().RunId);
+}
+
 static void SchemaVersion1UpgradesWithBackup()
 {
     var path = NewPath();
@@ -2079,13 +2180,16 @@ static void SchemaVersion1UpgradesWithBackup()
     {
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "ALTER TABLE runs DROP COLUMN recorded_at; UPDATE meta SET value = '1' WHERE key = 'schema_version';";
+        command.CommandText = "ALTER TABLE runs DROP COLUMN recorded_at; ALTER TABLE runs DROP COLUMN deleted_at; " +
+            "ALTER TABLE runs DROP COLUMN superseded_from_status; UPDATE meta SET value = '1' WHERE key = 'schema_version';";
         command.ExecuteNonQuery();
     }
 
     var upgradedStore = new RunStore(path);
-    Assert.Equal(1, Directory.GetFiles(Path.Combine(path, "backups"), "garage-games-v2-pre-schema-2-*.db").Length);
-    Assert.True(upgradedStore.Load().Runs.Single(r => r.Id == run.Id).RecordedAt is not null);
+    Assert.Equal(1, Directory.GetFiles(Path.Combine(path, "backups"), "garage-games-v2-pre-schema-3-*.db").Length);
+    var upgradedRun = upgradedStore.Load().Runs.Single(r => r.Id == run.Id);
+    Assert.True(upgradedRun.RecordedAt is not null);
+    Assert.True(!upgradedRun.IsDeleted);
     upgradedStore.Dispose();
 
     using (var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
@@ -2093,11 +2197,11 @@ static void SchemaVersion1UpgradesWithBackup()
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT value FROM meta WHERE key = 'schema_version'";
-        Assert.Equal("2", command.ExecuteScalar() as string);
+        Assert.Equal("3", command.ExecuteScalar() as string);
     }
 
     var reopenedStore = new RunStore(path);
-    Assert.Equal(1, Directory.GetFiles(Path.Combine(path, "backups"), "garage-games-v2-pre-schema-2-*.db").Length);
+    Assert.Equal(1, Directory.GetFiles(Path.Combine(path, "backups"), "garage-games-v2-pre-schema-3-*.db").Length);
     reopenedStore.Dispose();
     Cleanup(path);
 }
