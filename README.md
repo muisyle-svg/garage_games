@@ -89,17 +89,23 @@ lock. The old folder is retained unchanged. If both folders already contain a
 database, the standard `%LOCALAPPDATA%` store is used and the repo-local copy
 is left untouched.
 
-The normal shortcut runs the current source project, so a stale published
-executable cannot silently hide source updates. To intentionally launch a
-published build, run `& '.\Start Garage Games V2.ps1' -UsePublished`; the tray still
-checks that build's identity before reuse.
+The normal shortcut runs the current source, rebuilding only when it changed.
+It fingerprints the source and edition files at each launch and compares that
+with a marker saved next to the built app after the last successful build. If
+they match, the built app starts directly (about two seconds from double-click
+to ready). If the code changed, or the built app was replaced by another build,
+the tray shows "Updating Garage Games", rebuilds once, and then starts. A failed
+rebuild never falls back to the previous build; the build logs are under
+`.tools\logs`. To intentionally launch a published build, run
+`& '.\Start Garage Games V2.ps1' -UsePublished`; the tray still checks that
+build's identity before reuse.
 
-The standard source launch runs with
-`--no-restore`. The app now references `System.IO.Ports`, so run the restore
-command above with the repository `NuGet.Config` before launching the source
-build; the launcher does not restore packages itself. Exit the current tray
-instance before trying updated code; an already-running tray session can keep
-serving its existing process.
+Rebuilds run with `--no-restore`, so run the restore command above with the
+repository `NuGet.Config` after dependency changes; the launcher does not restore
+packages itself. The launcher waits up to two minutes for startup and opens the
+page as soon as the app responds. Exit the current tray instance before trying
+updated code; an already-running tray session can keep serving its existing
+process.
 
 Use the on-screen event buttons to test a run. Press an event once to record its
 start and again to record its finish; different events may overlap. The operator

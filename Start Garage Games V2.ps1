@@ -15,6 +15,17 @@ $script:legacyDataPath = Join-Path $script:toolRoot 'localappdata\GarageGamesV2'
 $script:published = Join-Path $script:scriptRoot 'publish\win-x64\GarageGames.V2.exe'
 $script:project = Join-Path $script:scriptRoot 'src\GarageGames.V2\GarageGames.V2.csproj'
 $script:sourceAssemblyDirectory = Join-Path (Join-Path $script:scriptRoot 'src\GarageGames.V2') 'bin\Release\net10.0'
+$script:sourceAssembly = Join-Path $script:sourceAssemblyDirectory 'GarageGames.V2.dll'
+# Records which source fingerprint the built app came from, so a launch only rebuilds after a change.
+$script:buildMarker = Join-Path $script:sourceAssemblyDirectory '.garage-games-build-id'
+$script:buildProcess = $null
+$script:buildLog = $null
+$script:buildErrorLog = $null
+# Startup runs as phases driven by a UI timer: building -> starting -> running (or failed).
+$script:phase = 'idle'
+$script:phaseStartedAt = $null
+$script:slowStartNoticeShown = $false
+$script:timer = $null
 $script:usePublished = [bool]$UsePublished
 $script:expectedApplicationDirectory = if ($script:usePublished) { Split-Path -Parent $script:published } else { $script:sourceAssemblyDirectory }
 $script:buildId = $null
@@ -83,8 +94,19 @@ function Show-StartupFailure([string]$Message) {
     Show-Notice $details 'Garage Games v2 could not start' ([System.Windows.Forms.MessageBoxIcon]::Error)
 }
 
+function Test-PortListening {
+    $port = ([Uri]$script:url).Port
+    return [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() |
+        Where-Object { $_.Port -eq $port })
+}
+
 function Test-ServerHealthy([switch]$Owned) {
     $script:serverIdentityError = ''
+    # On Windows an HTTP request to a port with no listener retries for about two seconds
+    # before failing; checking the listener table first answers "nothing running yet" instantly.
+    if (-not (Test-PortListening)) {
+        return $false
+    }
     $parameters = @{
         UseBasicParsing = $true
         Uri = $(if ($Owned) { $script:trayHealth } else { $script:health })
@@ -147,56 +169,22 @@ function Quote-ProcessArgument([string]$Value) {
     return '"' + $Value + '"'
 }
 
-function Start-OwnedServer {
+function Invoke-WithToolEnvironment([hashtable]$Extra, [scriptblock]$Action) {
     $environment = @{
         DOTNET_CLI_HOME = $script:toolRoot
         APPDATA = (Join-Path $script:toolRoot 'appdata')
         NUGET_PACKAGES = (Join-Path $script:toolRoot 'nuget-packages')
         DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
-        GARAGE_GAMES_V2_SHUTDOWN_TOKEN = $script:shutdownToken
+        DOTNET_NOLOGO = '1'
     }
+    foreach ($name in $Extra.Keys) { $environment[$name] = $Extra[$name] }
     $previousEnvironment = @{}
-
     foreach ($name in $environment.Keys) {
         $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
         [Environment]::SetEnvironmentVariable($name, $environment[$name], 'Process')
     }
-
     try {
-        if ($script:usePublished) {
-            if (-not (Test-Path -LiteralPath $script:published)) {
-                throw "The published Garage Games app was not found at: $($script:published)"
-            }
-            $filePath = $script:published
-            $workingDirectory = $script:scriptRoot
-            $arguments = '--hardware-mode --data-path ' + (Quote-ProcessArgument $script:dataPath) +
-                ' --legacy-data-path ' + (Quote-ProcessArgument $script:legacyDataPath) +
-                ' --build-id ' + (Quote-ProcessArgument $script:buildId) +
-                ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))
-        } else {
-            if (-not (Test-Path -LiteralPath $script:dotnet)) {
-                throw "The bundled .NET runtime was not found at: $($script:dotnet)"
-            }
-            if (-not (Test-Path -LiteralPath $script:project)) {
-                throw "The Garage Games v2 project was not found at: $($script:project)"
-            }
-            $filePath = $script:dotnet
-            $workingDirectory = $script:repoRoot
-            $arguments = 'run --configuration Release --no-restore --project ' + (Quote-ProcessArgument $script:project) +
-                ' -- --hardware-mode --data-path ' + (Quote-ProcessArgument $script:dataPath) +
-                ' --legacy-data-path ' + (Quote-ProcessArgument $script:legacyDataPath) +
-                ' --build-id ' + (Quote-ProcessArgument $script:buildId) +
-                ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))
-        }
-
-        return Start-Process `
-            -FilePath $filePath `
-            -ArgumentList $arguments `
-            -WorkingDirectory $workingDirectory `
-            -WindowStyle Hidden `
-            -PassThru `
-            -RedirectStandardOutput $script:outputLog `
-            -RedirectStandardError $script:errorLog
+        return & $Action
     } finally {
         foreach ($name in $environment.Keys) {
             [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
@@ -204,7 +192,149 @@ function Start-OwnedServer {
     }
 }
 
+# The built app is current only if it was built by this launcher from the current source
+# fingerprint and has not been replaced since (for example by a manual or test build).
+function Get-SourceAssemblyStamp {
+    $item = Get-Item -LiteralPath $script:sourceAssembly -ErrorAction SilentlyContinue
+    if (-not $item) { return '' }
+    return "$($item.Length):$($item.LastWriteTimeUtc.Ticks)"
+}
+
+function Test-SourceBuildCurrent {
+    if (-not (Test-Path -LiteralPath $script:buildMarker) -or -not (Test-Path -LiteralPath $script:sourceAssembly)) { return $false }
+    $marker = ([string](Get-Content -LiteralPath $script:buildMarker -Raw)).Trim()
+    return $marker -eq "$($script:buildId)|$(Get-SourceAssemblyStamp)"
+}
+
+function Write-SourceBuildMarker {
+    Set-Content -LiteralPath $script:buildMarker -Value "$($script:buildId)|$(Get-SourceAssemblyStamp)" -Encoding ascii
+}
+
+function Start-SourceBuild {
+    if (-not (Test-Path -LiteralPath $script:dotnet)) {
+        throw "The bundled .NET toolchain was not found at: $($script:dotnet)"
+    }
+    if (-not (Test-Path -LiteralPath $script:project)) {
+        throw "The Garage Games v2 project was not found at: $($script:project)"
+    }
+    $arguments = 'build ' + (Quote-ProcessArgument $script:project) + ' --configuration Release --no-restore -nologo -v q'
+    $process = Invoke-WithToolEnvironment @{} {
+        Start-Process -FilePath $script:dotnet -ArgumentList $arguments -WorkingDirectory $script:repoRoot `
+            -WindowStyle Hidden -PassThru -RedirectStandardOutput $script:buildLog -RedirectStandardError $script:buildErrorLog
+    }
+    # Windows PowerShell only reports ExitCode later if the handle is opened now.
+    $null = $process.Handle
+    return $process
+}
+
+function Start-OwnedServer {
+    if ($script:usePublished) {
+        if (-not (Test-Path -LiteralPath $script:published)) {
+            throw "The published Garage Games app was not found at: $($script:published)"
+        }
+        $filePath = $script:published
+        $prefix = ''
+        $workingDirectory = $script:scriptRoot
+    } else {
+        # Start the already-built app directly; building happens beforehand only when needed.
+        $filePath = $script:dotnet
+        $prefix = (Quote-ProcessArgument $script:sourceAssembly) + ' '
+        $workingDirectory = $script:repoRoot
+    }
+    $arguments = $prefix + '--hardware-mode --data-path ' + (Quote-ProcessArgument $script:dataPath) +
+        ' --legacy-data-path ' + (Quote-ProcessArgument $script:legacyDataPath) +
+        ' --build-id ' + (Quote-ProcessArgument $script:buildId) +
+        ' --urls ' + (Quote-ProcessArgument $script:url.TrimEnd('/'))
+
+    $process = Invoke-WithToolEnvironment @{ GARAGE_GAMES_V2_SHUTDOWN_TOKEN = $script:shutdownToken } {
+        Start-Process -FilePath $filePath -ArgumentList $arguments -WorkingDirectory $workingDirectory `
+            -WindowStyle Hidden -PassThru -RedirectStandardOutput $script:outputLog -RedirectStandardError $script:errorLog
+    }
+    $null = $process.Handle
+    return $process
+}
+
+function Set-TrayStatus([string]$Text) {
+    # NotifyIcon tooltips are limited to 63 characters.
+    if ($script:notifyIcon) { $script:notifyIcon.Text = $Text.Substring(0, [Math]::Min(63, $Text.Length)) }
+}
+
+function Show-TrayMessage([string]$Title, [string]$Text) {
+    if ($script:notifyIcon) { $script:notifyIcon.ShowBalloonTip(5000, $Title, $Text, [System.Windows.Forms.ToolTipIcon]::Info) }
+}
+
+function Enter-Phase([string]$Phase) {
+    $script:phase = $Phase
+    $script:phaseStartedAt = [DateTime]::UtcNow
+}
+
+function Start-BuildPhase {
+    Enter-Phase 'building'
+    Set-TrayStatus 'Garage Games v2 - updating after code changes'
+    Show-TrayMessage 'Updating Garage Games' 'The code changed since the last start, so it is being rebuilt. This takes a few seconds.'
+    $script:buildProcess = Start-SourceBuild
+}
+
+function Start-ServerPhase {
+    Enter-Phase 'starting'
+    Set-TrayStatus 'Garage Games v2 - starting'
+    $script:serverProcess = Start-OwnedServer
+}
+
+# Called by the UI timer. Each step is short, so the tray menu stays responsive throughout.
+function Step-Startup {
+    try {
+        $elapsed = ([DateTime]::UtcNow - $script:phaseStartedAt).TotalSeconds
+        switch ($script:phase) {
+            'building' {
+                if (-not $script:buildProcess.HasExited) {
+                    if ($elapsed -gt 300) {
+                        Enter-Phase 'failed'
+                        Show-StartupFailure "Updating Garage Games took more than five minutes and was abandoned. Build logs:`n$($script:buildLog)`n$($script:buildErrorLog)"
+                    }
+                    return
+                }
+                if ($script:buildProcess.ExitCode -ne 0) {
+                    Enter-Phase 'failed'
+                    Set-TrayStatus 'Garage Games v2 - update failed'
+                    Show-StartupFailure "Garage Games could not be rebuilt after a code change (exit code $($script:buildProcess.ExitCode)). The previous version was not started so an out-of-date build cannot run.`n`nBuild logs:`n$($script:buildLog)`n$($script:buildErrorLog)"
+                    return
+                }
+                Write-SourceBuildMarker
+                Start-ServerPhase
+            }
+            'starting' {
+                if ($script:serverProcess.HasExited) {
+                    Enter-Phase 'failed'
+                    Set-TrayStatus 'Garage Games v2 - stopped during startup'
+                    Show-StartupFailure 'Garage Games v2 exited during startup. Review the local logs for details.'
+                    return
+                }
+                if (Test-ServerHealthy -Owned) {
+                    Enter-Phase 'running'
+                    Set-TrayStatus 'Garage Games v2 (this tray session owns the server)'
+                    Start-Process -FilePath $script:url
+                    return
+                }
+                if ($elapsed -gt 120 -and -not $script:slowStartNoticeShown) {
+                    # Keep waiting; the browser opens as soon as the app responds.
+                    $script:slowStartNoticeShown = $true
+                    Show-TrayMessage 'Garage Games is still starting' 'This is taking longer than usual. The page opens automatically when it is ready; startup logs are in .tools\logs.'
+                }
+            }
+        }
+    } catch {
+        Enter-Phase 'failed'
+        Show-StartupFailure "Windows could not start Garage Games v2: $($_.Exception.Message)"
+    }
+}
+
 function Open-GarageGames {
+    if ($script:phase -in 'building', 'starting') {
+        $what = if ($script:phase -eq 'building') { 'being updated after a code change' } else { 'starting' }
+        Show-Notice "Garage Games is still $what. The page opens automatically as soon as it is ready."
+        return
+    }
     if (-not (Test-ServerHealthy -Owned:$script:ownsServer)) {
         if ($script:serverIdentityError) {
             Show-Notice $script:serverIdentityError 'Garage Games version or data folder mismatch' ([System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -254,6 +384,7 @@ function Request-OwnedServerExit {
 function Request-TrayExit {
     if (Request-OwnedServerExit) {
         $script:exitRequested = $true
+        [System.Windows.Forms.Application]::ExitThread()
     }
 }
 
@@ -275,7 +406,7 @@ function New-TrayIcon {
 
     $icon = New-Object System.Windows.Forms.NotifyIcon
     $icon.Icon = [System.Drawing.SystemIcons]::Application
-    $icon.Text = if ($script:ownsServer) { 'Garage Games v2 (this tray session owns the server)' } else { 'Garage Games v2 (using an existing server)' }
+    $icon.Text = if ($script:ownsServer) { 'Garage Games v2 - starting' } else { 'Garage Games v2 (using an existing server)' }
     $icon.ContextMenuStrip = $menu
     $icon.Visible = $true
     $icon.Add_MouseDoubleClick({ Open-GarageGames }.GetNewClosure())
@@ -331,8 +462,11 @@ try {
     }
 
     $logStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $script:outputLog = Join-Path (Join-Path $script:toolRoot 'logs') "garage-games-v2-$logStamp-$PID.out.log"
-    $script:errorLog = Join-Path (Join-Path $script:toolRoot 'logs') "garage-games-v2-$logStamp-$PID.err.log"
+    $logDirectory = Join-Path $script:toolRoot 'logs'
+    $script:outputLog = Join-Path $logDirectory "garage-games-v2-$logStamp-$PID.out.log"
+    $script:errorLog = Join-Path $logDirectory "garage-games-v2-$logStamp-$PID.err.log"
+    $script:buildLog = Join-Path $logDirectory "garage-games-v2-$logStamp-$PID.build.log"
+    $script:buildErrorLog = Join-Path $logDirectory "garage-games-v2-$logStamp-$PID.build.err.log"
 
     if (Test-ServerHealthy) {
         # Only reuse an instance that reports this build and the canonical data directory.
@@ -342,40 +476,38 @@ try {
         return
     } else {
         $script:shutdownToken = New-ShutdownToken
-        $script:serverProcess = Start-OwnedServer
         $script:ownsServer = $true
     }
 
+    # Show the tray icon first so progress (including a rebuild) is visible right away.
     New-TrayIcon
 
     if ($script:ownsServer) {
-        $ready = $false
-        for ($attempt = 0; $attempt -lt 40; $attempt++) {
-            if ($script:serverProcess.HasExited) { break }
-            if (Test-ServerHealthy -Owned) { $ready = $true; break }
-            Start-Sleep -Milliseconds 250
-        }
-        if ($ready) {
-            Start-Process -FilePath $script:url
+        if ($script:usePublished -or (Test-SourceBuildCurrent)) {
+            Start-ServerPhase
         } else {
-            $message = if ($script:serverProcess.HasExited) {
-                "Garage Games v2 exited during startup. Review the local logs for details."
-            } else {
-                "Garage Games v2 is taking longer than expected to start. The tray remains available; choose Open to retry when it is ready."
-            }
-            Show-StartupFailure $message
+            Start-BuildPhase
         }
+        $script:timer = New-Object System.Windows.Forms.Timer
+        $script:timer.Interval = 250
+        $script:timer.Add_Tick({ Step-Startup }.GetNewClosure())
+        $script:timer.Start()
     } else {
         Start-Process -FilePath $script:url
     }
 
-    while (-not $script:exitRequested) {
-        [System.Windows.Forms.Application]::DoEvents()
-        Start-Sleep -Milliseconds 200
-    }
+    # The standard Windows message loop keeps the tray menu responsive; Exit ends it.
+    [System.Windows.Forms.Application]::Run()
 } catch {
     Show-StartupFailure "Windows could not start Garage Games v2: $($_.Exception.Message)"
 } finally {
+    if ($script:timer) {
+        $script:timer.Stop()
+        $script:timer.Dispose()
+    }
+    if ($script:buildProcess) {
+        $script:buildProcess.Dispose()
+    }
     if ($script:notifyIcon) {
         $script:notifyIcon.Visible = $false
         $script:notifyIcon.Dispose()
