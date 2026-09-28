@@ -242,6 +242,12 @@ select:disabled, input:disabled { opacity: .58; }
 /* The result box already shows a finished event's duration; drop the repeat below it. */
 .virtual-button.is-complete .virtual-action-hint { display: none; }
 
+/* Run history search and filters. */
+.history-filters { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; padding: 0 .95rem .75rem; }
+.history-filters input { flex: 1 1 220px; min-width: 0; max-width: 360px; }
+.history-filters select { flex: 0 1 170px; width: auto; }
+.history-filters .button[hidden] { display: none; }
+
 /* Deleted runs are restorable from a collapsed list at the bottom of Run history. */
 .deleted-runs { margin: 0 .95rem .95rem; padding: .7rem .8rem; border: 1px dashed rgba(240, 135, 121, .35); border-radius: 10px; background: rgba(240, 135, 121, .04); }
 .deleted-runs > summary { display: flex; align-items: center; gap: .6rem; cursor: pointer; font-size: .8rem; }

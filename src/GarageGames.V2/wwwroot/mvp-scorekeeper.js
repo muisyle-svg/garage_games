@@ -157,6 +157,10 @@
     historySaveState: $("history-save-state"),
     historyRecord: $("record-history-run"),
     historyDelete: $("delete-history-run"),
+    historySearch: $("history-search"),
+    historyCategoryFilter: $("history-category-filter"),
+    historyStatusFilter: $("history-status-filter"),
+    historyClearFilters: $("history-clear-filters"),
     deletedRunsPanel: $("deleted-runs-panel"),
     deletedRunsCount: $("deleted-runs-count"),
     deletedRunsList: $("deleted-runs-list"),
@@ -2039,18 +2043,44 @@
     state.historyTableKey = null;
   }
 
+  // Search matches player names the way duplicate detection does (ignoring case and
+  // extra spaces); the type and result filters narrow the list further.
+  function historyFilter() {
+    return {
+      query: normalizedCompetitorName(ui.historySearch.value).toLowerCase(),
+      category: ui.historyCategoryFilter.value,
+      status: ui.historyStatusFilter.value
+    };
+  }
+
+  function filterHistory(history, filter) {
+    return history.filter((run) =>
+      (!filter.query || normalizedCompetitorName(competitorName(run.competitorId)).toLowerCase().includes(filter.query)) &&
+      (!filter.category || run.category === filter.category) &&
+      (!filter.status || (filter.status === "recorded") === Boolean(run.isRecorded)));
+  }
+
   function renderHistory() {
     renderDeletedRuns();
-    const history = state.snapshot?.history || [];
-    ui.historyCount.textContent = `${history.length} ${history.length === 1 ? "run" : "runs"}`;
+    const allHistory = state.snapshot?.history || [];
+    const filter = historyFilter();
+    const filtering = Boolean(filter.query || filter.category || filter.status);
+    const history = filterHistory(allHistory, filter);
+    ui.historyCount.textContent = filtering
+      ? `${history.length} of ${allHistory.length} ${allHistory.length === 1 ? "run" : "runs"}`
+      : `${allHistory.length} ${allHistory.length === 1 ? "run" : "runs"}`;
+    ui.historyClearFilters.hidden = !filtering;
     if (!history.some((run) => run.id === state.selectedHistoryId)) {
       state.selectedHistoryId = history[0]?.id || null;
     }
-    const signature = history.map((run) => `${run.id}:${run.revision}:${run.status}`).join("|");
+    const signature = `${filter.query}|${filter.category}|${filter.status}|` +
+      history.map((run) => `${run.id}:${run.revision}:${run.status}`).join("|");
     if (signature !== state.historySignature) {
       ui.historyList.replaceChildren();
       if (!history.length) {
-        ui.historyList.appendChild(make("p", "empty-state", "Saved runs will appear here."));
+        ui.historyList.appendChild(make("p", "empty-state", filtering
+          ? "No saved runs match these filters."
+          : "Saved runs will appear here."));
       } else {
         history.forEach((run) => {
           const button = make("button", `history-row${run.id === state.selectedHistoryId ? " is-selected" : ""}`);
@@ -2655,6 +2685,17 @@
     ));
     ui.historyRecord.addEventListener("click", () => performAction(recordHistoricalRun, "Saved run recorded."));
     ui.historyDelete.addEventListener("click", () => performAction(deleteHistoricalRun, "Run deleted. It can be restored from Deleted runs."));
+    const refilterHistory = () => { state.historyTableKey = null; renderHistory(); setSaveStates(); };
+    ui.historySearch.addEventListener("input", refilterHistory);
+    ui.historyCategoryFilter.addEventListener("change", refilterHistory);
+    ui.historyStatusFilter.addEventListener("change", refilterHistory);
+    ui.historyClearFilters.addEventListener("click", () => {
+      ui.historySearch.value = "";
+      ui.historyCategoryFilter.value = "";
+      ui.historyStatusFilter.value = "";
+      refilterHistory();
+      ui.historySearch.focus();
+    });
     ui.currentSave.addEventListener("click", saveCurrentEdits);
     ui.historySave.addEventListener("click", saveHistoryEdits);
     ui.currentBody.addEventListener("input", onScoreInput);

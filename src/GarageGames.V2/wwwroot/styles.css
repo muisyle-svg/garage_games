@@ -320,16 +320,21 @@ select { cursor: pointer; }
    viewport without scrolling; smaller screens fall back to a scrolling page. */
 .scoreboard-header { min-height: 64px; padding-top: .6rem; padding-bottom: .6rem; }
 /* Two columns: the live run (hero + events) and a full-height side column for on deck and standings. */
-.scoreboard-stage { display: grid; grid-template-columns: minmax(0, 1fr) minmax(330px, 25vw); gap: 1rem; padding-top: 1rem; padding-bottom: 1rem; }
+/* Full width on any TV; the side column is sized from the board, not the screen, so on
+   a 4K display it can't squeeze the clock. */
+.scoreboard-stage { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) clamp(330px, 26%, 620px); gap: 1rem; padding-top: 1rem; padding-bottom: 1rem; }
 .scoreboard-main { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 1rem; }
 .scoreboard-main .scoreboard-events { flex: 1; }
 .scoreboard-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, .7fr); gap: 1rem; }
 .scoreboard-hero > div { display: flex; min-width: 0; flex-direction: column; justify-content: center; padding: clamp(1rem, 1.8vw, 1.6rem); border: 1px solid var(--line); border-radius: var(--radius); background: rgba(29, 43, 64, .78); box-shadow: var(--shadow); }
 .hero-competitor h2 { display: -webkit-box; overflow: hidden; margin-top: .45rem; font-size: clamp(1.6rem, min(2.7vw, 5.2vh), 3.4rem); line-height: 1.02; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow-wrap: anywhere; }
+/* The clock and points are sized from their own panels (container units), so the
+   text can never be wider than its box: "59:59" is about 2.3 characters wide per em. */
+.hero-clock, .hero-points { container-type: inline-size; }
 .hero-clock { align-items: center; background: linear-gradient(160deg, rgba(246, 184, 77, .16), rgba(246, 184, 77, .04)) !important; border-color: rgba(246, 184, 77, .35) !important; text-align: center; }
-.hero-clock .scoreboard-clock { margin-top: .2rem; font-size: clamp(5rem, min(13vw, 19vh), 15rem); letter-spacing: -.06em; line-height: .9; }
+.hero-clock .scoreboard-clock { margin-top: .2rem; font-size: min(41cqi, 19vh); letter-spacing: -.06em; line-height: .9; white-space: nowrap; }
 .hero-clock .scoreboard-run-status { margin-top: .4rem; font-size: clamp(.85rem, 1.3vw, 1.2rem); }
-.hero-points > strong { margin-top: .3rem; color: var(--green); font-size: clamp(3rem, min(6.5vw, 11vh), 7.5rem); font-variant-numeric: tabular-nums; letter-spacing: -.06em; line-height: .9; }
+.hero-points > strong { margin-top: .3rem; color: var(--green); font-size: min(40cqi, 11vh); font-variant-numeric: tabular-nums; letter-spacing: -.06em; line-height: .9; white-space: nowrap; }
 .hero-progress .progress-label strong { font-size: clamp(.8rem, 1vw, 1.05rem); }
 .hero-progress { margin-top: 1rem; }
 .hero-progress .progress-track { margin-top: .45rem; }

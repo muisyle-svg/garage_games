@@ -213,6 +213,21 @@
         <div><p class="mvp-kicker">Saved results</p><h2 id="history-heading">Run history</h2></div>
         <span id="history-count" class="small-note">0 runs</span>
       </div>
+      <div class="history-filters" role="search" aria-label="Filter run history">
+        <input id="history-search" type="search" autocomplete="off" placeholder="Search player…" aria-label="Search run history by player name">
+        <select id="history-category-filter" aria-label="Filter by run type">
+          <option value="">All run types</option>
+          <option value="official">Official</option>
+          <option value="playoff">Playoff</option>
+          <option value="exhibition">Exhibition</option>
+        </select>
+        <select id="history-status-filter" aria-label="Filter by result">
+          <option value="">Any result</option>
+          <option value="recorded">Recorded</option>
+          <option value="unrecorded">Not recorded</option>
+        </select>
+        <button id="history-clear-filters" class="button button-quiet" type="button" hidden>Clear filters</button>
+      </div>
       <div class="history-layout">
         <div id="history-list" class="history-list"><p class="empty-state">Saved runs will appear here.</p></div>
         <section id="history-editor" class="history-editor" aria-labelledby="history-editor-title">
