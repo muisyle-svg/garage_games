@@ -364,6 +364,8 @@ select { cursor: pointer; }
 .tv-points { font-size: clamp(1.1rem, 1.4vw, 1.5rem); }
 .tv-rank-row.is-leader .tv-rank-name { color: var(--amber); }
 .scoreboard-side [hidden] { display: none !important; }
+/* A class's display rule would otherwise override the hidden attribute and keep the element on screen. */
+[hidden] { display: none !important; }
 
 @media (min-width: 1100px) and (min-height: 700px) {
   .scoreboard-view { height: 100vh; overflow: hidden; }

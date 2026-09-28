@@ -17,6 +17,8 @@
 }
 
 * { box-sizing: border-box; }
+/* A class's display rule would otherwise override the hidden attribute and keep the element on screen. */
+[hidden] { display: none !important; }
 body { min-width: 320px; min-height: 100vh; margin: 0; background: radial-gradient(ellipse at 50% -18rem, #325248 0, transparent 52rem), linear-gradient(155deg, #12211d, #101817 60%, #151e1c); }
 button, input, select { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
