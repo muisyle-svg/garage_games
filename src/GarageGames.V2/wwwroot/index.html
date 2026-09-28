@@ -97,11 +97,11 @@
           <p id="virtual-note" class="small-note virtual-note">Virtual buttons are ready for local testing.</p>
         </section>
 
-        <section class="sheet-card scorecard-card" aria-labelledby="scorecard-heading">
-          <div class="card-heading">
-            <div><p class="mvp-kicker">Run scorecard</p><h2 id="scorecard-heading">Times & points</h2></div>
-            <span id="scorecard-save-state" class="save-state">No unsaved edits</span>
-          </div>
+        <details id="scorecard-panel" class="sheet-card scorecard-card scorecard-panel">
+          <summary class="card-heading">
+            <span class="scorecard-panel-title"><span class="mvp-kicker">Run scorecard</span><strong id="scorecard-heading">Edit times &amp; points</strong></span>
+            <span class="scorecard-panel-status"><span id="scorecard-summary-total" class="scorecard-summary-total">0 pts</span><span id="scorecard-save-state" class="save-state">No unsaved edits</span></span>
+          </summary>
           <p class="table-help">Times count down from the run limit. Automatic points follow the scoring rules saved with each run; blank points restore automatic scoring.</p>
           <div class="table-scroll">
             <table class="score-table">
@@ -117,7 +117,7 @@
             <span class="small-note">Blank is zero. Separate from any timed bonus event.</span>
             <button id="save-current-edits" class="button button-secondary" type="button" disabled>Save scorecard edits</button>
           </div>
-        </section>
+        </details>
 
         <details id="hardware-panel" class="sheet-card hardware-panel">
           <summary>

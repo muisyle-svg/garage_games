@@ -48,6 +48,7 @@ var tests = new (string Name, Action Run)[]
     ("bonus records signals without automatic points", BonusSignal),
     ("restart lineage and one official result", RestartAndOfficialRule),
     ("an official redo replaces the original only when recorded", OfficialRedoReplacesOnlyWhenRecorded),
+    ("per-event undo steps back one event without touching others", TargetedEventUndoLeavesOtherEvents),
     ("timed-out runs can be undone and their recording survives restart", TimedOutRunUndoAndRecordingPersist),
     ("recording an older run from history keeps the on-deck queue", HistoricalRecordKeepsOnDeckQueue),
     ("discarding a replacement attempt keeps the original official result", DiscardedReplacementKeepsOriginalOfficial),
@@ -1805,6 +1806,53 @@ static void RestartAndOfficialRule()
     Assert.Equal(RunStatus.Superseded, h.Store.Load().Runs.Single(r => r.Id == first.Id).Status);
     var secondOfficial = h.Service.AddToQueue(h.CompetitorId, RunCategory.Official);
     Assert.Throws<CommandException>(() => h.Service.Arm(secondOfficial.Id));
+}
+
+static void TargetedEventUndoLeavesOtherEvents()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    var run = h.ArmAndStart();
+    foreach (var eventId in new[] { "event-01", "event-02" })
+    {
+        h.Service.PressEvent(run.Id, eventId);
+        h.Clock.Advance(TimeSpan.FromSeconds(2));
+        h.Service.PressEvent(run.Id, eventId);
+    }
+    h.Service.PressEvent(run.Id, "event-03");
+    var staleRevision = h.Service.GetOperatorSnapshot().CurrentRun!.Revision;
+
+    EventStatus StatusOf(RunRecord current, string eventId) => current.Events.Single(e => e.EventId == eventId).Status;
+
+    // Undoing event 1 steps back only its finish; later presses on events 2 and 3 stay.
+    var afterFinishUndo = h.Service.UndoEventPress("event-01");
+    Assert.Equal(EventStatus.Active, StatusOf(afterFinishUndo, "event-01"));
+    Assert.Equal(EventStatus.Completed, StatusOf(afterFinishUndo, "event-02"));
+    Assert.Equal(EventStatus.Active, StatusOf(afterFinishUndo, "event-03"));
+    var afterStartUndo = h.Service.UndoEventPress("event-01");
+    Assert.Equal(EventStatus.Pending, StatusOf(afterStartUndo, "event-01"));
+    Assert.Throws<CommandException>(() => h.Service.UndoEventPress("event-01"));
+
+    // The global undo still takes back the latest effective press (event 3's start).
+    var globalUndo = h.Service.UndoLastEventPress();
+    Assert.Equal(EventStatus.Pending, StatusOf(globalUndo, "event-03"));
+    Assert.Equal(EventStatus.Completed, StatusOf(globalUndo, "event-02"));
+    // Event 1's finish and start, then event 3's start, are marked undone in the ledger.
+    Assert.Equal(3, h.Service.GetOperatorSnapshot().Messages.Count(m => m.Disposition == MessageDisposition.Undone));
+
+    // An event whose times came from a scorecard edit can still be stepped back.
+    var edited = h.Service.EditCurrentRun(new EditRunRequest
+    {
+        ExpectedRevision = globalUndo.Revision,
+        Reason = "Entered by hand",
+        Events = [new EventEditRequest { EventId = "event-04", StartElapsedMs = 1_000, FinishElapsedMs = 3_000 }]
+    });
+    Assert.Equal(EventStatus.Completed, StatusOf(edited, "event-04"));
+    Assert.Equal(EventStatus.Active, StatusOf(h.Service.UndoEventPress("event-04"), "event-04"));
+
+    // Clearing an event on the live run no longer fails on a revision that is seconds old.
+    var cleared = h.Service.ClearEvent(run.Id, "event-02", staleRevision);
+    Assert.Equal(EventStatus.Pending, StatusOf(cleared, "event-02"));
+    Assert.Equal(EventStatus.Pending, h.Store.Load().Runs.Single(r => r.Id == run.Id).Events.Single(e => e.EventId == "event-02").Status);
 }
 
 static void OfficialRedoReplacesOnlyWhenRecorded()

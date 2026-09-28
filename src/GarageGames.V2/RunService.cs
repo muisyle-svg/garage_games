@@ -308,7 +308,14 @@ public sealed class RunService
             RefreshActiveClock();
             var isCurrent = _current?.Id == runId;
             var run = isCurrent ? _current! : FindHistoricalRun(runId);
-            if (run.Revision != expectedRevision)
+            // On the live run, presses keep changing the revision; clearing an event is a
+            // deliberate reset of that one event, so it applies to the latest state rather
+            // than failing on a revision that is seconds old. Saved runs keep the check.
+            if (isCurrent)
+            {
+                expectedRevision = run.Revision;
+            }
+            else if (run.Revision != expectedRevision)
             {
                 throw new CommandException("This run changed before the event could be cleared. Reload it and try again.");
             }
@@ -345,7 +352,12 @@ public sealed class RunService
         }
     }
 
-    public RunRecord UndoLastEventPress()
+    public RunRecord UndoLastEventPress() => UndoEventPress(eventId: null);
+
+    // Steps back one press: the latest press of the run overall, or, with an event id,
+    // that event's latest press only (finish -> running, start -> not started), leaving
+    // presses on other events untouched. Every undo is saved as an audited edit.
+    public RunRecord UndoEventPress(string? eventId)
     {
         lock (_gate)
         {
@@ -361,6 +373,19 @@ public sealed class RunService
                 throw new CommandException("Undo is available after the run has started.");
             }
 
+            var requestedEvent = eventId is null
+                ? null
+                : run.Events.SingleOrDefault(item => item.EventId == eventId)
+                    ?? throw new CommandException("That event is not part of this run.");
+            if (requestedEvent is not null && requestedEvent.Type != EventKind.Standard)
+            {
+                throw new CommandException("Only standard two-press events can be undone this way; use the scorecard to correct it.");
+            }
+            if (requestedEvent is not null && requestedEvent.Status == EventStatus.Pending)
+            {
+                throw new CommandException($"'{requestedEvent.Name}' has not been started, so there is nothing to undo.");
+            }
+
             var selected = _data.Messages
                 .Where(message => message.RunId == run.Id && message.Type == "event-press" && message.Disposition == MessageDisposition.Accepted)
                 .Select(message => new
@@ -369,14 +394,20 @@ public sealed class RunService
                     Event = run.Events.SingleOrDefault(item => item.Type == EventKind.Standard &&
                         string.Equals(item.DeviceId, message.DeviceId, StringComparison.OrdinalIgnoreCase))
                 })
-                .Where(item => item.Event is not null && item.Event.LastSignalElapsedMs == item.Message.ElapsedMilliseconds &&
+                .Where(item => item.Event is not null && (requestedEvent is null || item.Event.EventId == requestedEvent.EventId) &&
+                    item.Event.LastSignalElapsedMs == item.Message.ElapsedMilliseconds &&
                     ((item.Event.Status == EventStatus.Completed && item.Event.FinishElapsedMs == item.Message.ElapsedMilliseconds) ||
                      (item.Event.Status == EventStatus.Active && item.Event.StartElapsedMs == item.Message.ElapsedMilliseconds && item.Event.FinishElapsedMs is null)))
                 .OrderByDescending(item => item.Message.Id)
-                .FirstOrDefault()
-                ?? throw new CommandException("There are no remaining standard event-button presses to undo.");
+                .FirstOrDefault();
+            if (selected is null && requestedEvent is null)
+            {
+                throw new CommandException("There are no remaining standard event-button presses to undo.");
+            }
 
-            var targetEvent = selected.Event!;
+            // A targeted event whose current time came from a scorecard edit has no press
+            // message to retract; it still steps back, recorded as an edit.
+            var targetEvent = selected?.Event ?? requestedEvent!;
             var before = Serialize(run);
             var candidate = Clone(run);
             var candidateEvent = candidate.Events.Single(item => item.EventId == targetEvent.EventId);
@@ -410,13 +441,11 @@ public sealed class RunService
             }
             candidate.Revision = run.Revision + 1;
             var after = Serialize(candidate);
-            selected.Message.Disposition = MessageDisposition.Undone;
-            selected.Message.Reason = $"Undone by operator; removed the {(undoneFinish ? "finish" : "start")} press for '{targetEvent.Name}'.";
             var edit = new EditRecord
             {
                 RunId = run.Id,
                 CreatedAt = _clock.UtcNow,
-                Reason = $"Undid the latest button press for '{targetEvent.Name}'.",
+                Reason = $"Undid the latest {(undoneFinish ? "finish" : "start")} for '{targetEvent.Name}'.",
                 BeforeJson = before,
                 AfterJson = after
             };
@@ -424,7 +453,16 @@ public sealed class RunService
             ReplaceRun(run, candidate);
             try
             {
-                _store.AddEditAndUndoMessage(candidate, edit, selected.Message);
+                if (selected is not null)
+                {
+                    selected.Message.Disposition = MessageDisposition.Undone;
+                    selected.Message.Reason = $"Undone by operator; removed the {(undoneFinish ? "finish" : "start")} press for '{targetEvent.Name}'.";
+                    _store.AddEditAndUndoMessage(candidate, edit, selected.Message);
+                }
+                else
+                {
+                    _store.AddEdit(candidate, edit);
+                }
             }
             catch
             {

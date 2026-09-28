@@ -286,6 +286,12 @@ app.MapPost("/api/run/undo-last-press", async (RunService runs, PhysicalMasterSe
     await master.SendCurrentStatusAsync(cancellationToken);
     return Results.Ok(run);
 });
+app.MapPost("/api/run/events/{eventId}/undo-press", async (string eventId, RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.UndoEventPress(eventId);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
 app.MapPut("/api/leaderboards/preferences", (SetLeaderboardPreferencesRequest request, RunService runs) =>
 {
     runs.SetLeaderboardPreference(request.ShowExhibitionsOnLeaderboard);

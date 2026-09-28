@@ -220,6 +220,37 @@ select:disabled, input:disabled { opacity: .58; }
 .hardware-panel.needs-attention .hardware-panel-summary { color: var(--amber); }
 .hardware-panel-content { padding: 0 .95rem .95rem; }
 .hardware-panel .physical-readiness-panel { margin: 0; }
+
+/* Event tiles carry each event's result: points, start → stop and duration, or a live timer. */
+.virtual-tile-result { display: grid; gap: .12rem; padding: .35rem .45rem; border-radius: 7px; background: rgba(0, 0, 0, .18); }
+.virtual-tile-points { color: var(--ink); font-size: 1.15rem; font-weight: 900; font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1.05; }
+.virtual-tile-points small { color: var(--muted); font-size: .62rem; font-weight: 800; letter-spacing: 0; }
+.virtual-tile-points.is-empty { color: var(--dim); }
+.virtual-tile-result.is-complete .virtual-tile-points { color: var(--green); }
+.virtual-tile-result.is-running .virtual-tile-points { color: var(--amber); }
+.virtual-button .virtual-tile-times { overflow: hidden; color: var(--muted); font-size: .64rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+/* Per-event undo sits in the tile's corner as a separate small control. */
+.virtual-tile { position: relative; display: grid; min-width: 0; }
+.virtual-tile.has-undo .virtual-button-name { padding-right: 2.4rem; }
+.virtual-tile-undo { position: absolute; top: .4rem; right: .4rem; min-width: 1.9rem; min-height: 1.6rem; padding: .1rem .4rem; border: 1px solid rgba(244, 189, 96, .45); border-radius: 7px; background: rgba(16, 28, 26, .85); color: var(--amber); cursor: pointer; font-size: .85rem; font-weight: 900; line-height: 1; }
+.virtual-tile-undo:hover:not(:disabled) { background: rgba(244, 189, 96, .16); }
+.virtual-tile-undo.is-armed { border-color: var(--amber); background: var(--amber); color: #302311; font-size: .7rem; }
+
+/* Finished events can't be pressed again, but their results should stay fully readable. */
+.virtual-button.is-complete:disabled { opacity: 1; border-color: rgba(104, 214, 164, .45); background: rgba(104, 214, 164, .07); }
+.virtual-button.is-complete:disabled .virtual-button-name { color: var(--muted); }
+/* The result box already shows a finished event's duration; drop the repeat below it. */
+.virtual-button.is-complete .virtual-action-hint { display: none; }
+
+/* The full scorecard collapses like Hardware; its header keeps the total and unsaved state. */
+.scorecard-panel > summary { cursor: pointer; list-style: none; }
+.scorecard-panel > summary::-webkit-details-marker { display: none; }
+.scorecard-panel > summary::after { content: "Show"; color: var(--muted); font-size: .66rem; font-weight: 800; }
+.scorecard-panel[open] > summary::after { content: "Hide"; }
+.scorecard-panel-title { display: grid; gap: .15rem; }
+.scorecard-panel-title strong { font-size: .85rem; }
+.scorecard-panel-status { display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; gap: .8rem; }
+.scorecard-summary-total { color: var(--green); font-size: .95rem; font-weight: 900; font-variant-numeric: tabular-nums; }
 .scorecard-card { min-width: 0; }
 .save-state { color: var(--muted); font-size: .64rem; text-align: right; }
 .table-help { margin: 0; padding: 0 .95rem .6rem; }

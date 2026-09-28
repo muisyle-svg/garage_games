@@ -57,7 +57,9 @@
     exhibitionPreferenceDraft: null,
     latestEventPressMessageId: null,
     buttonHighlightDeviceId: null,
-    buttonHighlightUntil: 0
+    buttonHighlightUntil: 0,
+    tileUndoArmedEventId: null,
+    tileUndoTimer: null
   };
 
   const clearDatabasePhrase = "CLEAR ALL DATA";
@@ -121,6 +123,8 @@
     undoDetail: $("undo-last-event-detail"),
     hardwarePanel: $("hardware-panel"),
     hardwarePanelSummary: $("hardware-panel-summary"),
+    scorecardPanel: $("scorecard-panel"),
+    scorecardSummaryTotal: $("scorecard-summary-total"),
     finish: $("finish-run-button"),
     record: $("record-run-button"),
     discard: $("discard-run-button"),
@@ -1276,6 +1280,7 @@
     if (kind === "current") ui.currentTotal.textContent = String(total);
     else ui.historyTotal.textContent = String(total);
     if (kind === "current") ui.runTotal.textContent = String(total);
+    if (kind === "current") ui.scorecardSummaryTotal.textContent = `${total} pts`;
     if (kind === "history" && run) {
       const historyRow = ui.historyList.querySelector(`[data-run-id="${CSS.escape(run.id)}"] .history-points`);
       if (historyRow) historyRow.textContent = String(total);
@@ -1490,7 +1495,7 @@
             ? "Start the run to enable event presses."
             : "No run is underway. Tap an assigned event tile to flash its physical button; press a physical spoke to highlight its matching tile.";
     ui.virtualNote.textContent = `${note} ${physicalSummary.text}`;
-    const key = `${run ? `${run.id}:${run.revision}:${run.status}` : `no-run:${eventRosterSignature()}`}:${state.busy}:${physicalSignature}:${state.master?.connected}:${state.master?.mode}:${state.masterBusy}:${state.buttonHighlightDeviceId}:${state.buttonHighlightUntil}`;
+    const key = `${run ? `${run.id}:${run.revision}:${run.status}:${tableTotal(run)}` : `no-run:${eventRosterSignature()}`}:${state.busy}:${state.tileUndoArmedEventId}:${physicalSignature}:${state.master?.connected}:${state.master?.mode}:${state.masterBusy}:${state.buttonHighlightDeviceId}:${state.buttonHighlightUntil}`;
     if (key === state.virtualKey) return;
     ui.virtualButtons.replaceChildren();
     const canPress = Boolean(run && run.status === "active" && !state.busy);
@@ -1539,13 +1544,81 @@
       const action = make("small", "virtual-action-hint", actionHint);
       const metadata = make("span", "virtual-button-meta");
       metadata.append(stateLabel, action);
-      button.append(name, metadata);
+      button.append(name);
+      if (run && event.status !== "pending") button.append(virtualTileResult(run, event));
+      if (event.status === "completed") button.classList.add("is-complete");
+      button.append(metadata);
       button.addEventListener("click", () => identificationMode
         ? identifyPhysicalButton(event, deviceId)
         : pressEvent(run, event));
-      ui.virtualButtons.appendChild(button);
+      const tile = make("div", "virtual-tile");
+      tile.appendChild(button);
+      if (canUndoEventOnTile(run, event)) {
+        tile.classList.add("has-undo");
+        tile.appendChild(tileUndoButton(event));
+      }
+      ui.virtualButtons.appendChild(tile);
     });
     state.virtualKey = key;
+  }
+
+  function canUndoEventOnTile(run, event) {
+    return Boolean(run && !run.isRecorded && ["active", "paused", "finished", "timedOut"].includes(run.status) &&
+      String(event.type || "standard").toLowerCase() === "standard" &&
+      (event.status === "active" || event.status === "completed"));
+  }
+
+  // Undoes only this event's latest press. The first tap arms it ("Undo?") and a second
+  // tap within a few seconds confirms, so a stray click never changes a live run.
+  function tileUndoButton(event) {
+    const armed = state.tileUndoArmedEventId === event.eventId;
+    const stepLabel = event.status === "completed" ? "finish" : "start";
+    const undo = make("button", `virtual-tile-undo${armed ? " is-armed" : ""}`, armed ? "Undo?" : "↶");
+    undo.type = "button";
+    undo.disabled = state.busy;
+    undo.title = armed
+      ? `Tap again to undo the ${stepLabel} of ${event.name}`
+      : `Undo the ${stepLabel} of ${event.name} only`;
+    undo.setAttribute("aria-label", undo.title);
+    undo.addEventListener("click", () => {
+      if (state.tileUndoArmedEventId !== event.eventId) {
+        state.tileUndoArmedEventId = event.eventId;
+        window.clearTimeout(state.tileUndoTimer);
+        state.tileUndoTimer = window.setTimeout(() => {
+          state.tileUndoArmedEventId = null;
+          renderVirtualButtons(state.snapshot?.currentRun || null);
+        }, 3500);
+        renderVirtualButtons(state.snapshot?.currentRun || null);
+        return;
+      }
+      window.clearTimeout(state.tileUndoTimer);
+      state.tileUndoArmedEventId = null;
+      performAction(
+        () => request(`/api/run/events/${encodeURIComponent(event.eventId)}/undo-press`, { method: "POST" }),
+        `${event.name}: ${stepLabel} undone. Other events were not changed.`
+      );
+    });
+    return undo;
+  }
+
+  // Each tile carries its event's result so times and points are readable without
+  // opening the scorecard: points plus start → stop (M:SS remaining) and duration when
+  // finished, a live running timer while in progress.
+  function virtualTileResult(run, event) {
+    const result = make("span", "virtual-tile-result");
+    if (event.status === "completed") {
+      const points = make("span", "virtual-tile-points");
+      points.append(String(displayedScore(run, event)), make("small", "", event.scoreOverride != null ? " pts · manual" : " pts"));
+      result.append(points, make("span", "virtual-tile-times",
+        `${runEventTimestamp(run, event.startElapsedMs)} → ${runEventTimestamp(run, event.finishElapsedMs)} · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`));
+      result.classList.add("is-complete");
+    } else if (event.status === "active" && Number.isFinite(event.startElapsedMs)) {
+      const live = make("span", "virtual-tile-points virtual-tile-live", formatDuration(Math.max(0, currentElapsedMs(run) - event.startElapsedMs)));
+      live.dataset.liveStartMs = String(event.startElapsedMs);
+      result.append(live, make("span", "virtual-tile-times", `Started ${runEventTimestamp(run, event.startElapsedMs)} · running`));
+      result.classList.add("is-running");
+    }
+    return result;
   }
 
   function physicalReadinessKey(event) {
@@ -2059,6 +2132,10 @@
       ui.runTotal.textContent = String(tableTotal(run));
       const activeRows = ui.currentBody.querySelectorAll("tr");
       activeRows.forEach((row) => rowTiming(row, run));
+      const elapsedNow = currentElapsedMs(run);
+      ui.virtualButtons.querySelectorAll("[data-live-start-ms]").forEach((live) => {
+        live.textContent = formatDuration(Math.max(0, elapsedNow - Number(live.dataset.liveStartMs)));
+      });
     }
   }
 
@@ -2245,7 +2322,7 @@
       : (state.snapshot?.history || []).find((item) => item.id === runId);
     const eventResult = run?.events?.find((item) => item.eventId === eventId);
     if (!run || !eventResult) return;
-    if (!window.confirm(`Clear all times, points, and notes for “${eventResult.name}” in ${competitorName(run.competitorId)}’s ${categoryLabel(run.category)} run? This is saved as an audited correction.`)) return;
+    if (!window.confirm(`Reset “${eventResult.name}” in ${competitorName(run.competitorId)}’s ${categoryLabel(run.category)} run? Its times, points (including manual points), and notes are cleared so it can be started again. Other events are not changed. This takes effect immediately and is kept in the run’s audit trail.\n\nTo take back just the last press on this event, use its ↶ on the event button instead.`)) return;
     performAction(
       async () => {
         await request(`/api/runs/${encodeURIComponent(runId)}/events/${encodeURIComponent(eventId)}/clear`, {
@@ -2458,6 +2535,10 @@
     try { ui.hardwarePanel.open = window.localStorage.getItem("gg.hardwarePanelOpen") === "true"; } catch { /* Storage may be unavailable. */ }
     ui.hardwarePanel.addEventListener("toggle", () => {
       try { window.localStorage.setItem("gg.hardwarePanelOpen", String(ui.hardwarePanel.open)); } catch { /* Storage may be unavailable. */ }
+    });
+    try { ui.scorecardPanel.open = window.localStorage.getItem("gg.scorecardPanelOpen") === "true"; } catch { /* Storage may be unavailable. */ }
+    ui.scorecardPanel.addEventListener("toggle", () => {
+      try { window.localStorage.setItem("gg.scorecardPanelOpen", String(ui.scorecardPanel.open)); } catch { /* Storage may be unavailable. */ }
     });
     ui.armPhysical.addEventListener("click", () => performAction(armPhysicalRun, "Run armed · waiting for the physical Start button."));
     ui.start.addEventListener("click", () => performAction(startRun, "Countdown started. Run begins at Go."));
