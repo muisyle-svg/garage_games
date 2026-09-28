@@ -158,6 +158,18 @@ test("blank score draft stays blank while its total uses auto preview; typed poi
   });
 });
 
+test("negative manual points are penalties that subtract, typed or saved", () => {
+  assert.deepEqual(eventScoreDraftView({ scoreTouched: true, scoreValue: "-15", previewScore: 40, persistedScore: 40 }), {
+    inputValue: "-15",
+    totalPoints: -15
+  });
+  assert.deepEqual(eventScoreDraftView({ persistedScore: -20 }), {
+    inputValue: "-20",
+    totalPoints: -20
+  });
+  assert.equal(previewEventScore({ status: "completed", startElapsedMs: 0, finishElapsedMs: 1000, scoreOverride: -5 }, {}), -5);
+});
+
 test("one edited timestamp preserves the untouched millisecond value for cutoff scoring", () => {
   const runLimitSeconds = 300;
   const untouchedFinishMs = 124_999;

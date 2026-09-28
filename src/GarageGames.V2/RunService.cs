@@ -57,6 +57,7 @@ public sealed class RunService
 {
     public const int MaximumRunDurationSeconds = 5_999;
     public const long MaximumPhysicalPressAgeMilliseconds = 10_000;
+    public const int MaximumManualPoints = 1_000_000;
 
     public const string DatabaseClearConfirmationPhrase = "CLEAR ALL DATA";
 
@@ -311,7 +312,7 @@ public sealed class RunService
             // On the live run, presses keep changing the revision; clearing an event is a
             // deliberate reset of that one event, so it applies to the latest state rather
             // than failing on a revision that is seconds old. Saved runs keep the check.
-            if (isCurrent)
+            if (isCurrent || _lastDisplayedRun?.Id == runId)
             {
                 expectedRevision = run.Revision;
             }
@@ -1927,6 +1928,28 @@ public sealed class RunService
             : ranOutOfTime ? RunStatus.TimedOut : RunStatus.Aborted;
     }
 
+    // Saves scorecard edits to any run, live or not. For the run on screen (live, or just
+    // finished or timed out) the edit applies to the latest state: it carries only the
+    // fields the operator changed, and presses or a timeout that land while they type must
+    // not make the save fail. Other saved runs still require the revision they opened.
+    public RunRecord EditRun(string runId, EditRunRequest request)
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            if (_current?.Id == runId)
+            {
+                request.ExpectedRevision = _current.Revision;
+                return EditCurrentRun(request);
+            }
+            if (_lastDisplayedRun?.Id == runId)
+            {
+                request.ExpectedRevision = _lastDisplayedRun.Revision;
+            }
+            return EditHistoricalRun(runId, request);
+        }
+    }
+
     public RunRecord EditHistoricalRun(string runId, EditRunRequest request)
     {
         lock (_gate)
@@ -2446,11 +2469,12 @@ public sealed class RunService
         {
             candidate.BonusResultJson = request.BonusResultJson;
         }
+        // Manual points and the run bonus may be negative (penalties); they subtract from the total.
         if (request.BonusPointsOverride is int bonusPoints)
         {
-            if (bonusPoints < 0)
+            if (bonusPoints is < -MaximumManualPoints or > MaximumManualPoints)
             {
-                throw new CommandException("Bonus points cannot be negative.");
+                throw new CommandException($"The general run bonus must be between -{MaximumManualPoints:N0} and {MaximumManualPoints:N0}.");
             }
             candidate.BonusPointsOverride = bonusPoints;
         }
@@ -2490,9 +2514,9 @@ public sealed class RunService
             }
             if (edit.ScoreOverride is int scoreOverride)
             {
-                if (scoreOverride < 0)
+                if (scoreOverride is < -MaximumManualPoints or > MaximumManualPoints)
                 {
-                    throw new CommandException("Score override cannot be negative.");
+                    throw new CommandException($"Points for '{result.Name}' must be between -{MaximumManualPoints:N0} and {MaximumManualPoints:N0}.");
                 }
                 result.ScoreOverride = scoreOverride;
             }

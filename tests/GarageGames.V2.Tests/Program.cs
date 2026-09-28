@@ -49,6 +49,7 @@ var tests = new (string Name, Action Run)[]
     ("restart lineage and one official result", RestartAndOfficialRule),
     ("an official redo replaces the original only when recorded", OfficialRedoReplacesOnlyWhenRecorded),
     ("per-event undo steps back one event without touching others", TargetedEventUndoLeavesOtherEvents),
+    ("live scorecard edits reach the TV, allow penalties, and survive presses and timeouts", LiveScorecardEditsReachTheTvIncludingPenalties),
     ("timed-out runs can be undone and their recording survives restart", TimedOutRunUndoAndRecordingPersist),
     ("recording an older run from history keeps the on-deck queue", HistoricalRecordKeepsOnDeckQueue),
     ("discarding a replacement attempt keeps the original official result", DiscardedReplacementKeepsOriginalOfficial),
@@ -1808,6 +1809,76 @@ static void RestartAndOfficialRule()
     Assert.Equal(RunStatus.Superseded, h.Store.Load().Runs.Single(r => r.Id == first.Id).Status);
     var secondOfficial = h.Service.AddToQueue(h.CompetitorId, RunCategory.Official);
     Assert.Throws<CommandException>(() => h.Service.Arm(secondOfficial.Id));
+}
+
+static void LiveScorecardEditsReachTheTvIncludingPenalties()
+{
+    var path = NewPath();
+    var edition = MakeMvpEdition(durationSeconds: 60);
+    var clock = new TestClock();
+    var store = new RunStore(path);
+    var service = new RunService(store, edition, clock);
+    var competitor = service.AddCompetitor("Penalty tester");
+    var run = service.ArmCompetitor(competitor.Id, RunCategory.Official, 60);
+    service.CompleteCountdown(service.StartMaster().Id);
+    service.PressEvent(run.Id, "event-01");
+    clock.Advance(TimeSpan.FromSeconds(2));
+    service.PressEvent(run.Id, "event-01");
+    var staleRevision = service.GetOperatorSnapshot().CurrentRun!.Revision;
+    service.PressEvent(run.Id, "event-02"); // A press lands while the operator is typing.
+
+    // Negative points and a negative bonus subtract, and the save applies despite the press.
+    var edited = service.EditRun(run.Id, new EditRunRequest
+    {
+        ExpectedRevision = staleRevision,
+        Reason = "Penalties",
+        BonusPointsOverride = -5,
+        Events = [new EventEditRequest { EventId = "event-01", ScoreOverride = -10 }]
+    });
+    Assert.Equal(-10, edited.Events.Single(e => e.EventId == "event-01").Score);
+    Assert.Equal(EventStatus.Active, edited.Events.Single(e => e.EventId == "event-02").Status); // The press survived.
+    Assert.Equal(-15, service.GetScoreboard().CurrentRun!.AwardedPoints);
+    Assert.Equal(-10, service.GetScoreboard().CurrentRun!.Events.Single(e => e.Name == "Perfect Pour").AwardedPoints);
+    Assert.Throws<CommandException>(() => service.EditRun(run.Id, new EditRunRequest
+    {
+        ExpectedRevision = edited.Revision,
+        Reason = "Too large",
+        Events = [new EventEditRequest { EventId = "event-01", ScoreOverride = -(RunService.MaximumManualPoints + 1) }]
+    }));
+
+    // After a timeout the same scorecard edits still save, then the run records.
+    var beforeTimeout = service.GetOperatorSnapshot().CurrentRun!.Revision;
+    clock.Advance(TimeSpan.FromSeconds(70));
+    Assert.Equal(RunStatus.TimedOut, service.GetScoreboard().CurrentRun!.Status);
+    var afterTimeout = service.EditRun(run.Id, new EditRunRequest
+    {
+        ExpectedRevision = beforeTimeout,
+        Reason = "Saved after time ran out",
+        BonusPointsOverride = 25
+    });
+    Assert.Equal(25, afterTimeout.BonusPointsOverride);
+    Assert.Equal(15, service.GetScoreboard().CurrentRun!.AwardedPoints); // -10 + 25
+    service.RecordHistoricalRun(run.Id);
+    Assert.Equal(15, service.GetScoreboard().Leaderboard.Single().Points);
+
+    // Runs that are no longer on screen keep the stale-revision check.
+    var next = service.ArmCompetitor(competitor.Id, RunCategory.Exhibition, 60);
+    Assert.Throws<CommandException>(() => service.EditRun(run.Id, new EditRunRequest
+    {
+        ExpectedRevision = afterTimeout.Revision - 1,
+        Reason = "Stale history edit",
+        BonusPointsOverride = 0
+    }));
+    service.Abort("Cleanup");
+    store.Dispose();
+
+    var reopenedStore = new RunStore(path);
+    var reopened = new RunService(reopenedStore, edition, new TestClock());
+    var saved = reopened.GetOperatorSnapshot().History.Single(r => r.Id == run.Id);
+    Assert.Equal(-10, saved.Events.Single(e => e.EventId == "event-01").Score);
+    Assert.Equal(15, reopened.GetScoreboard().Leaderboard.Single().Points);
+    reopenedStore.Dispose();
+    Cleanup(path);
 }
 
 static void TargetedEventUndoLeavesOtherEvents()

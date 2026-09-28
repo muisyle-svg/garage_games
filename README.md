@@ -126,7 +126,14 @@ timestamps may be added anywhere within the run limit; the saved elapsed time
 extends through the latest corrected event. Points preview automatically from
 event times using the run's saved edition rules unless manually overridden;
 clearing a points override restores automatic scoring. Run bonus scoring is
-also editable. Each event may override `basePoints`, `minimumPoints`,
+also editable. Manual event points and the run bonus may be negative (a
+penalty) and subtract from the total. Scorecard edits count only once saved:
+until then the page marks them "Unsaved" (on the event tiles, the totals, and a
+notice above the event buttons) because the TV and results don't include them.
+Edits stay editable and savable after the run finishes or times out, and
+**Save edits & record** saves them before recording. Saving applies to the run's
+latest state, so a button press or timeout while you type doesn't reject the
+save; only the fields you changed are written. Each event may override `basePoints`, `minimumPoints`,
 `decayPoints`, `decayEverySeconds`, and `graceSeconds`. Missing values inherit
 the edition's global base, decay amount, and interval, and grace defaults to
 zero. When an event sets `basePoints` without `minimumPoints`, its floor is half

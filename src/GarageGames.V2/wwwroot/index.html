@@ -91,6 +91,11 @@
             <button id="undo-last-event-press" class="button button-undo" type="button" disabled><span aria-hidden="true">↶</span> Undo last press</button>
             <span id="undo-last-event-detail" class="undo-detail" aria-live="polite">No event press to undo.</span>
           </div>
+          <div id="unsaved-edits-bar" class="unsaved-bar" role="status" hidden>
+            <span id="unsaved-edits-message">Unsaved scorecard edits. The TV and results don't include them until you save.</span>
+            <button id="unsaved-edits-save" class="button button-record" type="button">Save edits</button>
+            <button id="unsaved-edits-discard" class="button button-quiet" type="button">Discard</button>
+          </div>
           <div id="virtual-event-buttons" class="virtual-event-grid">
             <p class="empty-state">Start a run to enable the virtual buttons.</p>
           </div>
@@ -102,7 +107,7 @@
             <span class="scorecard-panel-title"><span class="mvp-kicker">Run scorecard</span><strong id="scorecard-heading">Edit times &amp; points</strong></span>
             <span class="scorecard-panel-status"><span id="scorecard-summary-total" class="scorecard-summary-total">0 pts</span><span id="scorecard-save-state" class="save-state">No unsaved edits</span></span>
           </summary>
-          <p class="table-help">Times count down from the run limit. Automatic points follow the scoring rules saved with each run; blank points restore automatic scoring.</p>
+          <p class="table-help">Times count down from the run limit. Automatic points follow the scoring rules saved with each run; blank points restore automatic scoring, and negative points are a penalty.</p>
           <div class="table-scroll">
             <table class="score-table">
               <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>M:SS remaining</small></th><th scope="col">Stop<br><small>M:SS remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
@@ -112,9 +117,10 @@
           </div>
           <div class="scorecard-footer">
             <label class="bonus-points-control" for="current-bonus-points">General run bonus
-              <input id="current-bonus-points" type="number" min="0" step="1" inputmode="numeric" placeholder="0" disabled>
+              <input id="current-bonus-points" type="number" step="1" inputmode="numeric" placeholder="0" disabled>
             </label>
-            <span class="small-note">Blank is zero. Separate from any timed bonus event.</span>
+            <span class="small-note">Blank is zero; negative points are a penalty. Separate from any timed bonus event.</span>
+            <button id="discard-current-edits" class="button button-quiet" type="button" disabled>Discard edits</button>
             <button id="save-current-edits" class="button button-secondary" type="button" disabled>Save scorecard edits</button>
           </div>
         </details>
@@ -242,7 +248,7 @@
           </div>
           <div class="scorecard-footer">
             <label class="bonus-points-control" for="history-bonus-points">General run bonus
-              <input id="history-bonus-points" type="number" min="0" step="1" inputmode="numeric" placeholder="0" disabled>
+              <input id="history-bonus-points" type="number" step="1" inputmode="numeric" placeholder="0" disabled>
             </label>
             <span id="history-save-state" class="small-note">History edits are saved explicitly.</span>
             <button id="delete-history-run" class="button button-discard" type="button" disabled>Delete run</button>

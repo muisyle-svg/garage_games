@@ -60,10 +60,12 @@
     buttonHighlightUntil: 0,
     tileUndoArmedEventId: null,
     tileUndoTimer: null,
-    deletedRunsSignature: ""
+    deletedRunsSignature: "",
+    currentSaveError: ""
   };
 
   const clearDatabasePhrase = "CLEAR ALL DATA";
+  const MAXIMUM_MANUAL_POINTS = 1000000;
   const $ = (id) => document.getElementById(id);
   const scorekeeperTime = window.GarageGamesScorekeeperTime;
   const loadedMasterActions = window.GarageGamesMasterActions || {};
@@ -126,6 +128,11 @@
     hardwarePanelSummary: $("hardware-panel-summary"),
     scorecardPanel: $("scorecard-panel"),
     scorecardSummaryTotal: $("scorecard-summary-total"),
+    unsavedBar: $("unsaved-edits-bar"),
+    unsavedMessage: $("unsaved-edits-message"),
+    unsavedSave: $("unsaved-edits-save"),
+    unsavedDiscard: $("unsaved-edits-discard"),
+    currentDiscard: $("discard-current-edits"),
     finish: $("finish-run-button"),
     record: $("record-run-button"),
     discard: $("discard-run-button"),
@@ -1267,7 +1274,7 @@
     const draft = state.bonusDrafts.get(run.id);
     if (draft?.touched) {
       const value = Number(draft.value);
-      return draft.value !== "" && Number.isFinite(value) && value >= 0 ? value : 0;
+      return draft.value !== "" && Number.isFinite(value) ? value : 0;
     }
     return Number(run.bonusPointsOverride || 0);
   }
@@ -1322,7 +1329,6 @@
   function buildScoreInput(run, event, editable) {
     const input = make("input", "score-input points-input");
     input.type = "number";
-    input.min = "0";
     input.step = "1";
     input.inputMode = "numeric";
     input.setAttribute("aria-label", `${event.name} points`);
@@ -1418,16 +1424,16 @@
   function setSaveStates() {
     const current = state.snapshot?.currentRun;
     const currentDirty = Boolean(current && (hasDrafts(current.id) || hasBonusDraft(current.id)));
-    const currentEditable = Boolean(current && isLiveLock(current));
+    // The scorecard stays editable for the run on screen after it finishes or times out,
+    // so edits typed during the run can always be saved (or discarded).
+    const currentEditable = Boolean(current);
     ui.currentSave.disabled = state.busy || !currentDirty || !currentEditable;
-    ui.currentSaveState.textContent = currentDirty
-      ? (currentEditable ? "Unsaved edits" : "Use the history editor to correct this saved run")
-      : "No unsaved edits";
-    ui.record.disabled = state.busy || !current || current.isRecorded || currentDirty || !["armed", "active", "paused", "finished", "timedOut"].includes(current.status);
+    ui.currentSaveState.textContent = currentDirty ? "Unsaved edits" : "No unsaved edits";
+    ui.record.disabled = state.busy || !current || current.isRecorded || !["armed", "active", "paused", "finished", "timedOut"].includes(current.status);
     ui.record.textContent = current?.isRecorded
       ? "Already recorded"
-      : currentDirty ? "Save edits before recording" : "Record result";
-    ui.record.title = currentDirty ? "Save your scorecard corrections before recording this run." : "";
+      : currentDirty ? "Save edits & record" : "Record result";
+    ui.record.title = currentDirty ? "Saves your scorecard edits first, so the recorded result matches the scorecard." : "";
 
     const selected = (state.snapshot?.history || []).find((run) => run.id === state.selectedHistoryId);
     const historyDirty = selected && (hasDrafts(selected.id) || hasBonusDraft(selected.id));
@@ -1440,11 +1446,11 @@
 
   function renderCurrent() {
     const run = state.snapshot?.currentRun || null;
-    syncBonusInput(ui.currentBonus, run, Boolean(run && isLiveLock(run)));
+    syncBonusInput(ui.currentBonus, run, Boolean(run));
     const key = run ? `${run.id}:${run.revision}:${run.status}` : `no-run:${eventRosterSignature()}`;
     if (key !== state.currentTableKey) {
       const focus = captureFocus();
-      renderScoreTable(run, ui.currentBody, "current", Boolean(run && isLiveLock(run)), currentEditionEvents(run));
+      renderScoreTable(run, ui.currentBody, "current", Boolean(run), currentEditionEvents(run));
       state.currentTableKey = key;
       restoreFocus(focus);
     } else {
@@ -1504,7 +1510,12 @@
             ? "Start the run to enable event presses."
             : "No run is underway. Tap an assigned event tile to flash its physical button; press a physical spoke to highlight its matching tile.";
     ui.virtualNote.textContent = `${note} ${physicalSummary.text}`;
-    const key = `${run ? `${run.id}:${run.revision}:${run.status}:${tableTotal(run)}` : `no-run:${eventRosterSignature()}`}:${state.busy}:${state.tileUndoArmedEventId}:${physicalSignature}:${state.master?.connected}:${state.master?.mode}:${state.masterBusy}:${state.buttonHighlightDeviceId}:${state.buttonHighlightUntil}`;
+    const draftSignature = run
+      ? Array.from(state.drafts.get(run.id)?.entries() || [])
+        .map(([eventId, draft]) => `${eventId}:${Array.from(draft.touched).map((field) => `${field}=${draft[field]}`).join(",")}`)
+        .join("|")
+      : "";
+    const key = `${run ? `${run.id}:${run.revision}:${run.status}:${tableTotal(run)}:${draftSignature}` : `no-run:${eventRosterSignature()}`}:${state.busy}:${state.tileUndoArmedEventId}:${physicalSignature}:${state.master?.connected}:${state.master?.mode}:${state.masterBusy}:${state.buttonHighlightDeviceId}:${state.buttonHighlightUntil}`;
     if (key === state.virtualKey) return;
     ui.virtualButtons.replaceChildren();
     const canPress = Boolean(run && run.status === "active" && !state.busy);
@@ -1554,8 +1565,10 @@
       const metadata = make("span", "virtual-button-meta");
       metadata.append(stateLabel, action);
       button.append(name);
-      if (run && event.status !== "pending") button.append(virtualTileResult(run, event));
+      const unsaved = Boolean(run && state.drafts.get(run.id)?.get(event.eventId)?.touched.size);
+      if (run && (event.status !== "pending" || unsaved)) button.append(virtualTileResult(run, event, unsaved));
       if (event.status === "completed") button.classList.add("is-complete");
+      if (unsaved) button.classList.add("is-unsaved");
       button.append(metadata);
       button.addEventListener("click", () => identificationMode
         ? identifyPhysicalButton(event, deviceId)
@@ -1613,8 +1626,16 @@
   // Each tile carries its event's result so times and points are readable without
   // opening the scorecard: points plus start → stop (M:SS remaining) and duration when
   // finished, a live running timer while in progress.
-  function virtualTileResult(run, event) {
+  function virtualTileResult(run, event, unsaved = false) {
     const result = make("span", "virtual-tile-result");
+    if (unsaved) {
+      // Unsaved edits show here so the operator sees them, clearly marked as not yet counted.
+      const points = make("span", "virtual-tile-points");
+      points.append(String(displayedScore(run, event)), make("small", "", " pts · "), make("small", "virtual-tile-unsaved", "Unsaved"));
+      result.append(points);
+      result.classList.add("is-unsaved");
+      return result;
+    }
     if (event.status === "completed") {
       const points = make("span", "virtual-tile-points");
       points.append(String(displayedScore(run, event)), make("small", "", event.scoreOverride != null ? " pts · manual" : " pts"));
@@ -2188,6 +2209,7 @@
     renderHistory();
     renderLeaderboards();
     setSaveStates();
+    renderUnsavedState();
     renderMasterControls();
     renderSetupControls();
   }
@@ -2241,10 +2263,13 @@
   }
 
   async function recordCurrentRun() {
-    const run = state.snapshot?.currentRun;
+    let run = state.snapshot?.currentRun;
     if (!run) throw new Error("There is no run to record.");
     if (hasDrafts(run.id) || hasBonusDraft(run.id)) {
-      throw new Error("Save your scorecard corrections before recording. The current edits have not been submitted yet.");
+      // Save first so the recorded result is exactly what the scorecard shows.
+      await saveRunDrafts(run);
+      await loadSnapshot(true);
+      if (state.snapshot?.currentRun?.id === run.id) run = state.snapshot.currentRun;
     }
     if (run.status === "timedOut") {
       await request(`/api/runs/${encodeURIComponent(run.id)}/record`, { method: "POST" });
@@ -2453,8 +2478,16 @@
         }
       }
     }
-    if (run) updateTableTotal(input.closest("#current-event-body") ? "current" : "history", run);
+    const isCurrentScorecard = Boolean(input.closest("#current-event-body"));
+    if (run) updateTableTotal(isCurrentScorecard ? "current" : "history", run);
     setSaveStates();
+    if (isCurrentScorecard) afterCurrentDraftChange(run);
+  }
+
+  function afterCurrentDraftChange(run) {
+    state.currentSaveError = "";
+    renderUnsavedState();
+    if (run && state.snapshot?.currentRun?.id === run.id) renderVirtualButtons(run);
   }
 
   function onBonusInput(event) {
@@ -2467,6 +2500,7 @@
       : state.snapshot?.history?.find((item) => item.id === runId);
     if (run) updateTableTotal(input === ui.currentBonus ? "current" : "history", run);
     setSaveStates();
+    if (input === ui.currentBonus) afterCurrentDraftChange(run);
   }
 
   function createEditRequest(run) {
@@ -2492,7 +2526,10 @@
               edit.clearScoreOverride = true;
             } else {
               const score = Number(value);
-              if (!Number.isInteger(score) || score < 0) throw new Error("Points must be a whole number zero or greater, or blank to clear.");
+              if (!Number.isInteger(score) || Math.abs(score) > MAXIMUM_MANUAL_POINTS) {
+                const name = runEvents(run).find((item) => item.eventId === eventId)?.name || "an event";
+                throw new Error(`Points for ${name} must be a whole number (negative for a penalty), or blank for automatic points.`);
+              }
               edit.scoreOverride = score;
             }
           }
@@ -2511,22 +2548,72 @@
         request.clearBonusPointsOverride = true;
       } else {
         const points = Number(bonusDraft.value);
-        if (!Number.isInteger(points) || points < 0) throw new Error("General run bonus must be a whole number zero or greater, or blank for zero.");
+        if (!Number.isInteger(points) || Math.abs(points) > MAXIMUM_MANUAL_POINTS) {
+          throw new Error("General run bonus must be a whole number (negative for a penalty), or blank for zero.");
+        }
         request.bonusPointsOverride = points;
       }
     }
     return request;
   }
 
+  // Saves a run's scorecard drafts through the run's own address, which works whether the
+  // run is live, finished, or timed out (the server applies the edit to its latest state).
+  async function saveRunDrafts(run) {
+    try {
+      const body = createEditRequest(run);
+      await request(`/api/runs/${encodeURIComponent(run.id)}/edit`, { method: "PUT", body: JSON.stringify(body) });
+    } catch (error) {
+      // Keep the reason next to the unsaved-edits notice, not only in the transient alert.
+      state.currentSaveError = error.message || "The scorecard edits could not be saved.";
+      renderUnsavedState();
+      throw error;
+    }
+    state.drafts.delete(run.id);
+    state.bonusDrafts.delete(run.id);
+    state.currentSaveError = "";
+    state.currentTableKey = null;
+    state.virtualKey = null;
+  }
+
   async function saveCurrentEdits() {
     const run = state.snapshot?.currentRun;
     if (!run) return;
-    await performAction(async () => {
-      const body = createEditRequest(run);
-      await request("/api/run/edit", { method: "PUT", body: JSON.stringify(body) });
-      state.drafts.delete(run.id);
-      state.bonusDrafts.delete(run.id);
-    }, "Current scorecard edits saved.");
+    await performAction(() => saveRunDrafts(run), "Scorecard edits saved. The TV and results now include them.");
+  }
+
+  function discardCurrentEdits() {
+    const run = state.snapshot?.currentRun;
+    if (!run || !(hasDrafts(run.id) || hasBonusDraft(run.id))) return;
+    if (!window.confirm("Discard your unsaved scorecard edits for this run? The saved times and points are kept.")) return;
+    state.drafts.delete(run.id);
+    state.bonusDrafts.delete(run.id);
+    state.currentSaveError = "";
+    state.currentTableKey = null;
+    state.virtualKey = null;
+    updateControls();
+    showAlert("Unsaved scorecard edits discarded.", "success");
+  }
+
+  // Unsaved scorecard edits change what this page shows but not the TV or results, so
+  // make that state impossible to miss, even with the scorecard collapsed.
+  function renderUnsavedState() {
+    const run = state.snapshot?.currentRun;
+    const dirty = Boolean(run && (hasDrafts(run.id) || hasBonusDraft(run.id)));
+    ui.unsavedBar.hidden = !dirty;
+    ui.unsavedBar.classList.toggle("has-error", Boolean(dirty && state.currentSaveError));
+    ui.unsavedMessage.textContent = !dirty
+      ? ""
+      : state.currentSaveError
+        ? `Not saved: ${state.currentSaveError}`
+        : "Unsaved scorecard edits. The TV and results don't include them until you save.";
+    ui.unsavedSave.disabled = state.busy;
+    ui.unsavedDiscard.disabled = state.busy;
+    ui.currentDiscard.disabled = state.busy || !dirty;
+    [ui.runTotal, ui.scorecardSummaryTotal].forEach((element) => {
+      element.classList.toggle("is-unsaved", dirty);
+      element.title = dirty ? "Includes unsaved scorecard edits" : "";
+    });
   }
 
   async function saveHistoryEdits() {
@@ -2697,6 +2784,9 @@
       ui.historySearch.focus();
     });
     ui.currentSave.addEventListener("click", saveCurrentEdits);
+    ui.unsavedSave.addEventListener("click", saveCurrentEdits);
+    ui.currentDiscard.addEventListener("click", discardCurrentEdits);
+    ui.unsavedDiscard.addEventListener("click", discardCurrentEdits);
     ui.historySave.addEventListener("click", saveHistoryEdits);
     ui.currentBody.addEventListener("input", onScoreInput);
     ui.historyBody.addEventListener("input", onScoreInput);

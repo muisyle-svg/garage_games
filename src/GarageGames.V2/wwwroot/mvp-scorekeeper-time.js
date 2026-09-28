@@ -90,21 +90,22 @@
     previewScore = 0,
     persistedScore = 0
   } = {}) {
+    // Manual points may be negative (a penalty) and subtract from the total.
     const preview = Number(previewScore);
-    const safePreview = Number.isFinite(preview) && preview >= 0 ? preview : 0;
+    const safePreview = Number.isFinite(preview) ? preview : 0;
     if (scoreTouched) {
       if (scoreValue === "") return { inputValue: "", totalPoints: safePreview };
       const typed = Number(scoreValue);
       return {
         inputValue: String(scoreValue),
-        totalPoints: Number.isFinite(typed) && typed >= 0 ? typed : 0
+        totalPoints: Number.isFinite(typed) ? typed : 0
       };
     }
     if (timingTouched) return { inputValue: String(safePreview), totalPoints: safePreview };
     const persisted = Number(persistedScore ?? 0);
     return {
       inputValue: String(persistedScore ?? 0),
-      totalPoints: Number.isFinite(persisted) && persisted >= 0 ? persisted : 0
+      totalPoints: Number.isFinite(persisted) ? persisted : 0
     };
   }
 

@@ -45,12 +45,22 @@ function makeSaveHarness({ dirty = false, recorded = false } = {}) {
   return { state, ui, hasDrafts, hasBonusDraft, setSaveStates };
 }
 
-test("Record is disabled and explains that current scorecard edits must be saved", () => {
+test("Record stays available with unsaved edits and offers to save them first", () => {
   const harness = makeSaveHarness({ dirty: true });
   harness.setSaveStates();
-  assert.equal(harness.ui.record.disabled, true);
-  assert.equal(harness.ui.record.textContent, "Save edits before recording");
-  assert.match(harness.ui.record.title, /Save your scorecard corrections/);
+  assert.equal(harness.ui.record.disabled, false);
+  assert.equal(harness.ui.record.textContent, "Save edits & record");
+  assert.match(harness.ui.record.title, /Saves your scorecard edits first/);
+  assert.equal(harness.ui.currentSave.disabled, false);
+});
+
+test("a timed-out run's unsaved edits can still be saved and recorded", () => {
+  const harness = makeSaveHarness({ dirty: true });
+  harness.state.snapshot.currentRun.status = "timedOut";
+  harness.setSaveStates();
+  assert.equal(harness.ui.currentSave.disabled, false);
+  assert.equal(harness.ui.record.disabled, false);
+  assert.equal(harness.ui.record.textContent, "Save edits & record");
 });
 
 test("Record is enabled for a clean finished run and remains disabled after recording", () => {
@@ -65,19 +75,41 @@ test("Record is enabled for a clean finished run and remains disabled after reco
   assert.equal(harness.ui.record.textContent, "Already recorded");
 });
 
-test("record action independently rejects drafts without sending a save request", async () => {
-  const run = { id: "current", status: "finished", isRecorded: false };
-  const state = { snapshot: { currentRun: run }, selectPromotedAfterRecord: false };
-  let requestCount = 0;
+test("record action saves unsaved edits first, then records the saved run", async () => {
+  for (const status of ["finished", "timedOut"]) {
+    const run = { id: "current", status, isRecorded: false };
+    const state = { snapshot: { currentRun: run }, selectPromotedAfterRecord: false };
+    const calls = [];
+    const record = vm.runInNewContext(`(${extractFunction("recordCurrentRun", true)})`, {
+      state,
+      hasDrafts: () => true,
+      hasBonusDraft: () => false,
+      saveRunDrafts: async (saved) => { calls.push(`save ${saved.id}`); },
+      loadSnapshot: async () => { calls.push("reload"); },
+      request: async (path) => { calls.push(`record ${path}`); }
+    });
+
+    await record();
+    const recordPath = status === "timedOut" ? "/api/runs/current/record" : "/api/run/record";
+    assert.deepEqual(calls, ["save current", "reload", `record ${recordPath}`]);
+    assert.equal(state.selectPromotedAfterRecord, true);
+  }
+});
+
+test("a failed save stops recording so unsaved edits are never silently dropped", async () => {
+  const run = { id: "current", status: "timedOut", isRecorded: false };
+  const calls = [];
   const record = vm.runInNewContext(`(${extractFunction("recordCurrentRun", true)})`, {
-    state,
+    state: { snapshot: { currentRun: run } },
     hasDrafts: () => true,
     hasBonusDraft: () => false,
-    request: async () => { requestCount++; }
+    saveRunDrafts: async () => { throw new Error("Points for Perfect Pour must be a whole number"); },
+    loadSnapshot: async () => { calls.push("reload"); },
+    request: async (path) => { calls.push(`record ${path}`); }
   });
 
-  await assert.rejects(record(), /Save your scorecard corrections before recording/);
-  assert.equal(requestCount, 0);
+  await assert.rejects(record(), /Points for Perfect Pour/);
+  assert.deepEqual(calls, []);
 });
 
 function makeLoadHarness({ response, render }) {

@@ -208,6 +208,15 @@ select:disabled, input:disabled { opacity: .58; }
 .undo-detail { color: var(--muted); font-size: .7rem; }
 .button-undo:not(:disabled) + .undo-detail { color: var(--ink); }
 
+/* Unsaved scorecard edits: shown on this page but not yet counted on the TV or in results. */
+.unsaved-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem .75rem; margin: 0 .95rem .9rem; padding: .55rem .7rem; border: 1px solid rgba(244, 189, 96, .6); border-radius: 10px; background: rgba(244, 189, 96, .12); color: #f5d69c; font-size: .74rem; font-weight: 750; }
+.unsaved-bar span { flex: 1 1 260px; }
+.unsaved-bar.has-error { border-color: rgba(240, 135, 121, .7); background: rgba(240, 135, 121, .12); color: #ffb8ae; }
+.summary-total strong.is-unsaved, .scorecard-summary-total.is-unsaved { color: var(--amber); }
+.summary-total strong.is-unsaved::after, .scorecard-summary-total.is-unsaved::after { content: " (unsaved)"; font-size: .55em; font-weight: 800; }
+.virtual-button.is-unsaved { border-style: dashed; border-color: rgba(244, 189, 96, .75) !important; }
+.virtual-tile-unsaved { color: var(--amber) !important; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; }
+
 /* Hardware tools collapse under the scorecard; the summary line stays visible. */
 .hardware-panel > summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem 1rem; padding: .8rem .95rem; cursor: pointer; list-style: none; }
 .hardware-panel > summary::-webkit-details-marker { display: none; }

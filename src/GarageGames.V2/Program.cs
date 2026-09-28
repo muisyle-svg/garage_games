@@ -311,8 +311,13 @@ app.MapPost("/api/run/undo", async (UndoRequest request, RunService runs, Physic
 });
 app.MapPost("/api/runs/{runId}/restart", (string runId, ActionReasonRequest request, RunService runs) =>
     Results.Ok(runs.Restart(runId, request.Reason)));
-app.MapPut("/api/runs/{runId}/edit", (string runId, EditRunRequest request, RunService runs) =>
-    Results.Ok(runs.EditHistoricalRun(runId, request)));
+app.MapPut("/api/runs/{runId}/edit", async (string runId, EditRunRequest request, RunService runs,
+    PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.EditRun(runId, request);
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
 app.MapPost("/api/runs/{runId}/record", (string runId, RunService runs) =>
     Results.Ok(runs.RecordHistoricalRun(runId)));
 app.MapPost("/api/runs/{runId}/delete", async (string runId, DeleteRunRequest request, RunService runs,
