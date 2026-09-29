@@ -425,6 +425,19 @@ select:disabled, input:disabled { opacity: .58; }
 .setup-device-chip { min-height: 32px; padding: .4rem .58rem; border: 1px solid rgba(157, 198, 236, .25); border-radius: 8px; background: rgba(157, 198, 236, .075); color: var(--blue); cursor: pointer; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .66rem; font-weight: 800; }
 .setup-device-chip:hover:not(:disabled) { border-color: rgba(157, 198, 236, .65); background: rgba(157, 198, 236, .14); }
 .setup-device-chip:disabled { cursor: not-allowed; opacity: .55; }
+/* A device chip with its Flash button; lights up when that physical button is pressed. */
+.setup-device-group { display: inline-flex; align-items: stretch; border-radius: 9px; }
+.setup-device-group .setup-device-chip { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.setup-device-flash { min-height: 32px; padding: .3rem .5rem; border: 1px solid rgba(244, 189, 96, .4); border-left: 0; border-radius: 0 8px 8px 0; background: rgba(244, 189, 96, .08); color: var(--amber); cursor: pointer; font-size: .62rem; font-weight: 850; }
+.setup-device-flash:hover:not(:disabled) { background: rgba(244, 189, 96, .18); }
+.setup-device-flash:disabled { cursor: not-allowed; opacity: .45; }
+.setup-device-group.is-button-pressed, .setup-event-row.is-button-pressed { animation: setup-button-pressed .45s ease-in-out 8 alternate; }
+.setup-device-group.is-button-pressed .setup-device-chip { border-color: #cf9dff; background: rgba(173, 128, 255, .3); color: #f1e4ff; opacity: 1; }
+.setup-event-row.is-button-pressed { border-color: #cf9dff; }
+@keyframes setup-button-pressed { to { box-shadow: 0 0 0 3px rgba(173, 128, 255, .55), 0 0 18px rgba(173, 128, 255, .45); } }
+@media (prefers-reduced-motion: reduce) { .setup-device-group.is-button-pressed, .setup-event-row.is-button-pressed { animation: none; box-shadow: 0 0 0 3px rgba(173, 128, 255, .55); } }
+.setup-last-pressed { margin: .15rem 0 .5rem; color: var(--muted); font-size: .7rem; font-weight: 750; }
+.setup-event-identify { flex: 0 0 auto; }
 .setup-list-heading { padding: 0 .95rem .55rem; }
 .setup-list-heading > div { display: grid; gap: .16rem; }
 .setup-list-heading .mvp-kicker { margin: 0; }
@@ -448,8 +461,14 @@ select:disabled, input:disabled { opacity: .58; }
 .setup-event-keypad-help { margin: 0; color: var(--muted); font-size: .6rem; line-height: 1.4; }
 .setup-event-keypad-help.is-error { color: #f07a71; font-weight: 800; }
 .setup-event-remove { min-height: 34px; padding: .4rem .55rem; font-size: .62rem; }
-.setup-event-device-row { display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(150px, .6fr); align-items: end; gap: .4rem; margin-top: .48rem; }
-.setup-event-clear, .setup-event-check { min-height: 34px; padding: .4rem .55rem; font-size: .62rem; }
+.setup-event-device-row { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto auto minmax(150px, .6fr); align-items: end; gap: .4rem; margin-top: .48rem; }
+.setup-event-clear, .setup-event-check, .setup-event-identify, .setup-event-assign { min-height: 34px; padding: .4rem .55rem; font-size: .62rem; }
+/* An event waiting for its button: the next press (or MAC clicked) is assigned to it. */
+.setup-event-row.is-assigning { border-color: var(--green); animation: setup-assigning 1s ease-in-out infinite alternate; }
+.setup-event-row.is-assigning .setup-event-assign { background: var(--amber); color: #302311; }
+.setup-event-assign { min-width: 7.4rem; white-space: nowrap; }
+@keyframes setup-assigning { to { box-shadow: 0 0 0 3px rgba(104, 214, 164, .45); } }
+@media (prefers-reduced-motion: reduce) { .setup-event-row.is-assigning { animation: none; box-shadow: 0 0 0 3px rgba(104, 214, 164, .45); } }
 .setup-event-readiness { display: flex; min-height: 34px; align-items: center; justify-content: space-between; gap: .35rem; }
 .setup-readiness { display: inline-flex; min-height: 24px; align-items: center; gap: .32rem; padding: .24rem .45rem; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: .58rem; font-weight: 800; white-space: nowrap; }
 .setup-event-readiness { flex-wrap: wrap; justify-content: flex-start; }
@@ -558,7 +577,8 @@ select:disabled, input:disabled { opacity: .58; }
   .setup-event-top { grid-template-columns: auto minmax(0, 1fr) auto; }
   .setup-event-kind { grid-column: 2; grid-row: 2; }
   .setup-event-remove { grid-column: 3; grid-row: 2; }
-  .setup-event-device-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .setup-event-device-row { grid-template-columns: repeat(3, auto); justify-content: start; }
+  .setup-event-assignment { grid-column: 1 / -1; }
   .setup-event-keypad-row { grid-template-columns: 1fr; }
   .setup-event-scoring-row { grid-template-columns: repeat(auto-fit, minmax(min(100%, 118px), 1fr)); max-width: 100%; }
   .setup-event-readiness { grid-column: 1 / -1; }

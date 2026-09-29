@@ -169,6 +169,16 @@ the effective base. `GET /api/setup` and the `PUT` response include `scoring`
 with the actual edition-wide defaults. For compatibility, `scoring` is optional
 in a PUT request and any submitted value is ignored; only per-event fields are
 editable through setup.
+
+To match physical buttons to MAC addresses, connect the master (Garage idle
+mode, no run underway) and press a button: its MAC is added to Setup's
+**Discovered hardware** list (newest first, no scan needed) and lights up there,
+along with any event already using it, and "Last button pressed" names it. The
+quickest way to assign: click **Assign** on an event, then press that event's
+physical button (or click a MAC in the list); it is assigned to that event, moving
+off any other event that had it. Click **Assign** again or press Escape to cancel,
+and **Save setup** to keep the assignments. Going the other way, **Flash** beside
+a MAC (in the list or on an event row) blinks that physical button.
 The active setup is stored transactionally in SQLite metadata; a database
 backup is created before a changed setup is saved. Setup is locked while a run
 is in progress or waiting to be recorded. Each run keeps its own edition
@@ -429,10 +439,12 @@ the bonus round.
 ## Keypad events
 
 Keypad messages and their codes come from `config/keypad-answers.csv`, a grid
-laid out like the keypad: the header row holds column labels (`1`-`16`), the
-first column holds row labels (`A`-`D`), and each cell's text is a message whose
+laid out like the keypad: the header row holds column labels (`1`, `2`, …), the
+first column holds row labels (`A`, `B`, …), and each cell's text is a message whose
 code is its row letter then column number (`rocket pepper 1819` in row A,
-column 2 answers `A2`). Every message in the row labelled `##` answers `##`.
+column 2 answers `A2`). The number of rows and columns is whatever the file has;
+add or remove either and restart the app. Labels must be typable on the keypad
+(0-9, A-D, #). Every message in the row labelled `##` answers `##`.
 Blank rows and cells are ignored; each message must appear only once. Edit the
 file (for example in Excel, saved as CSV) and restart the app; Setup shows how
 many messages loaded or what is wrong with the file. Each run keeps a copy of

@@ -58,6 +58,10 @@
     latestEventPressMessageId: null,
     buttonHighlightDeviceId: null,
     buttonHighlightUntil: 0,
+    // Buttons pressed for identification this session (newest first), shown in Setup's
+    // device list even before a scan, and the last one pressed.
+    setupPressedDevices: [],
+    setupLastPressed: null,
     tileUndoArmedEventId: null,
     tileUndoTimer: null,
     deletedRunsSignature: "",
@@ -199,6 +203,7 @@
     setupScanSummary: $("setup-scan-summary"),
     setupSelectedEventLabel: $("setup-selected-event-label"),
     setupDiscoveredDevices: $("setup-discovered-devices"),
+    setupLastPressed: $("setup-last-pressed"),
     setupEventCount: $("setup-event-count"),
     setupAddEvent: $("setup-add-event"),
     setupValidation: $("setup-validation"),
@@ -372,6 +377,7 @@
     ui.masterDisconnect.disabled = state.busy || state.masterBusy || !master?.connected;
     ui.masterRefresh.disabled = state.busy || state.masterBusy || state.masterLoading;
     renderHardwarePanelSummary();
+    renderSetupIdentifyButtons();
   }
 
   async function loadMaster(silent = false) {
@@ -379,6 +385,9 @@
     state.masterLoading = true;
     try {
       const master = await request("/api/master");
+      // A press from before this page loaded isn't news; only later ones light up Setup.
+      const firstLoad = !state.masterLoadedOnce;
+      state.masterLoadedOnce = true;
       if (master.lastTestAt && master.lastTestAt !== state.lastIdentifyTestAt) {
         state.lastIdentifyTestAt = master.lastTestAt;
         state.buttonHighlightDeviceId = String(master.lastTestDeviceId || "").toUpperCase();
@@ -388,6 +397,8 @@
             document.querySelectorAll(".virtual-button.is-physical-press").forEach((button) => button.classList.remove("is-physical-press"));
           }
         }, 1450);
+        // Setup lists and lights up the pressed button's MAC so it can be matched to an event.
+        if (!firstLoad) noteSetupButtonPress(state.buttonHighlightDeviceId);
       }
       state.master = master;
       state.masterError = "";
@@ -543,6 +554,7 @@
       const action = button.dataset.setupAction;
       button.disabled = busy || action === "check" && (state.setupScanLoading || state.setupDirty);
     });
+    renderSetupIdentifyButtons();
     if (state.setupScanLoading) {
       ui.setupScanSummary.textContent = "Scanning physical devices… availability remains unverified until the scan completes.";
     }
@@ -567,34 +579,165 @@
       : "Select an event to assign a device.";
   }
 
+  function setupAssignedOwners() {
+    const owners = new Map();
+    (state.setupDraft?.events || []).forEach((event) => {
+      const mac = setupTools.hardwareId(event.assignmentValue);
+      if (mac) owners.set(mac, event);
+    });
+    return owners;
+  }
+
   function renderSetupDiscovery() {
     ui.setupDiscoveredDevices.replaceChildren();
     const scan = state.setupScan;
-    if (!scan?.connected || !scan.completed || !scan.detectedDeviceIds.length) {
+    const scanned = scan?.connected && scan.completed ? scan.detectedDeviceIds : [];
+    // Buttons pressed for identification are listed too, newest first, even without a scan.
+    const devices = [...new Set([...state.setupPressedDevices, ...scanned])];
+    if (!devices.length) {
       ui.setupDiscoveredDevices.appendChild(make("span", "small-note", scan?.connected && scan?.completed
-        ? "No hardware IDs were discovered by the last completed scan."
-        : "No completed scan results."));
+        ? "No hardware IDs were discovered by the last completed scan. Press a button to add it here."
+        : "No completed scan results. Press a button to add it here."));
+      renderSetupLastPressed();
       return;
     }
 
     const selectedEventId = state.setupSelectedEventId;
-    const assignedOwners = new Map();
-    state.setupDraft.events.forEach((event) => {
-      const mac = setupTools.hardwareId(event.assignmentValue);
-      if (mac) assignedOwners.set(mac, event);
-    });
-    scan.detectedDeviceIds.forEach((mac) => {
+    const assignedOwners = setupAssignedOwners();
+    devices.forEach((mac) => {
       const owner = assignedOwners.get(mac);
+      const group = make("span", "setup-device-group");
+      group.dataset.setupDeviceGroup = mac;
       const button = make("button", "setup-device-chip", owner ? `${mac} · ${owner.name}` : mac);
       button.type = "button";
       button.dataset.setupDevice = mac;
-      button.disabled = state.setupSaving || state.setupScanLoading || !selectedEventId || Boolean(owner && owner.eventId !== selectedEventId);
+      // While an event waits for its button, any MAC can be clicked (one owned elsewhere moves).
+      button.disabled = state.setupSaving || state.setupScanLoading || (!state.setupAssignEventId &&
+        (!selectedEventId || Boolean(owner && owner.eventId !== selectedEventId)));
       button.setAttribute("aria-label", owner && owner.eventId === selectedEventId
         ? `${mac} is assigned to ${owner.name}`
         : owner ? `${mac} is already assigned to ${owner.name}` : `Assign ${mac} to selected event`);
       if (owner?.eventId === selectedEventId) button.setAttribute("aria-pressed", "true");
-      ui.setupDiscoveredDevices.appendChild(button);
+      const flash = make("button", "setup-device-flash", "Flash");
+      flash.type = "button";
+      flash.dataset.setupIdentify = mac;
+      flash.title = `Blink the physical button ${mac}`;
+      flash.setAttribute("aria-label", `Blink the physical button ${mac} so you can find it`);
+      group.append(button, flash);
+      ui.setupDiscoveredDevices.appendChild(group);
     });
+    applySetupPressHighlight();
+    renderSetupLastPressed();
+  }
+
+  // A physical button was pressed with no run underway: list it in Setup and light up its MAC
+  // (and any event already using it) for a few seconds.
+  const SETUP_PRESS_HIGHLIGHT_MS = 4000;
+  function noteSetupButtonPress(mac) {
+    if (!mac) return;
+    state.setupPressedDevices = [mac, ...state.setupPressedDevices.filter((item) => item !== mac)].slice(0, 32);
+    state.setupLastPressed = { mac, at: Date.now() };
+    state.setupHighlightUntil = Date.now() + SETUP_PRESS_HIGHLIGHT_MS;
+    if (state.setupDraft && state.setupAssignEventId && setupEvent(state.setupAssignEventId)) {
+      // An event is waiting for its button: this is it.
+      assignSetupDevice(state.setupAssignEventId, mac);
+    } else if (state.setupDraft) {
+      renderSetupDiscovery();
+    }
+    window.setTimeout(applySetupPressHighlight, SETUP_PRESS_HIGHLIGHT_MS + 50);
+  }
+
+  // Puts a MAC on an event. A MAC can belong to only one event, so it moves off any other.
+  function assignSetupDevice(eventId, mac) {
+    const target = setupEvent(eventId);
+    if (!target || !mac || state.setupSaving) return;
+    const previous = (state.setupDraft.events || []).find((item) =>
+      item.eventId !== eventId && setupTools.hardwareId(item.assignmentValue) === mac);
+    const setInput = (item) => {
+      const row = Array.from(ui.setupEventList.querySelectorAll(".setup-event-row")).find((element) => element.dataset.eventId === item.eventId);
+      const input = row?.querySelector('input[data-setup-field="assignment"]');
+      if (input) input.value = item.assignmentValue;
+    };
+    if (previous) {
+      previous.assignmentValue = "";
+      setInput(previous);
+    }
+    target.assignmentValue = mac;
+    setInput(target);
+    state.setupAssignEventId = null;
+    state.setupSelectedEventId = eventId;
+    state.setupHighlightUntil = Date.now() + SETUP_PRESS_HIGHLIGHT_MS;
+    state.setupLastPressed = { mac, at: Date.now() };
+    renderSetupSelection();
+    markSetupChanged();
+    renderSetupAssignState();
+    applySetupPressHighlight();
+    showAlert(`${mac} assigned to ${target.name}${previous ? ` (moved from ${previous.name})` : ""}. Save setup to keep it.`, "success");
+  }
+
+  function renderSetupAssignState() {
+    const waitingId = state.setupAssignEventId && setupEvent(state.setupAssignEventId) ? state.setupAssignEventId : null;
+    if (!waitingId) state.setupAssignEventId = null;
+    ui.setupEventList.querySelectorAll(".setup-event-row").forEach((row) => {
+      const waiting = row.dataset.eventId === waitingId;
+      row.classList.toggle("is-assigning", waiting);
+      const button = row.querySelector('[data-setup-action="assign-next"]');
+      if (!button) return;
+      button.textContent = waiting ? "Press a button…" : "Assign";
+      button.setAttribute("aria-pressed", String(waiting));
+      button.title = waiting
+        ? "Press the physical button for this event (or click its MAC in Discovered hardware). Click again to cancel."
+        : "Assign the next physical button pressed (or MAC clicked) to this event";
+    });
+  }
+
+  function applySetupPressHighlight() {
+    const mac = Date.now() < (state.setupHighlightUntil || 0) ? state.setupLastPressed?.mac : null;
+    ui.setupDiscoveredDevices.querySelectorAll("[data-setup-device-group]").forEach((group) => {
+      group.classList.toggle("is-button-pressed", group.dataset.setupDeviceGroup === mac);
+    });
+    ui.setupEventList.querySelectorAll(".setup-event-row").forEach((row) => {
+      const event = setupEvent(row.dataset.eventId);
+      row.classList.toggle("is-button-pressed", Boolean(mac && event && setupTools.hardwareId(event.assignmentValue) === mac));
+    });
+    renderSetupIdentifyButtons();
+  }
+
+  function renderSetupLastPressed() {
+    if (!ui.setupLastPressed) return;
+    const pressed = state.setupLastPressed;
+    if (!pressed) {
+      ui.setupLastPressed.textContent = "Press a physical button (with no run underway) to light up its MAC here, or use Flash to blink a button.";
+      return;
+    }
+    const owner = setupAssignedOwners().get(pressed.mac);
+    ui.setupLastPressed.textContent = `Last button pressed: ${pressed.mac} · ${owner ? `assigned to ${owner.name}` : "not assigned to an event yet"} (${new Date(pressed.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}).`;
+  }
+
+  // Flash buttons work only with the master connected in Garage idle mode and no run underway.
+  function renderSetupIdentifyButtons() {
+    // Matches the app's rule: not while a run is armed, counting down, running, or paused.
+    const underway = ["armed", "countdown", "active", "paused"].includes(state.snapshot?.currentRun?.status);
+    const ready = Boolean(state.master?.connected && state.master?.mode === "IDLE" && !state.masterBusy && !underway);
+    const reason = !state.master?.connected ? "Connect the master to blink buttons"
+      : state.master?.mode !== "IDLE" ? "The master must be in Garage (IDLE) mode"
+        : underway ? "Not while a run is underway" : "";
+    ui.setupDiscoveredDevices.querySelectorAll("[data-setup-identify]").forEach((button) => {
+      button.disabled = !ready;
+      if (reason) button.title = reason;
+    });
+    ui.setupEventList.querySelectorAll('[data-setup-action="identify"]').forEach((button) => {
+      const event = setupEvent(button.dataset.setupEventId);
+      const mac = setupTools.hardwareId(event?.assignmentValue || "");
+      button.disabled = !ready || !mac;
+      button.title = reason || (mac ? `Blink the physical button ${mac}` : "Enter a MAC to blink its button");
+    });
+  }
+
+  async function identifySetupDevice(mac) {
+    if (!mac || state.masterBusy) return;
+    const owner = setupAssignedOwners().get(mac);
+    await identifyPhysicalButton({ name: owner ? owner.name : "this button" }, mac);
   }
 
   function renderSetupReadiness() {
@@ -762,6 +905,17 @@
       unassign.dataset.setupAction = "unassign";
       unassign.dataset.setupEventId = event.eventId;
       unassign.setAttribute("aria-label", `Unassign physical hardware for ${event.name}; keep its virtual event button`);
+      // Assign: the next button pressed (physical) or MAC clicked in the list goes to this event.
+      const assignNext = make("button", "button button-primary setup-event-assign", "Assign");
+      assignNext.type = "button";
+      assignNext.dataset.setupAction = "assign-next";
+      assignNext.dataset.setupEventId = event.eventId;
+      assignNext.setAttribute("aria-label", `Assign the next button pressed to ${event.name}`);
+      const identify = make("button", "button button-secondary setup-event-identify", "Flash");
+      identify.type = "button";
+      identify.dataset.setupAction = "identify";
+      identify.dataset.setupEventId = event.eventId;
+      identify.setAttribute("aria-label", `Blink the physical button assigned to ${event.name}`);
 
       const readiness = make("div", "setup-event-readiness");
       const readinessBadge = make("span", "setup-readiness", "Unverified");
@@ -775,7 +929,7 @@
       const checkedLabel = make("small", "setup-readiness-checked", "No completed scan yet");
       checkedLabel.dataset.setupReadinessChecked = "true";
       readiness.appendChild(checkedLabel);
-      deviceRow.append(assignmentLabel, unassign, readiness);
+      deviceRow.append(assignmentLabel, assignNext, unassign, identify, readiness);
 
       const internalId = make("p", "setup-event-id", `Event ID · ${event.eventId}`);
       row.append(top, scoring, deviceRow);
@@ -786,6 +940,8 @@
     renderSetupSelection();
     renderSetupReadiness();
     renderSetupPreview();
+    applySetupPressHighlight();
+    renderSetupAssignState();
   }
 
   function setupCheckedAt() {
@@ -905,7 +1061,17 @@
   }
 
   function onSetupClick(event) {
+    const identifyButton = event.target.closest("button[data-setup-identify]");
+    if (identifyButton) {
+      if (!identifyButton.disabled) void identifySetupDevice(identifyButton.dataset.setupIdentify);
+      return;
+    }
     const deviceButton = event.target.closest("button[data-setup-device]");
+    if (deviceButton && state.setupAssignEventId && setupEvent(state.setupAssignEventId)) {
+      // An event waiting for its button takes the MAC clicked in the list.
+      assignSetupDevice(state.setupAssignEventId, deviceButton.dataset.setupDevice);
+      return;
+    }
     if (deviceButton) {
       const target = setupEvent(state.setupSelectedEventId);
       if (!target || deviceButton.disabled) return;
@@ -940,6 +1106,14 @@
       renderSetupDiscovery();
     } else if (action === "check") {
       void runSetupScan(eventId);
+    } else if (action === "assign-next" && target) {
+      // Toggle: waiting for this event's button, or cancel.
+      state.setupAssignEventId = state.setupAssignEventId === eventId ? null : eventId;
+      renderSetupAssignState();
+      renderSetupDiscovery();
+    } else if (action === "identify" && target) {
+      const mac = setupTools.hardwareId(target.assignmentValue || "");
+      if (mac) void identifyPhysicalButton(target, mac);
     }
   }
 
@@ -3112,6 +3286,13 @@
     });
     ui.setupEventList.addEventListener("click", onSetupClick);
     ui.setupDiscoveredDevices.addEventListener("click", onSetupClick);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && state.setupAssignEventId) {
+        state.setupAssignEventId = null;
+        renderSetupAssignState();
+        renderSetupDiscovery();
+      }
+    });
     ui.setupScanAll.addEventListener("click", () => runSetupScan());
     ui.setupSave.addEventListener("click", saveSetup);
     ui.setupSaveBottom.addEventListener("click", saveSetup);
@@ -3330,7 +3511,15 @@
   void loadSetup();
   void countdownCoordinator.poll();
   window.setInterval(() => loadSnapshot(true), 2000);
-  window.setInterval(() => loadMaster(true), 2000);
+  // While Setup is open the master is checked twice a second, so a pressed button's MAC
+  // lights up promptly; elsewhere every two seconds.
+  (function scheduleMasterPoll() {
+    const setupOpen = (state.activeTab ?? 0) === ui.tabs.indexOf($("tab-setup"));
+    window.setTimeout(() => void loadMaster(true).finally(() => {
+      if (setupOpen) renderMasterControls();
+      scheduleMasterPoll();
+    }), setupOpen ? 500 : 2000);
+  })();
   // The master reports physical START immediately; short local polling keeps the
   // browser cue aligned with that hardware countdown instead of adding 250ms skew.
   // The countdown is checked every 50 ms only while a run is armed or counting down (the app
