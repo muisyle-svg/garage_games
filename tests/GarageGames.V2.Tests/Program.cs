@@ -2540,7 +2540,8 @@ static void KeypadEventUndo()
 
 static void KeypadAnswerCsv()
 {
-    // The shipped answer file: rows A-D by columns 1-16, plus a "##" row.
+    // The shipped answer file loads, and every message's code is its row label plus its column
+    // label, whatever size the grid is (read here straight from the file, not assumed).
     var shipped = KeypadChallengeSet.LoadOrReportError(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
         "..", "..", "..", "..", "..", "config", "keypad-answers.csv")));
     if (!File.Exists(shipped.Source))
@@ -2548,14 +2549,34 @@ static void KeypadAnswerCsv()
         shipped = KeypadChallengeSet.LoadOrReportError(Path.Combine(AppContext.BaseDirectory, "config", "keypad-answers.csv"));
     }
     Assert.Equal<string?>(null, shipped.Error);
-    Assert.Equal(66, shipped.Challenges.Count);
-    string AnswerFor(string prompt) => shipped.Challenges.Single(c => string.Equals(c.Prompt, prompt, StringComparison.OrdinalIgnoreCase)).Answer;
-    Assert.Equal("A2", AnswerFor("Rocket Pepper 1819"));
-    Assert.Equal("A1", AnswerFor("maple piano 1453"));
-    Assert.Equal("B16", AnswerFor("willow amber 8331"));
-    Assert.Equal("D16", AnswerFor("crystal ember 4734"));
-    Assert.Equal("##", AnswerFor("wall label 9202"));
-    Assert.Equal("##", AnswerFor("zion bark 1809"));
+    var grid = File.ReadAllLines(shipped.Source!).Select(line => line.Split(',')).ToList();
+    Assert.True(grid.All(cells => cells.All(cell => !cell.Contains('"'))), "the shipped grid has no quoted cells");
+    var expectedCodes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var cells in grid.Skip(1))
+    {
+        var rowLabel = cells[0].Trim().ToUpperInvariant();
+        for (var column = 1; column < cells.Length && rowLabel.Length > 0; column++)
+        {
+            var message = cells[column].Trim();
+            if (message.Length == 0) continue;
+            expectedCodes[message] = rowLabel == "##" ? "##" : rowLabel + grid[0][column].Trim().ToUpperInvariant();
+        }
+    }
+    Assert.True(expectedCodes.Count > 0);
+    Assert.Equal(expectedCodes.Count, shipped.Challenges.Count);
+    foreach (var challenge in shipped.Challenges)
+    {
+        Assert.Equal(expectedCodes[challenge.Prompt], challenge.Answer);
+    }
+    Assert.Equal("A2", shipped.Challenges.Single(c => c.Prompt == "rocket pepper 1819").Answer);
+
+    // Other grid sizes: nothing assumes four rows or sixteen columns.
+    var small = KeypadChallengeCsv.Parse(",1,2,3\nA,a1,a2,a3\nB,b1,,b3\n");
+    Assert.Equal(5, small.Count);
+    Assert.Equal("B3", small.Single(c => c.Prompt == "b3").Answer);
+    var wide = KeypadChallengeCsv.Parse("," + string.Join(",", Enumerable.Range(1, 20)) + "\nC," + string.Join(",", Enumerable.Range(1, 20).Select(i => $"c{i}")) + "\n");
+    Assert.Equal(20, wide.Count);
+    Assert.Equal("C20", wide.Single(c => c.Prompt == "c20").Answer);
 
     var quoted = KeypadChallengeCsv.Parse(",1,2\r\nA,\"comma, here\",\"say \"\"hi\"\"\"\r\n,,\r\n##,any\r\n");
     Assert.Equal("A1", quoted.Single(c => c.Prompt == "comma, here").Answer);

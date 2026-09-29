@@ -36,10 +36,11 @@ public sealed record KeypadChallengeSet(IReadOnlyList<KeypadChallengeDefinition>
     }
 }
 
-// The keypad answer grid: the header row holds column labels (1-16), the first column holds
-// row labels (A-D), and each cell's text is a message whose code is its row label then its
-// column label ("rocket pepper 1819" in row A, column 2 answers A2). A row labelled "##"
-// answers "##" for every message in it. Blank rows and cells are skipped.
+// The keypad answer grid: the header row holds the column labels and the first column holds
+// the row labels, as many of each as the file has (nothing assumes a size), and each cell's
+// text is a message whose code is its row label then its column label ("rocket pepper 1819"
+// in row A, column 2 answers A2). A row labelled "##" answers "##" for every message in it.
+// Blank rows and cells are skipped. Codes must be typable on the keypad.
 public static class KeypadChallengeCsv
 {
     public const string AnyColumnRowLabel = "##";
