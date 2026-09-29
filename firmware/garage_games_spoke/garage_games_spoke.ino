@@ -7,9 +7,22 @@
   Hardware:
     Button : D2 (active LOW)
     RGB LED: D3/D4/D5 (common anode, active LOW)
+    Keypad : optional 4x4 keypad on an MCP23017 I2C expander (SDA D7, SCL D8,
+             3V3 power; rows GPA0-GPA3, columns GPA4-GPA7)
 
   Flash this same sketch to all 13 spokes. The master identifies each spoke by
   its ESP-NOW station MAC address, so no per-device ID is needed.
+
+  KEYPAD (special button): at boot the spoke looks for an MCP23017 at
+  0x20-0x27. Spokes without one behave exactly as before. With a keypad, the
+  button still starts its event (and plays the Speed game) as usual. While the
+  event is running, each key is reported to the scorekeeper so the TV can show
+  it, and '*' submits the typed code. The scorekeeper checks the code for the
+  event's keypad type: a correct code finishes the event (solid green), and a
+  wrong one flashes the LED red three times and clears the entry for a retry.
+  When an event needs several codes, each right one but the last flashes green
+  and the TV shows the next message.
+  Keys are ignored whenever the event is not running.
 
   ESP-NOW is used on a fixed channel with no Wi-Fi association or network.
   A fully deep-sleeping ESP32 cannot hear an arbitrary wireless ESP-NOW packet,
@@ -20,6 +33,7 @@
 */
 
 #include <WiFi.h>
+#include <Wire.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_system.h>
@@ -30,6 +44,8 @@
 // packet type declared later in this file.
 struct RxPacket;
 enum GarageModeState : uint8_t;
+enum BonusPhase : uint8_t;
+void applyTargetColorsForRemaining(uint32_t remainingMs);
 
 // --------------------------- Configuration ---------------------------
 constexpr uint8_t PROTOCOL_VERSION = 3;
@@ -57,11 +73,20 @@ constexpr uint32_t GARAGE_STATUS_TIMEOUT_MS = 1800;
 constexpr uint32_t GARAGE_TERMINAL_LED_MS = 5000;
 constexpr uint32_t GARAGE_PRESS_RESEND_INTERVAL_MS = 250;
 constexpr uint8_t GARAGE_PRESS_MAX_RETRIES = 24;
+// Longest code a player can type; bounded by the 63-byte GKEY packet.
+constexpr uint8_t KEYPAD_ENTRY_MAX_LENGTH = 12;
+constexpr uint32_t KEYPAD_SCAN_INTERVAL_MS = 10;
+constexpr uint32_t KEYPAD_KEY_BLIP_MS = 90;
+constexpr uint32_t KEYPAD_WRONG_FLASH_PERIOD_MS = 170;
+constexpr uint8_t KEYPAD_WRONG_FLASHES = 3;
+constexpr uint32_t KEYPAD_I2C_FREQUENCY_HZ = 100000;
 
 #define BTN_PIN D2
 #define LED_R   D3
 #define LED_G   D4
 #define LED_B   D5
+#define KEYPAD_SDA D7
+#define KEYPAD_SCL D8
 
 const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -274,7 +299,9 @@ uint32_t garagePressAtMs = 0;
 bool garagePressAwaitingResult = false;
 uint8_t garagePressRetriesLeft = 0;
 uint32_t nextGaragePressRetryMs = 0;
-char pendingGaragePressMessage[48] = {};
+char pendingGaragePressMessage[56] = {};
+// True while the pending acknowledged message is a keypad code rather than a press.
+bool garagePendingIsKeypad = false;
 char garageResultState[10] = {};
 bool garageCompleted = false;
 bool garageAckUnknown = false;
@@ -282,6 +309,68 @@ uint32_t garageEventRevision = 0;
 uint32_t garageTerminalAtMs = 0;
 bool garageTerminalTimerStarted = false;
 int garageVisualAppliedKey = -100;
+
+// --------------------------- Keypad state ---------------------------
+constexpr uint8_t KEYPAD_ROWS = 4;
+constexpr uint8_t KEYPAD_COLUMNS = 4;
+const char KEYMAP[KEYPAD_ROWS][KEYPAD_COLUMNS] = {
+  { '1', '2', '3', 'A' },
+  { '4', '5', '6', 'B' },
+  { '7', '8', '9', 'C' },
+  { '*', '0', '#', 'D' }
+};
+// MCP23017 port (0 = GPA, 1 = GPB) and bit for each keypad row and column.
+constexpr uint8_t MCP_PORT_A = 0;
+constexpr uint8_t MCP_PORT_B = 1;
+const uint8_t KEYPAD_ROW_PORT[KEYPAD_ROWS] = { MCP_PORT_A, MCP_PORT_A, MCP_PORT_A, MCP_PORT_A };
+const uint8_t KEYPAD_ROW_BIT[KEYPAD_ROWS] = { 0, 1, 2, 3 };
+const uint8_t KEYPAD_COLUMN_PORT[KEYPAD_COLUMNS] = { MCP_PORT_A, MCP_PORT_A, MCP_PORT_A, MCP_PORT_A };
+const uint8_t KEYPAD_COLUMN_BIT[KEYPAD_COLUMNS] = { 4, 5, 6, 7 };
+
+bool keypadPresent = false;
+uint8_t keypadAddress = 0;
+bool keypadScanning = false;
+uint32_t lastKeypadScanMs = 0;
+uint32_t lastKeypadErrorLogMs = 0;
+char keypadEntry[KEYPAD_ENTRY_MAX_LENGTH + 1] = {};
+uint8_t keypadEntryLength = 0;
+// While set, keypad LED feedback owns the LED and the normal garage visual waits.
+bool keypadFeedbackActive = false;
+uint32_t keypadFeedbackUntilMs = 0;
+// Keys are ignored during the wrong/right-code flash so the player sees it.
+bool keypadFlashBlocksKeys = false;
+uint8_t mcpOutputLatch[2] = { 0xFF, 0xFF };
+bool rawKeyPressed[KEYPAD_ROWS][KEYPAD_COLUMNS] = {};
+bool stableKeyPressed[KEYPAD_ROWS][KEYPAD_COLUMNS] = {};
+uint32_t rawKeyChangedAt[KEYPAD_ROWS][KEYPAD_COLUMNS] = {};
+
+// --------------------------- Garage bonus round state ---------------------------
+// After a run's last event, the scorekeeper may run a bonus speed round through the master:
+// every spoke flashes a short intro and answers a poll, then one spoke at a time is lit with
+// the Speed game's target look and must be pressed before its window closes.
+enum BonusPhase : uint8_t { BONUS_PHASE_OFF, BONUS_PHASE_INTRO, BONUS_PHASE_TARGET };
+constexpr uint32_t BONUS_STATE_TIMEOUT_MS = 1500;
+constexpr uint32_t BONUS_INTRO_STEP_MS = 110;
+constexpr uint8_t BONUS_INTRO_STEPS = 8;
+constexpr uint32_t BONUS_HELLO_MAX_DELAY_MS = 300;
+constexpr uint32_t BONUS_HIT_FLASH_MS = 250;
+
+BonusPhase bonusPhase = BONUS_PHASE_OFF;
+uint32_t bonusSequence = 0;
+bool bonusTargetIsMe = false;
+uint32_t bonusDeadlineMs = 0;
+uint32_t lastBonusStateMs = 0;
+uint32_t bonusIntroSequence = 0;
+bool bonusIntroRunning = false;
+uint8_t bonusIntroStep = 0;
+uint32_t bonusIntroNextMs = 0;
+bool bonusHelloPending = false;
+uint32_t bonusHelloDueMs = 0;
+uint32_t bonusShownTargetSequence = 0;
+uint32_t bonusPressedSequence = 0;
+uint32_t bonusHitFlashUntilMs = 0;
+bool bonusVisualOwnsLed = false;
+bool bonusLedDark = false;
 
 bool isGarageTerminalState(GarageModeState state) {
   return state == GARAGE_MODE_FINISHED || state == GARAGE_MODE_TIMED_OUT;
@@ -369,7 +458,8 @@ bool parseGarageSequence(const char* text, uint32_t& sequence) {
 
 bool parseGarageResultState(const char* text) {
   return strcmp(text, "PENDING") == 0 || strcmp(text, "ACTIVE") == 0 ||
-         strcmp(text, "COMPLETED") == 0 || strcmp(text, "REJECTED") == 0;
+         strcmp(text, "COMPLETED") == 0 || strcmp(text, "REJECTED") == 0 ||
+         strcmp(text, "NEXT") == 0;
 }
 
 bool parseGarageResultPacket(const char* message, char* token, uint32_t& sequence,
@@ -439,7 +529,11 @@ void handleGarageEventState(const RxPacket& packet) {
       strcmp(token, garageToken) != 0 || revision <= garageEventRevision) return;
 
   garageEventRevision = revision;
+  // State syncs follow any change in the run. While a submitted code is still awaiting its
+  // answer and the event is still running, keep waiting so a wrong code still flashes red.
+  if (garagePressAwaitingResult && garagePendingIsKeypad && strcmp(eventState, "ACTIVE") == 0) return;
   garagePressAwaitingResult = false;
+  garagePendingIsKeypad = false;
   garagePressRetriesLeft = 0;
   pendingGarageSequence = 0;
   nextGaragePressRetryMs = 0;
@@ -518,6 +612,7 @@ void clearGarageMode(bool clearVisual) {
   garagePressSequence = randomGarageSequenceBase();
   pendingGarageSequence = 0;
   garagePressAwaitingResult = false;
+  garagePendingIsKeypad = false;
   garagePressRetriesLeft = 0;
   nextGaragePressRetryMs = 0;
   pendingGaragePressMessage[0] = '\0';
@@ -577,6 +672,7 @@ void handleGarageMode(const RxPacket& packet) {
     garagePressSequence = randomGarageSequenceBase();
     pendingGarageSequence = 0;
     garagePressAwaitingResult = false;
+    garagePendingIsKeypad = false;
     garagePressRetriesLeft = 0;
     pendingGaragePressMessage[0] = '\0';
     garageResultState[0] = '\0';
@@ -613,13 +709,29 @@ void handleGarageResult(const RxPacket& packet) {
       (!garagePressAwaitingResult && !garageAckUnknown) ||
       sequence != pendingGarageSequence) return;
 
+  const bool keypadResult = garagePendingIsKeypad;
   garagePressAwaitingResult = false;
+  garagePendingIsKeypad = false;
   garagePressRetriesLeft = 0;
   pendingGaragePressMessage[0] = '\0';
   garageAckUnknown = false;
   strcpy(garageResultState, resultState);
   if (strcmp(resultState, "COMPLETED") == 0) garageCompleted = true;
   garageVisualAppliedKey = -100;
+  if (keypadResult && strcmp(resultState, "NEXT") == 0) {
+    // Right code, but more are needed: the TV now shows the next message.
+    strcpy(garageResultState, "ACTIVE");
+    Serial.println("[KEYPAD] Code accepted; next message");
+    flashKeypadCorrect();
+  } else if (keypadResult && !garageCompleted) {
+    // ACTIVE means the code was wrong and the event is still running. A REJECTED code
+    // (for example, sent as the run paused) also leaves the event as it was.
+    if (strcmp(resultState, "REJECTED") == 0) strcpy(garageResultState, "ACTIVE");
+    Serial.println("[KEYPAD] Wrong code");
+    flashKeypadWrong();
+  } else if (keypadResult) {
+    Serial.println("[KEYPAD] Code accepted; event complete");
+  }
 }
 
 void updateGarageWatchdog() {
@@ -631,9 +743,161 @@ void updateGarageWatchdog() {
   }
 }
 
+// GBONUS:3:<token>:<seq>:<I|T|O>:<target mac or ->:<remainingMs>
+void handleBonusState(const RxPacket& packet) {
+  static const char prefix[] = "GBONUS:3:";
+  if (packet.len <= sizeof(prefix) - 1 || memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, sizeof(prefix) - 1) != 0 || gameActive ||
+      !garageStateFresh(millis()) || garageModeState != GARAGE_MODE_ACTIVE || !garageMasterLocked ||
+      !macEqual(packet.source, garageMasterMac) || (masterReserved && !fromReservedMaster(packet))) return;
+
+  const char* cursor = packet.data + sizeof(prefix) - 1;
+  char tokenText[17];
+  char sequenceText[11];
+  char phaseText[2];
+  char macText[13];
+  char remainingText[11];
+  uint32_t sequence = 0;
+  uint32_t remainingMs = 0;
+  char token[17];
+  if (!readGarageTokenField(cursor, tokenText, sizeof(tokenText)) ||
+      !readGarageTokenField(cursor, sequenceText, sizeof(sequenceText)) ||
+      !readGarageTokenField(cursor, phaseText, sizeof(phaseText)) ||
+      !readGarageTokenField(cursor, macText, sizeof(macText)) ||
+      !readGarageTokenField(cursor, remainingText, sizeof(remainingText)) || *cursor != '\0' ||
+      !parseGarageToken(tokenText, token) || strcmp(token, garageToken) != 0 ||
+      !parseGarageSequence(sequenceText, sequence) || !parseGarageSequence(remainingText, remainingMs)) return;
+
+  if (phaseText[0] == 'O') {
+    bonusPhase = BONUS_PHASE_OFF;
+    return;
+  }
+  if (phaseText[0] != 'I' && phaseText[0] != 'T') return;
+
+  uint8_t targetMac[6];
+  const bool targetIsMe = phaseText[0] == 'T' && strcmp(macText, "-") != 0 &&
+      hexToMac(macText, targetMac) && macEqual(targetMac, ownMac);
+  bonusPhase = phaseText[0] == 'I' ? BONUS_PHASE_INTRO : BONUS_PHASE_TARGET;
+  bonusSequence = sequence;
+  bonusTargetIsMe = targetIsMe;
+  bonusDeadlineMs = packet.receivedAtMs + remainingMs;
+  lastBonusStateMs = packet.receivedAtMs;
+
+  if (bonusPhase == BONUS_PHASE_INTRO && sequence != bonusIntroSequence) {
+    bonusIntroSequence = sequence;
+    bonusIntroRunning = true;
+    bonusIntroStep = 0;
+    bonusIntroNextMs = millis();
+    bonusHelloPending = true;
+    bonusHelloDueMs = millis() + (esp_random() % (BONUS_HELLO_MAX_DELAY_MS + 1));
+  }
+}
+
+bool bonusRoundFresh(uint32_t now) {
+  return bonusPhase != BONUS_PHASE_OFF && !gameActive && garageModeState == GARAGE_MODE_ACTIVE &&
+         (uint32_t)(now - lastBonusStateMs) <= BONUS_STATE_TIMEOUT_MS;
+}
+
+// This spoke is lit and has not already been pressed for this target.
+bool bonusTargetPressable(uint32_t now) {
+  return bonusRoundFresh(now) && bonusPhase == BONUS_PHASE_TARGET && bonusTargetIsMe &&
+         bonusPressedSequence != bonusSequence;
+}
+
+void sendBonusPress() {
+  const uint32_t now = millis();
+  ++garagePressSequence;
+  if (garagePressSequence == 0) ++garagePressSequence;
+  pendingGarageSequence = garagePressSequence;
+  const int length = snprintf(pendingGaragePressMessage, sizeof(pendingGaragePressMessage),
+      "GPRESS:3:%s:%lu", garageToken, (unsigned long)pendingGarageSequence);
+  if (length <= 0 || (size_t)length >= sizeof(pendingGaragePressMessage)) {
+    pendingGaragePressMessage[0] = '\0';
+    return;
+  }
+  garagePressAtMs = now;
+  garagePressAwaitingResult = true;
+  garagePendingIsKeypad = false;
+  garagePressRetriesLeft = GARAGE_PRESS_MAX_RETRIES;
+  nextGaragePressRetryMs = now + GARAGE_PRESS_RESEND_INTERVAL_MS;
+  bonusPressedSequence = bonusSequence;
+  bonusHitFlashUntilMs = now + BONUS_HIT_FLASH_MS;
+  setSolid(false, true, false, BONUS_HIT_FLASH_MS);
+  bonusLedDark = false;
+  sendGaragePress();
+}
+
+// Drives the LED during the bonus round and hands it back to the normal Garage visual after.
+void updateBonusRound() {
+  const uint32_t now = millis();
+  if (!bonusRoundFresh(now)) {
+    if (bonusPhase != BONUS_PHASE_OFF &&
+        (uint32_t)(now - lastBonusStateMs) > BONUS_STATE_TIMEOUT_MS) bonusPhase = BONUS_PHASE_OFF;
+    bonusIntroRunning = false;
+    bonusHelloPending = false;
+    if (bonusVisualOwnsLed) {
+      bonusVisualOwnsLed = false;
+      bonusLedDark = false;
+      if (!gameActive) stopPattern();
+      garageVisualAppliedKey = -100;
+    }
+    return;
+  }
+
+  bonusVisualOwnsLed = true;
+  if (bonusHelloPending && (int32_t)(now - bonusHelloDueMs) >= 0) {
+    bonusHelloPending = false;
+    char message[40];
+    const int length = snprintf(message, sizeof(message), "GBHELLO:3:%s:%lu",
+        garageToken, (unsigned long)bonusIntroSequence);
+    if (length > 0 && (size_t)length < sizeof(message)) sendBroadcast(message);
+  }
+
+  if (bonusIntroRunning) {
+    if ((int32_t)(now - bonusIntroNextMs) < 0) return;
+    // Red, yellow, green, dark, twice: a quick "get ready" across every button.
+    switch (bonusIntroStep % 4) {
+      case 0: setSolid(true, false, false); break;
+      case 1: setSolid(true, true, false); break;
+      case 2: setSolid(false, true, false); break;
+      default: setSolid(false, false, false); break;
+    }
+    bonusLedDark = false;
+    ++bonusIntroStep;
+    bonusIntroNextMs = now + BONUS_INTRO_STEP_MS;
+    if (bonusIntroStep >= BONUS_INTRO_STEPS) bonusIntroRunning = false;
+    return;
+  }
+
+  if ((int32_t)(now - bonusHitFlashUntilMs) < 0) return;
+
+  if (bonusTargetPressable(now)) {
+    const uint32_t remainingMs = (int32_t)(bonusDeadlineMs - now) > 0 ? bonusDeadlineMs - now : 0;
+    if (bonusShownTargetSequence != bonusSequence) {
+      bonusShownTargetSequence = bonusSequence;
+      startBlink(false, true, false, TARGET_BLINK_SLOW_MS);
+    }
+    applyTargetColorsForRemaining(remainingMs);
+    bonusLedDark = false;
+    return;
+  }
+
+  if (!bonusLedDark) {
+    stopPattern();
+    bonusLedDark = true;
+  }
+}
+
 void updateGarageVisual() {
   if (gameActive) return;
+  if (bonusVisualOwnsLed) return;
   uint32_t now = millis();
+  if (keypadFeedbackActive) {
+    if ((int32_t)(now - keypadFeedbackUntilMs) < 0) return;
+    keypadFeedbackActive = false;
+    keypadFlashBlocksKeys = false;
+    garageVisualAppliedKey = -100;
+  }
   uint32_t terminalElapsedMs = (uint32_t)(now - garageTerminalAtMs);
   bool terminalIndicatorActive = garageStatusSeen &&
       isGarageTerminalState(garageModeState) && garageTerminalTimerStarted &&
@@ -854,7 +1118,13 @@ void updateTargetVisual() {
   uint32_t now = millis();
   uint32_t elapsedMs = now - targetDisplayStartMs;
   uint32_t remainingMs = elapsedMs >= targetWindowMs ? 0 : targetWindowMs - elapsedMs;
+  applyTargetColorsForRemaining(remainingMs);
+}
 
+// The Speed game's target look, shared with the Garage bonus round: green with plenty of
+// time, blending through yellow to red, blinking faster as the deadline approaches.
+void applyTargetColorsForRemaining(uint32_t remainingMs) {
+  uint32_t now = millis();
   uint8_t newRLevel = 255;
   uint8_t newGLevel = 0;
   if (remainingMs >= TARGET_COLOR_GREEN_MS) {
@@ -967,6 +1237,10 @@ void processRx() {
       handleIdentify(packet);
       continue;
     }
+    if (strncmp(packet.data, "GBONUS:", 7) == 0) {
+      handleBonusState(packet);
+      continue;
+    }
     if (strncmp(packet.data, "DISCOVER:", 9) == 0) {
       handleDiscover(packet);
     } else if (strncmp(packet.data, "RUN:", 4) == 0) {
@@ -1007,6 +1281,12 @@ void handlePress() {
     return;
   }
 
+  // In the bonus round only the lit spoke reports a press; its own event is already done.
+  if (!gameActive && bonusRoundFresh(now)) {
+    if (bonusTargetPressable(now)) sendBonusPress();
+    return;
+  }
+
   if (!gameActive && garageStateFresh(now) && garageModeState != GARAGE_MODE_NONE) {
     if (garageModeState != GARAGE_MODE_ACTIVE || garageCompleted || garageAckUnknown ||
         garagePressAwaitingResult) return;
@@ -1021,6 +1301,7 @@ void handlePress() {
     memcpy(pendingGaragePressMessage, message, (size_t)length + 1);
     garagePressAtMs = now;
     garagePressAwaitingResult = true;
+    garagePendingIsKeypad = false;
     garagePressRetriesLeft = GARAGE_PRESS_MAX_RETRIES;
     nextGaragePressRetryMs = now + GARAGE_PRESS_RESEND_INTERVAL_MS;
     garageResultState[0] = '\0';
@@ -1060,6 +1341,7 @@ void updateGaragePressResend() {
       (int32_t)(millis() - nextGaragePressRetryMs) < 0) return;
   if (garagePressRetriesLeft == 0) {
     garagePressAwaitingResult = false;
+    garagePendingIsKeypad = false;
     pendingGaragePressMessage[0] = '\0';
     garageAckUnknown = true;
     garageVisualAppliedKey = -100;
@@ -1070,9 +1352,260 @@ void updateGaragePressResend() {
   nextGaragePressRetryMs = millis() + GARAGE_PRESS_RESEND_INTERVAL_MS;
   if (garagePressRetriesLeft == 0) {
     garagePressAwaitingResult = false;
+    garagePendingIsKeypad = false;
     pendingGaragePressMessage[0] = '\0';
     garageAckUnknown = true;
     garageVisualAppliedKey = -100;
+  }
+}
+
+// --------------------------- Keypad (special button) ---------------------------
+// MCP23017 registers in the default BANK=0 layout.
+constexpr uint8_t MCP_IODIRA = 0x00;
+constexpr uint8_t MCP_IODIRB = 0x01;
+constexpr uint8_t MCP_GPPUA = 0x0C;
+constexpr uint8_t MCP_GPPUB = 0x0D;
+constexpr uint8_t MCP_GPIOA = 0x12;
+constexpr uint8_t MCP_GPIOB = 0x13;
+constexpr uint8_t MCP_OLATA = 0x14;
+constexpr uint8_t MCP_OLATB = 0x15;
+
+bool writeMcpRegister(uint8_t registerAddress, uint8_t value) {
+  Wire.beginTransmission(keypadAddress);
+  Wire.write(registerAddress);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+bool readMcpPort(uint8_t port, uint8_t& value) {
+  Wire.beginTransmission(keypadAddress);
+  Wire.write(port == MCP_PORT_A ? MCP_GPIOA : MCP_GPIOB);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(keypadAddress, (uint8_t)1) != 1 || !Wire.available()) return false;
+  value = Wire.read();
+  return true;
+}
+
+bool writeMcpPortLatch(uint8_t port, uint8_t value) {
+  mcpOutputLatch[port] = value;
+  return writeMcpRegister(port == MCP_PORT_A ? MCP_OLATA : MCP_OLATB, value);
+}
+
+// Normal spokes have nothing on D7/D8, so an absent expander simply leaves the
+// keypad disabled and the spoke behaves as before.
+void setupKeypad() {
+  Wire.begin(KEYPAD_SDA, KEYPAD_SCL, KEYPAD_I2C_FREQUENCY_HZ);
+  for (uint8_t address = 0x20; address <= 0x27; ++address) {
+    Wire.beginTransmission(address);
+    if (Wire.endTransmission() == 0) {
+      keypadAddress = address;
+      break;
+    }
+  }
+  if (keypadAddress == 0) {
+    Wire.end();
+    Serial.println("[KEYPAD] None detected; running as a regular spoke");
+    return;
+  }
+
+  // Rows are outputs held HIGH; columns are inputs with the expander's pull-ups.
+  uint8_t direction[2] = { 0xFF, 0xFF };
+  uint8_t pullups[2] = { 0x00, 0x00 };
+  for (uint8_t row = 0; row < KEYPAD_ROWS; ++row) {
+    direction[KEYPAD_ROW_PORT[row]] &= (uint8_t)~(1u << KEYPAD_ROW_BIT[row]);
+  }
+  for (uint8_t column = 0; column < KEYPAD_COLUMNS; ++column) {
+    pullups[KEYPAD_COLUMN_PORT[column]] |= (uint8_t)(1u << KEYPAD_COLUMN_BIT[column]);
+  }
+  bool ready = writeMcpPortLatch(MCP_PORT_A, 0xFF);
+  ready = writeMcpPortLatch(MCP_PORT_B, 0xFF) && ready;
+  ready = writeMcpRegister(MCP_IODIRA, direction[MCP_PORT_A]) && ready;
+  ready = writeMcpRegister(MCP_IODIRB, direction[MCP_PORT_B]) && ready;
+  ready = writeMcpRegister(MCP_GPPUA, pullups[MCP_PORT_A]) && ready;
+  ready = writeMcpRegister(MCP_GPPUB, pullups[MCP_PORT_B]) && ready;
+  keypadPresent = ready;
+  Serial.printf(ready ? "[KEYPAD] MCP23017 ready at 0x%02X\n"
+                      : "[KEYPAD] MCP23017 at 0x%02X failed to initialize\n", keypadAddress);
+}
+
+void clearKeypadEntry() {
+  keypadEntryLength = 0;
+  keypadEntry[0] = '\0';
+}
+
+void showKeypadFeedback(bool r, bool g, bool b, uint32_t durationMs) {
+  setSolid(r, g, b, durationMs);
+  keypadFeedbackActive = true;
+  keypadFeedbackUntilMs = millis() + durationMs;
+}
+
+void flashKeypadWrong() {
+  const uint32_t durationMs = KEYPAD_WRONG_FLASH_PERIOD_MS * 2 * KEYPAD_WRONG_FLASHES;
+  startBlink(true, false, false, KEYPAD_WRONG_FLASH_PERIOD_MS, durationMs);
+  keypadFeedbackActive = true;
+  keypadFlashBlocksKeys = true;
+  keypadFeedbackUntilMs = millis() + durationMs;
+}
+
+// Same length as the wrong-code flash so the player sees it before the next message.
+void flashKeypadCorrect() {
+  const uint32_t durationMs = KEYPAD_WRONG_FLASH_PERIOD_MS * 2 * KEYPAD_WRONG_FLASHES;
+  startBlink(false, true, false, KEYPAD_WRONG_FLASH_PERIOD_MS, durationMs);
+  keypadFeedbackActive = true;
+  keypadFlashBlocksKeys = true;
+  keypadFeedbackUntilMs = millis() + durationMs;
+}
+
+// Keys count only while this spoke's event is running and nothing is awaiting an answer.
+bool keypadInputAllowed(uint32_t now) {
+  return keypadPresent && !gameActive && garageStateFresh(now) &&
+         garageModeState == GARAGE_MODE_ACTIVE && garageMasterLocked && !garageCompleted &&
+         !garageAckUnknown && !garagePressAwaitingResult &&
+         strcmp(garageResultState, "ACTIVE") == 0;
+}
+
+uint32_t nextGarageSequence() {
+  ++garagePressSequence;
+  if (garagePressSequence == 0) ++garagePressSequence;
+  return garagePressSequence;
+}
+
+// Unacknowledged: every update carries the whole entry, so a lost one is repaired by
+// the next. Sent twice because broadcasts have no delivery retry.
+void sendKeypadTyping() {
+  char message[64];
+  const int length = snprintf(message, sizeof(message), "GKEY:3:%s:%lu:K:%s:0",
+      garageToken, (unsigned long)nextGarageSequence(), keypadEntryLength ? keypadEntry : "-");
+  if (length <= 0 || (size_t)length > RX_MAX_LEN) return;
+  sendBroadcast(message);
+  sendBroadcast(message);
+}
+
+// '*' submits the entry. It is retried like a press until the scorekeeper answers.
+void submitKeypadEntry() {
+  if (keypadEntryLength == 0) {
+    flashKeypadWrong();
+    return;
+  }
+  const uint32_t sequence = nextGarageSequence();
+  const int length = snprintf(pendingGaragePressMessage, sizeof(pendingGaragePressMessage),
+      "GKEY:3:%s:%lu:S:%s", garageToken, (unsigned long)sequence, keypadEntry);
+  if (length <= 0 || (size_t)length >= sizeof(pendingGaragePressMessage)) {
+    pendingGaragePressMessage[0] = '\0';
+    return;
+  }
+  Serial.printf("[KEYPAD] Submitting %s\n", keypadEntry);
+  pendingGarageSequence = sequence;
+  garagePressAtMs = millis();
+  garagePressAwaitingResult = true;
+  garagePendingIsKeypad = true;
+  garagePressRetriesLeft = GARAGE_PRESS_MAX_RETRIES;
+  nextGaragePressRetryMs = garagePressAtMs + GARAGE_PRESS_RESEND_INTERVAL_MS;
+  garageResultState[0] = '\0';
+  garageVisualAppliedKey = -100;
+  clearKeypadEntry();
+  sendGaragePress();
+}
+
+void handleKeypadKey(char key) {
+  if (!keypadInputAllowed(millis()) || keypadFlashBlocksKeys) return;
+  if (key == '*') {
+    submitKeypadEntry();
+    return;
+  }
+  if (keypadEntryLength >= KEYPAD_ENTRY_MAX_LENGTH) {
+    showKeypadFeedback(true, false, false, KEYPAD_KEY_BLIP_MS);
+    return;
+  }
+  keypadEntry[keypadEntryLength++] = key;
+  keypadEntry[keypadEntryLength] = '\0';
+  showKeypadFeedback(false, false, true, KEYPAD_KEY_BLIP_MS);
+  sendKeypadTyping();
+}
+
+// With reportPresses false the scan only records which keys are already down, so a
+// key held when the event starts is not taken as a new press.
+bool scanKeypadMatrix(bool reportPresses) {
+  const uint32_t now = millis();
+  bool readSucceeded = true;
+  for (uint8_t row = 0; row < KEYPAD_ROWS; ++row) {
+    bool rowPortUsed[2] = { false, false };
+    for (uint8_t otherRow = 0; otherRow < KEYPAD_ROWS; ++otherRow) {
+      mcpOutputLatch[KEYPAD_ROW_PORT[otherRow]] |= (uint8_t)(1u << KEYPAD_ROW_BIT[otherRow]);
+      rowPortUsed[KEYPAD_ROW_PORT[otherRow]] = true;
+    }
+    mcpOutputLatch[KEYPAD_ROW_PORT[row]] &= (uint8_t)~(1u << KEYPAD_ROW_BIT[row]);
+    bool rowWritten = true;
+    for (uint8_t port = 0; port < 2; ++port) {
+      if (rowPortUsed[port]) rowWritten = writeMcpPortLatch(port, mcpOutputLatch[port]) && rowWritten;
+    }
+    if (!rowWritten) {
+      readSucceeded = false;
+      continue;
+    }
+    delayMicroseconds(150);
+
+    uint8_t portValue[2] = { 0xFF, 0xFF };
+    bool portRead[2] = { false, false };
+    for (uint8_t column = 0; column < KEYPAD_COLUMNS; ++column) {
+      const uint8_t port = KEYPAD_COLUMN_PORT[column];
+      if (!portRead[port]) {
+        portRead[port] = readMcpPort(port, portValue[port]);
+        if (!portRead[port]) {
+          readSucceeded = false;
+          continue;
+        }
+      }
+      const bool pressed = (portValue[port] & (1u << KEYPAD_COLUMN_BIT[column])) == 0;
+      if (!reportPresses) {
+        rawKeyPressed[row][column] = pressed;
+        stableKeyPressed[row][column] = pressed;
+        rawKeyChangedAt[row][column] = now;
+        continue;
+      }
+      if (pressed != rawKeyPressed[row][column]) {
+        rawKeyPressed[row][column] = pressed;
+        rawKeyChangedAt[row][column] = now;
+      }
+      if (pressed == stableKeyPressed[row][column] ||
+          now - rawKeyChangedAt[row][column] < DEBOUNCE_MS) continue;
+      stableKeyPressed[row][column] = pressed;
+      if (pressed) handleKeypadKey(KEYMAP[row][column]);
+    }
+  }
+
+  for (uint8_t row = 0; row < KEYPAD_ROWS; ++row) {
+    mcpOutputLatch[KEYPAD_ROW_PORT[row]] |= (uint8_t)(1u << KEYPAD_ROW_BIT[row]);
+  }
+  for (uint8_t port = 0; port < 2; ++port) writeMcpPortLatch(port, mcpOutputLatch[port]);
+  return readSucceeded;
+}
+
+// Scans only while the keypad can be used, so regular play and the Speed game are
+// not slowed by I2C traffic.
+void updateKeypad() {
+  if (!keypadPresent) return;
+  const uint32_t now = millis();
+  if (!keypadInputAllowed(now)) {
+    keypadScanning = false;
+    // A submission clears the entry itself; anything else (pause, finish, reset)
+    // abandons a half-typed code.
+    if (!garagePressAwaitingResult) clearKeypadEntry();
+    return;
+  }
+  if (!keypadScanning) {
+    keypadScanning = true;
+    lastKeypadScanMs = now;
+    scanKeypadMatrix(false);
+    // Tell the TV the entry is empty whenever typing (re)opens.
+    sendKeypadTyping();
+    return;
+  }
+  if ((uint32_t)(now - lastKeypadScanMs) < KEYPAD_SCAN_INTERVAL_MS) return;
+  lastKeypadScanMs = now;
+  if (!scanKeypadMatrix(true) && (uint32_t)(now - lastKeypadErrorLogMs) >= 1000) {
+    lastKeypadErrorLogMs = now;
+    Serial.println("[KEYPAD] I2C read failed; check keypad power and wiring");
   }
 }
 
@@ -1183,6 +1716,7 @@ void setup() {
   pinMode(LED_G, OUTPUT);
   pinMode(LED_B, OUTPUT);
   stopPattern();
+  setupKeypad();
 
   if (!WiFi.mode(WIFI_STA)) restartAfterRadioFailure("Wi-Fi station mode", ESP_FAIL);
   WiFi.disconnect(false, false);
@@ -1216,13 +1750,15 @@ void setup() {
 
   char id[13];
   macToHex(ownMac, id, sizeof(id));
-  Serial.printf("[OK] Spoke %s ready; ESP-NOW channel %u.\n", id, ESPNOW_CHANNEL);
+  Serial.printf("[OK] Spoke %s ready; ESP-NOW channel %u%s.\n", id, ESPNOW_CHANNEL,
+                keypadPresent ? "; keypad enabled" : "");
 }
 
 void loop() {
   processRx();
   updateGarageWatchdog();
   updateButton();
+  updateKeypad();
   updateHelloResponse();
   updateHeartbeat();
   updateHitResend();
@@ -1230,6 +1766,7 @@ void loop() {
   updateMasterWatchdog();
   updateRadioDiagnostics();
   updateTargetVisual();
+  updateBonusRound();
   updatePattern();
   updateGarageVisual();
   delay(2);

@@ -10,6 +10,9 @@
       The app manages the five-minute Garage Games run and its countdown.
     - Spoke buttons communicate with the master over ESP-NOW. The master
       relays their event presses and device status to the scorekeeper.
+    - A spoke with a keypad also sends its typed entry and '*'-submitted codes;
+      the master relays them as GG1 KEYPAD lines and the scorekeeper checks the
+      code, answering with the same GG1 RESULT line used for presses.
     - Holding the master button for 5 seconds starts Speed Button discovery
       only when the scorekeeper is not reporting a Garage Games countdown,
       active run, or paused run.
@@ -67,6 +70,7 @@
 struct RxPacket;
 enum HostStatus : uint8_t;
 enum GarageStatus : uint8_t;
+enum BonusPhase : uint8_t;
 void finishGame(const char* reason);
 void finishHostScan(bool busy);
 void processRx();
@@ -89,6 +93,8 @@ constexpr uint32_t HOST_HELLO_INTERVAL_MS = 2000;
 constexpr uint32_t HOST_SCAN_DURATION_MS = 2000;
 constexpr uint32_t HOST_SCAN_PING_MS = 500;
 constexpr uint32_t HOST_STATUS_STALE_MS = 3000;
+// Longest keypad code a special spoke can send; bounded by its 63-byte GKEY packet.
+constexpr size_t KEYPAD_ENTRY_MAX_LENGTH = 12;
 constexpr uint32_t GARAGE_BROADCAST_INTERVAL_MS = 250;
 constexpr uint32_t GARAGE_COUNTDOWN_BROADCAST_INTERVAL_MS = 75;
 constexpr uint8_t HOST_SCAN_MAX_RESPONDERS = 64;
@@ -770,8 +776,10 @@ bool parseGarageResultLine(const char* line, char* token, uint8_t* mac,
       !parseGarageToken(tokenText, token) || strcmp(token, "-") == 0 ||
       !parseUpperHexMac(macText, mac) || !validStationMac(mac) ||
       !parseUint32Token(sequenceText, sequence) || sequence == 0) return false;
+  // NEXT answers a keypad code that was right when more codes are still needed.
   return strcmp(resultState, "PENDING") == 0 || strcmp(resultState, "ACTIVE") == 0 ||
-         strcmp(resultState, "COMPLETED") == 0 || strcmp(resultState, "REJECTED") == 0;
+         strcmp(resultState, "COMPLETED") == 0 || strcmp(resultState, "REJECTED") == 0 ||
+         strcmp(resultState, "NEXT") == 0;
 }
 
 bool parseGarageEventLine(const char* line, char* token, uint32_t& revision,
@@ -1023,9 +1031,138 @@ void beginHostScan(const char* scanId) {
   hostScanActive = true;
 }
 
+// ---------------- Garage bonus speed round ----------------
+// The scorekeeper runs the bonus round (after a run's last event) and sends its state as
+// "GG1 BONUS <token> <seq> <INTRO|TARGET|OFF> <mac|-> <remainingMs>". The master rebroadcasts
+// the latest state to the spokes as GBONUS packets and relays their intro poll answers back
+// as "GG1 BONUSNODE". This is separate from the standalone Speed game, which is unchanged.
+constexpr uint32_t BONUS_BROADCAST_INTERVAL_MS = 150;
+enum BonusPhase : uint8_t { BONUS_OFF, BONUS_INTRO, BONUS_TARGET };
+BonusPhase bonusPhase = BONUS_OFF;
+uint32_t bonusSequence = 0;
+uint8_t bonusTargetMac[6] = {};
+bool bonusHasTarget = false;
+uint32_t bonusDeadlineMs = 0;
+uint32_t lastBonusHostMs = 0;
+uint32_t nextBonusBroadcastMs = 0;
+uint8_t bonusOffRepeatsLeft = 0;
+
+bool parseBonusLine(const char* line, char* token, uint32_t& sequence, BonusPhase& phase,
+                    bool& hasTarget, uint8_t* mac, uint32_t& remainingMs) {
+  static const char prefix[] = "GG1 BONUS ";
+  if (!line || strncmp(line, prefix, sizeof(prefix) - 1) != 0) return false;
+  const char* cursor = line + sizeof(prefix) - 1;
+  char tokenText[17];
+  char sequenceText[11];
+  char phaseText[8];
+  char macText[13];
+  char remainingText[11];
+  if (!readProtocolToken(cursor, tokenText, sizeof(tokenText)) ||
+      !readProtocolToken(cursor, sequenceText, sizeof(sequenceText)) ||
+      !readProtocolToken(cursor, phaseText, sizeof(phaseText)) ||
+      !readProtocolToken(cursor, macText, sizeof(macText)) ||
+      !readProtocolToken(cursor, remainingText, sizeof(remainingText)) || *cursor != '\0' ||
+      !parseGarageToken(tokenText, token) ||
+      !parseUint32Token(sequenceText, sequence) ||
+      !parseUint32Token(remainingText, remainingMs)) return false;
+  if (strcmp(phaseText, "OFF") == 0) phase = BONUS_OFF;
+  else if (strcmp(phaseText, "INTRO") == 0) phase = BONUS_INTRO;
+  else if (strcmp(phaseText, "TARGET") == 0) phase = BONUS_TARGET;
+  else return false;
+  hasTarget = strcmp(macText, "-") != 0;
+  if (hasTarget && (!parseUpperHexMac(macText, mac) || !validStationMac(mac))) return false;
+  return true;
+}
+
+void sendBonusState() {
+  const uint32_t now = millis();
+  const uint32_t remainingMs = bonusPhase == BONUS_OFF || (int32_t)(bonusDeadlineMs - now) <= 0
+      ? 0 : bonusDeadlineMs - now;
+  char macText[13] = "-";
+  if (bonusHasTarget) macToHex(bonusTargetMac, macText, sizeof(macText));
+  const char phaseCode = bonusPhase == BONUS_INTRO ? 'I' : bonusPhase == BONUS_TARGET ? 'T' : 'O';
+  char packet[64];
+  const int length = snprintf(packet, sizeof(packet), "GBONUS:3:%s:%lu:%c:%s:%lu",
+      garageToken, (unsigned long)bonusSequence, phaseCode, macText, (unsigned long)remainingMs);
+  if (length > 0 && length <= 63) sendBroadcast(packet);
+}
+
+void handleBonusLine(const char* line) {
+  char token[17];
+  uint32_t sequence = 0;
+  BonusPhase phase = BONUS_OFF;
+  bool hasTarget = false;
+  uint8_t mac[6] = {};
+  uint32_t remainingMs = 0;
+  if (!parseBonusLine(line, token, sequence, phase, hasTarget, mac, remainingMs)) return;
+  const uint32_t now = millis();
+  if (gameState != IDLE || strcmp(token, garageToken) != 0 ||
+      garageStatus != GARAGE_STATUS_ACTIVE || !garageStatusFresh(now)) {
+    phase = BONUS_OFF;
+  }
+  const bool changed = phase != bonusPhase || sequence != bonusSequence;
+  if (phase == BONUS_OFF) {
+    if (bonusPhase != BONUS_OFF) bonusOffRepeatsLeft = 4;  // Tell the spokes a few times.
+    bonusPhase = BONUS_OFF;
+    bonusHasTarget = false;
+  } else {
+    bonusPhase = phase;
+    bonusSequence = sequence;
+    bonusHasTarget = hasTarget;
+    if (hasTarget) memcpy(bonusTargetMac, mac, 6);
+    bonusDeadlineMs = now + remainingMs;
+    lastBonusHostMs = now;
+  }
+  if (changed) nextBonusBroadcastMs = now;
+}
+
+void updateBonusBroadcast() {
+  const uint32_t now = millis();
+  if ((int32_t)(now - nextBonusBroadcastMs) < 0) return;
+  nextBonusBroadcastMs = now + BONUS_BROADCAST_INTERVAL_MS;
+  if (bonusPhase != BONUS_OFF &&
+      ((uint32_t)(now - lastBonusHostMs) > HOST_STATUS_STALE_MS || gameState != IDLE ||
+       garageStatus != GARAGE_STATUS_ACTIVE || !garageStatusFresh(now))) {
+    // The scorekeeper stopped confirming the round (paused, finished, or disconnected).
+    bonusPhase = BONUS_OFF;
+    bonusHasTarget = false;
+    bonusOffRepeatsLeft = 4;
+  }
+  if (bonusPhase != BONUS_OFF) {
+    sendBonusState();
+  } else if (bonusOffRepeatsLeft > 0) {
+    --bonusOffRepeatsLeft;
+    sendBonusState();
+  }
+}
+
+// GBHELLO:3:<token>:<seq> answers the intro poll; the spoke is identified by its MAC.
+void handleBonusHello(const RxPacket& packet) {
+  static const char prefix[] = "GBHELLO:3:";
+  if (packet.len <= sizeof(prefix) - 1 || memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, sizeof(prefix) - 1) != 0 ||
+      !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0 ||
+      bonusPhase != BONUS_INTRO) return;
+  const char* cursor = packet.data + sizeof(prefix) - 1;
+  const char* packetEnd = packet.data + packet.len;
+  char tokenText[17];
+  char sequenceText[11];
+  uint32_t sequence = 0;
+  if (!readPacketField(cursor, packetEnd, tokenText, sizeof(tokenText)) ||
+      !readPacketField(cursor, packetEnd, sequenceText, sizeof(sequenceText)) || cursor != packetEnd ||
+      strcmp(tokenText, garageToken) != 0 || !parseUint32Token(sequenceText, sequence)) return;
+  char macText[13];
+  macToHex(packet.source, macText, sizeof(macText));
+  Serial.printf("GG1 BONUSNODE %lu %s %s\n", (unsigned long)bootToken, garageToken, macText);
+}
+
 void processHostSerialLine(const char* line) {
   if (line && strncmp(line, "GG1 EVENT ", 10) == 0) {
     handleGarageEventLine(line);
+    return;
+  }
+  if (line && strncmp(line, "GG1 BONUS ", 10) == 0) {
+    handleBonusLine(line);
     return;
   }
 
@@ -1794,6 +1931,87 @@ void handleGaragePress(const RxPacket& packet) {
                 (unsigned long)totalAgeMs);
 }
 
+// Copies one colon-delimited field of a spoke packet into output. Fields are bounded
+// by both the packet length and the output buffer.
+bool readPacketField(const char*& cursor, const char* packetEnd, char* output, size_t outputSize) {
+  if (!cursor || !output || outputSize < 2 || cursor >= packetEnd) return false;
+  const char* fieldEnd = static_cast<const char*>(memchr(cursor, ':', (size_t)(packetEnd - cursor)));
+  if (!fieldEnd) fieldEnd = packetEnd;
+  const size_t length = (size_t)(fieldEnd - cursor);
+  if (length == 0 || length >= outputSize) return false;
+  memcpy(output, cursor, length);
+  output[length] = '\0';
+  cursor = fieldEnd == packetEnd ? packetEnd : fieldEnd + 1;
+  return true;
+}
+
+bool validKeypadEntry(const char* entry) {
+  if (!entry || strcmp(entry, "-") == 0) return entry != nullptr;
+  size_t length = 0;
+  for (const char* cursor = entry; *cursor != '\0'; ++cursor, ++length) {
+    const char c = *cursor;
+    if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'D') || c == '#')) return false;
+  }
+  return length > 0 && length <= KEYPAD_ENTRY_MAX_LENGTH;
+}
+
+// GKEY:3:<token>:<sequence>:<S|K>:<entry or ->:<ageMs>. K reports what has been typed so
+// far (for the TV); S submits the entry after the player presses '*'.
+bool parseGarageKeypadPacket(const RxPacket& packet, char* parsedToken, uint32_t& sequence,
+                             char& kind, char* entry, size_t entrySize, uint32_t& pressAgeMs) {
+  static const char prefix[] = "GKEY:3:";
+  const size_t prefixLength = sizeof(prefix) - 1;
+  if (!parsedToken || !entry || packet.len <= prefixLength ||
+      memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, prefixLength) != 0) return false;
+
+  const char* cursor = packet.data + prefixLength;
+  const char* packetEnd = packet.data + packet.len;
+  char tokenText[17];
+  char sequenceText[11];
+  char kindText[2];
+  char ageText[11];
+  if (!readPacketField(cursor, packetEnd, tokenText, sizeof(tokenText)) ||
+      !readPacketField(cursor, packetEnd, sequenceText, sizeof(sequenceText)) ||
+      !readPacketField(cursor, packetEnd, kindText, sizeof(kindText)) ||
+      !readPacketField(cursor, packetEnd, entry, entrySize) ||
+      !readPacketField(cursor, packetEnd, ageText, sizeof(ageText)) || cursor != packetEnd) {
+    return false;
+  }
+  if (strlen(tokenText) != 16 || !parseGarageToken(tokenText, parsedToken) ||
+      strcmp(parsedToken, "-") == 0 ||
+      !parseUint32Token(sequenceText, sequence) || sequence == 0 ||
+      !parseUint32Token(ageText, pressAgeMs) || !validKeypadEntry(entry)) return false;
+  kind = kindText[0];
+  return kind == 'S' || kind == 'K';
+}
+
+void handleGarageKeypad(const RxPacket& packet) {
+  char parsedToken[17];
+  uint32_t sequence = 0;
+  char kind = 0;
+  char entry[KEYPAD_ENTRY_MAX_LENGTH + 1];
+  uint32_t pressAgeMs = 0;
+  if (!parseGarageKeypadPacket(packet, parsedToken, sequence, kind, entry, sizeof(entry), pressAgeMs) ||
+      !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0) return;
+
+  uint32_t now = millis();
+  if (gameState != IDLE || garageStatus != GARAGE_STATUS_ACTIVE ||
+      hostStatus != HOST_STATUS_ACTIVE || !hostStatusFresh(now) ||
+      !garageStatusFresh(now) || strcmp(parsedToken, garageToken) != 0 ||
+      (int32_t)(now - packet.receivedAtMs) < 0 ||
+      (uint32_t)(now - packet.receivedAtMs) > HOST_STATUS_STALE_MS) return;
+
+  char macText[13];
+  macToHex(packet.source, macText, sizeof(macText));
+  uint32_t relayDelayMs = now - packet.receivedAtMs;
+  uint32_t totalAgeMs = pressAgeMs > UINT32_MAX - relayDelayMs
+                            ? UINT32_MAX : pressAgeMs + relayDelayMs;
+  Serial.printf("GG1 KEYPAD %lu %s %s %lu %c %s %lu\n", (unsigned long)bootToken,
+                parsedToken, macText, (unsigned long)sequence, kind, entry,
+                (unsigned long)totalAgeMs);
+}
+
 void processRx() {
   RxPacket packet;
   while (rxQueue && xQueueReceive(rxQueue, &packet, 0) == pdTRUE) {
@@ -1803,6 +2021,14 @@ void processRx() {
     }
     if (strncmp(packet.data, "GPRESS:", 7) == 0) {
       handleGaragePress(packet);
+      continue;
+    }
+    if (strncmp(packet.data, "GKEY:", 5) == 0) {
+      handleGarageKeypad(packet);
+      continue;
+    }
+    if (strncmp(packet.data, "GBHELLO:", 8) == 0) {
+      handleBonusHello(packet);
       continue;
     }
     unsigned int version = 0;
@@ -2040,6 +2266,7 @@ void loop() {
   updateHostScan();
   updatePendingTransmissions();
   updateGarageBroadcast();
+  updateBonusBroadcast();
   updateRadioDiagnostics();
   updateMasterButton();
   checkMasterHold();
