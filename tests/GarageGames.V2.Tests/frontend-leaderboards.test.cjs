@@ -34,14 +34,14 @@ test("event leaderboards use visible category runs and configured events", () =>
   assert.deepEqual(boards.map((board) => board.name), ["Perfect Pour", "Row Darts"]);
   assert.deepEqual(boards[0].rows.map((row) => [row.competitorName, row.category, row.rank, row.points, row.durationMs]), [
     ["Casey", "playoff", 1, 50, 1_000],
-    ["Blair", "official", 1, 45, 5_000],
-    ["Alex", "official", 2, 45, 10_000]
-  ]);
+    ["Blair", "official", 2, 45, 5_000],
+    ["Alex", "official", 3, 45, 10_000]
+  ], "one ranking across run types: points, then the faster time");
   assert.deepEqual(boards[1].rows.map((row) => [row.competitorName, row.category, row.status, row.rank, row.points, row.durationMs]), [
-    ["Casey", "playoff", "dnf", null, null, null],
     ["Alex", "official", "dnf", null, null, null],
-    ["Blair", "official", "dnf", null, null, null]
-  ], "visible competitors without a completed event appear as DNF within their category");
+    ["Blair", "official", "dnf", null, null, null],
+    ["Casey", "playoff", "dnf", null, null, null]
+  ], "visible competitors without a completed event appear as DNF, by name");
 });
 
 test("event leaderboard ties require equal points and equal duration", () => {
@@ -88,13 +88,13 @@ test("event leaderboards include score-only, playoff, exhibition, and DNF result
 
   const rows = buildEventLeaderboards(events, leaderboard, history)[0].rows;
   assert.deepEqual(rows.map((row) => [row.competitorName, row.category, row.status, row.rank, row.points, row.durationMs]), [
-    ["Playoff", "playoff", "dnf", null, null, null],
     ["Fast", "official", "completed", 1, 50, 10_000],
     ["Slow", "official", "completed", 2, 50, 15_000],
     ["Manual", "official", "completed", 3, 50, null],
     ["Lower", "official", "completed", 4, 45, 5_000],
-    ["Unfinished", "official", "dnf", null, null, null],
-    ["Exhibition", "exhibition", "dnf", null, null, null]
+    ["Exhibition", "exhibition", "dnf", null, null, null],
+    ["Playoff", "playoff", "dnf", null, null, null],
+    ["Unfinished", "official", "dnf", null, null, null]
   ]);
 });
 
@@ -115,18 +115,18 @@ test("event leaderboard puts DNF after finishers and labels absent or incomplete
 
   const rows = buildEventLeaderboards(events, leaderboard, history)[0].rows;
   assert.deepEqual(rows.map((row) => [row.competitorName, row.category, row.status]), [
-    ["Drew", "playoff", "dnf"],
     ["Blair", "official", "completed"],
     ["Alex", "official", "dnf"],
-    ["Casey", "official", "dnf"]
+    ["Casey", "official", "dnf"],
+    ["Drew", "playoff", "dnf"]
   ]);
-  assert.deepEqual([rows[0], rows[2], rows[3]].map((row) => [row.rank, row.points, row.durationMs]), [
+  assert.deepEqual([rows[1], rows[2], rows[3]].map((row) => [row.rank, row.points, row.durationMs]), [
     [null, null, null],
     [null, null, null],
     [null, null, null]
   ]);
-  assert.deepEqual(eventLeaderboardDisplayRow(rows[0]), { rank: "DNF", durationMs: null, points: "—", category: "playoff" });
-  assert.deepEqual(eventLeaderboardDisplayRow(rows[1]), { rank: "1", durationMs: 10_000, points: "40", category: "official" });
+  assert.deepEqual(eventLeaderboardDisplayRow(rows[3]), { rank: "DNF", durationMs: null, points: "—", category: "playoff" });
+  assert.deepEqual(eventLeaderboardDisplayRow(rows[0]), { rank: "1", durationMs: 10_000, points: "40", category: "official" });
 });
 
 test("exhibition rows preserve server-assigned incremental names", () => {
@@ -161,5 +161,51 @@ test("the bonus round ranks by points alone and lists runs that never reached it
     ["Avery", 1, "completed"],
     ["Blake", 1, "completed"], // Same points share the rank; the shorter round is not ahead.
     ["Casey", null, "dnf"]
+  ]);
+});
+
+test("the player scorecard offers every recorded run, numbering several of one type", () => {
+  const { scorecardRunChoices } = require("../../src/GarageGames.V2/wwwroot/mvp-leaderboards.js");
+  const run = (id, competitorId, category, recordedAt, extra = {}) =>
+    ({ id, competitorId, category, status: "completed", isRecorded: true, recordedAt, editionId: "2026", ...extra });
+  const history = [
+    run("ex2", "p1", "exhibition", "2026-09-28T20:00:00Z"),
+    run("off", "p1", "official", "2026-09-28T18:00:00Z"),
+    run("ex1", "p1", "exhibition", "2026-09-28T19:00:00Z"),
+    run("play", "p1", "playoff", "2026-09-29T18:00:00Z"),
+    run("old", "p1", "official", "2026-09-27T18:00:00Z", { status: "superseded", supersededByRunId: "off" }),
+    run("gone", "p1", "exhibition", "2026-09-28T21:00:00Z", { deletedAt: "2026-09-28T22:00:00Z" }),
+    run("live", "p1", "exhibition", null, { isRecorded: false, status: "finished" }),
+    run("tossed", "p1", "exhibition", null, { isRecorded: false, status: "aborted" }),
+    run("timeout", "p2", "official", "2026-09-28T18:30:00Z", { status: "timedOut" }),
+    run("solo-ex", "p2", "exhibition", "2026-09-28T19:30:00Z"),
+    // Earlier editions (including an older version of this one) are not listed.
+    run("last-year", "p2", "official", "2025-09-28T19:30:00Z", { editionId: "2025" }),
+    run("only-old", "p3", "official", "2025-09-28T19:30:00Z", { editionId: "2025" })
+  ];
+  const groups = scorecardRunChoices(history, [{ id: "p1", name: "Zed" }, { id: "p2", name: "Amy" }, { id: "p3", name: "Old" }], "2026");
+  assert.deepEqual(groups.map((group) => [group.name, group.runs.map((choice) => [choice.runId, choice.label])]), [
+    ["Amy", [["timeout", "Official"], ["solo-ex", "Exhibition"]]],
+    ["Zed", [["play", "Playoff"], ["off", "Official"], ["ex1", "Exhibition 1"], ["ex2", "Exhibition 2"]]]
+  ]);
+});
+
+test("an exhibition or playoff that beats an official result ranks above it", () => {
+  const events = [{ eventId: "pour", name: "Perfect Pour" }];
+  const leaderboard = [
+    { runId: "official", competitorName: "Olive", category: "official" },
+    { runId: "exhibition", competitorName: "Ezra", category: "exhibition" },
+    { runId: "playoff", competitorName: "Pat", category: "playoff" }
+  ];
+  const history = [
+    run("official", "o", "official", [event("pour", 0, 12_000, 45)]),
+    run("exhibition", "e", "exhibition", [event("pour", 0, 4_000, 50)]),
+    run("playoff", "p", "playoff", [event("pour", 0, 12_000, 45)])
+  ];
+  const rows = buildEventLeaderboards(events, leaderboard, history)[0].rows;
+  assert.deepEqual(rows.map((row) => [row.competitorName, row.category, row.rank]), [
+    ["Ezra", "exhibition", 1],
+    ["Olive", "official", 2],
+    ["Pat", "playoff", 2] // Same points and time as Olive: a shared rank, whatever the type.
   ]);
 });

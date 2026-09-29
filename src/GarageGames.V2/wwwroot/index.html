@@ -83,6 +83,7 @@
           <div class="card-heading virtual-card-heading">
             <div><p class="mvp-kicker">Course map</p><h2 id="virtual-heading">Start &amp; event buttons</h2></div>
             <div class="start-controls" role="group" aria-label="Start the run">
+              <button id="prime-next-button" class="button button-secondary" type="button" disabled title="Show the selected competitor on the TV as up next, with the full clock and no scores. Nothing starts.">Up Next</button>
               <button id="arm-physical-button" class="button button-secondary" type="button" disabled hidden>Arm for physical Start</button>
               <button id="start-run-button" class="button button-primary button-start" type="button" disabled>Start 5:00 run</button>
             </div>
@@ -284,17 +285,17 @@
 
         <section class="sheet-card leaderboard-card player-leaderboard-card" aria-labelledby="player-leaderboard-heading">
           <div class="card-heading">
-            <div><p class="mvp-kicker">Official event results</p><h2 id="player-leaderboard-heading">Player scorecard</h2></div>
+            <div><p class="mvp-kicker">Event results by run</p><h2 id="player-leaderboard-heading">Player scorecard</h2></div>
           </div>
           <div class="leaderboard-player-select">
-            <label for="leaderboard-player-select">Display player</label>
-            <select id="leaderboard-player-select" aria-describedby="player-leaderboard-caption"><option value="">Select a player…</option></select>
+            <label for="leaderboard-player-select">Player and run</label>
+            <select id="leaderboard-player-select" aria-describedby="player-leaderboard-caption"><option value="">Select a player's run…</option></select>
           </div>
-          <p id="player-leaderboard-caption" class="leaderboard-help" aria-live="polite">Select a player to review their event times and points.</p>
+          <p id="player-leaderboard-caption" class="leaderboard-help" aria-live="polite">Select a player's run to review their event times and points.</p>
           <div class="table-scroll player-results-scroll">
             <table class="score-table leaderboard-table player-results-table">
               <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>M:SS remaining</small></th><th scope="col">Finish<br><small>M:SS remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th></tr></thead>
-              <tbody id="player-leaderboard-body"><tr><td colspan="5" class="empty-cell">Select a player to see their scorecard.</td></tr></tbody>
+              <tbody id="player-leaderboard-body"><tr><td colspan="5" class="empty-cell">Select a player's run to see its scorecard.</td></tr></tbody>
               <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="player-leaderboard-total">—</td></tr></tfoot>
             </table>
           </div>
@@ -351,6 +352,7 @@
             <p class="small-note">When the last event is finished with time left, the clock keeps running and the buttons light one at a time. Each press in time scores the points below, added when the round ends. A miss ends the run; so does running out of time. The standalone Speed game on the master is not affected.</p>
             <label class="setup-bonus-toggle"><input id="setup-bonus-enabled" type="checkbox" data-bonus-field="enabled"> Play the bonus round</label>
             <div class="setup-bonus-fields">
+              <label class="setup-bonus-name">Name on the TV, scorecards, and leaderboards<input id="setup-bonus-name" type="text" maxlength="60" autocomplete="off" placeholder="Bonus round" data-bonus-field="name"></label>
               <label>Points per press<input id="setup-bonus-points" type="number" min="0" max="100000" step="1" inputmode="numeric" data-bonus-field="pointsPerPress"></label>
               <label>Starting seconds per press<input id="setup-bonus-initial" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" data-bonus-field="initialSeconds"></label>
               <label>Drops by (seconds)<input id="setup-bonus-step" type="number" min="0" max="60" step="0.1" inputmode="decimal" data-bonus-field="stepSeconds"></label>

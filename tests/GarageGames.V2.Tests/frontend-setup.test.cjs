@@ -357,20 +357,29 @@ test("bonus round settings edit in seconds, save in milliseconds, and validate",
   const draft = setup.normalizeSetup({
     editionId: "edition-bonus",
     name: "Edition",
-    bonusGame: { enabled: true, pointsPerPress: 7, initialWindowMs: 8000, stepMs: 500, stepEveryMs: 10000, minimumWindowMs: 1500 },
+    bonusGame: { name: "Lightning Round", enabled: true, pointsPerPress: 7, initialWindowMs: 8000, stepMs: 500, stepEveryMs: 10000, minimumWindowMs: 1500 },
     events: [{ eventId: "event-1", name: "Regular", deviceId: "unassigned-event-1", type: "standard" }]
   });
   assert.deepEqual(draft.bonusGame, {
-    enabled: true, pointsPerPress: "7", initialSeconds: "8", stepSeconds: "0.5", stepEverySeconds: "10", minimumSeconds: "1.5"
+    name: "Lightning Round", enabled: true, pointsPerPress: "7", initialSeconds: "8", stepSeconds: "0.5", stepEverySeconds: "10", minimumSeconds: "1.5"
   });
   assert.deepEqual(setup.buildSetupPayload(draft).bonusGame, {
-    enabled: true, pointsPerPress: 7, initialWindowMs: 8000, stepMs: 500, stepEveryMs: 10000, minimumWindowMs: 1500
+    name: "Lightning Round", enabled: true, pointsPerPress: 7, initialWindowMs: 8000, stepMs: 500, stepEveryMs: 10000, minimumWindowMs: 1500
   });
+
+  // The name is trimmed; a blank one falls back to the default, and it stays short.
+  draft.bonusGame.name = "  Speed Frenzy  ";
+  assert.equal(setup.buildSetupPayload(draft).bonusGame.name, "Speed Frenzy");
+  draft.bonusGame.name = "   ";
+  assert.equal(setup.buildSetupPayload(draft).bonusGame.name, "Bonus round");
+  draft.bonusGame.name = "x".repeat(61);
+  assert.throws(() => setup.buildSetupPayload(draft), /keep its name to 60 characters or fewer/);
+  draft.bonusGame.name = "Lightning Round";
 
   // Older setups without bonus settings get the standalone game's timing.
   const defaults = setup.normalizeSetup({ editionId: "e", name: "E", events: [{ eventId: "a", name: "A", deviceId: "unassigned-a" }] });
   assert.deepEqual(setup.buildSetupPayload(defaults).bonusGame, {
-    enabled: true, pointsPerPress: 5, initialWindowMs: 10000, stepMs: 1000, stepEveryMs: 10000, minimumWindowMs: 2000
+    name: "Bonus round", enabled: true, pointsPerPress: 5, initialWindowMs: 10000, stepMs: 1000, stepEveryMs: 10000, minimumWindowMs: 2000
   });
 
   draft.bonusGame.enabled = false;

@@ -17,7 +17,7 @@
     selectedCompetitorAfterRefresh: null,
     discardedRunNotice: null,
     queueCompetitorAfterRefresh: null,
-    selectedLeaderboardCompetitorId: "",
+    selectedLeaderboardRunId: "",
     leaderboardSelectionInitialized: false,
     selectPromotedAfterRecord: false,
     competitorSignature: "",
@@ -110,6 +110,7 @@
     competitorImportFile: $("competitor-import-file"),
     competitorImportResult: $("competitor-import-result"),
     start: $("start-run-button"),
+    prime: $("prime-next-button"),
     armPhysical: $("arm-physical-button"),
     durationInput: $("run-duration-input"),
     durationHelp: $("run-duration-help"),
@@ -1157,14 +1158,25 @@
   // event row (id "bonus-round"): start and end times, hits, and points (hits x points per
   // press unless overridden). The app stores it on the run rather than in its event list.
   const BONUS_EVENT_ID = "bonus-round";
-  const BONUS_EVENT_DEFINITION = Object.freeze({ eventId: BONUS_EVENT_ID, name: "Bonus round", type: "bonusRound" });
+  const DEFAULT_BONUS_NAME = "Bonus round";
+
+  // The round's name from Setup: a run keeps the name it was played under; the current
+  // edition's name labels the leaderboards and pages without a run.
+  function bonusName(run) {
+    const name = run?.edition?.bonusGame?.name || state.snapshot?.bonusGame?.name || DEFAULT_BONUS_NAME;
+    return String(name).trim() || DEFAULT_BONUS_NAME;
+  }
+
+  function bonusEventDefinition(run) {
+    return { eventId: BONUS_EVENT_ID, name: bonusName(run), type: "bonusRound" };
+  }
 
   // The edition's events plus the bonus round when it is played (or some run has a result).
   function leaderboardEventDefinitions(snapshot) {
     const events = snapshot?.events || [];
     const bonusInUse = (snapshot?.history || []).some((run) => run.bonusGame) ||
       Boolean(snapshot?.currentRun?.edition?.bonusGame?.enabled) || Boolean(state.setupDraft?.bonusGame?.enabled);
-    return bonusInUse ? [...events, BONUS_EVENT_DEFINITION] : events;
+    return bonusInUse ? [...events, bonusEventDefinition(null)] : events;
   }
 
   function isBonusScorecardEvent(event) {
@@ -1179,7 +1191,7 @@
     const perPress = Number(bonus?.pointsPerPress ?? run.edition?.bonusGame?.pointsPerPress ?? 0);
     const hits = Number(bonus?.hits || 0);
     return {
-      ...BONUS_EVENT_DEFINITION,
+      ...bonusEventDefinition(run),
       status: !bonus ? "pending" : ended ? "completed" : "active",
       running: Boolean(bonus) && !ended,
       startElapsedMs: bonus ? bonus.startedElapsedMs ?? null : null,
@@ -1492,7 +1504,7 @@
     input.min = "0";
     input.step = "1";
     input.inputMode = "numeric";
-    input.setAttribute("aria-label", `Bonus round hits (${event.pointsPerPress} points each)`);
+    input.setAttribute("aria-label", `${event.name} hits (${event.pointsPerPress} points each)`);
     input.title = `Hits · ${event.pointsPerPress} points each`;
     input.dataset.field = "hits";
     input.dataset.eventId = event.eventId;
@@ -1701,7 +1713,7 @@
     const note = !run
       ? "No run is underway. Tap an assigned event tile to flash its physical button; press a physical spoke to highlight its matching tile."
       : isBonusRunning(run)
-        ? "Bonus speed round: the lit button's tile is highlighted. Tap it if the player presses that button and it doesn't register; other tiles don't count."
+        ? `${bonusName(run)}: the lit button's tile is highlighted. Tap it if the player presses that button and it doesn't register; other tiles don't count.`
       : run.status === "active"
         ? "Times count down from the run limit. Virtual presses remain available even when physical hardware is unassigned or unverified. Press once to start an event and again to finish it."
         : run.status === "countdown"
@@ -1762,7 +1774,7 @@
         actionHint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
       }
       if (!identificationMode && useVirtual && event.status !== "completed") actionHint = `Use virtual · ${actionHint}`;
-      if (bonusRunning) actionHint = "Bonus round";
+      if (bonusRunning) actionHint = bonusName(run);
       button.setAttribute("aria-label", identificationMode
         ? `${event.name}: ${actionHint}.`
         : `${event.name}: physical button ${status.label}. ${actionHint}. Press to ${actionLabel}.`);
@@ -1810,11 +1822,11 @@
     const hitText = `${hits} hit${hits === 1 ? "" : "s"}`;
     if (String(bonus.phase).toLowerCase() !== "ended") {
       return run.status === "paused"
-        ? `Bonus round paused · ${hitText} so far. Resume when the competitor is ready.`
-        : `Bonus speed round in progress · ${hitText} so far · ${Number(bonus.pointsPerPress || 0)} points each.`;
+        ? `${bonusName(run)} paused · ${hitText} so far. Resume when the competitor is ready.`
+        : `${bonusName(run)} in progress · ${hitText} so far · ${Number(bonus.pointsPerPress || 0)} points each.`;
     }
     const recorded = run.isRecorded ? "recorded" : "not recorded";
-    return `Bonus round over (${BONUS_END_TEXT[bonus.endReason] || "ended"}) · ${hitText} · +${bonusGamePoints(run)} points · ${recorded}.`;
+    return `${bonusName(run)} over (${BONUS_END_TEXT[bonus.endReason] || "ended"}) · ${hitText} · +${bonusGamePoints(run)} points · ${recorded}.`;
   }
 
   function isBonusRunning(run) {
@@ -1856,11 +1868,11 @@
       button.classList.toggle("is-bonus-target", isTarget);
       const hint = button.querySelector(".virtual-action-hint");
       if (!hint || !isBonusRunning(state.snapshot?.currentRun)) return;
-      if (phase === "intro") hint.textContent = "Bonus round · get ready";
+      if (phase === "intro") hint.textContent = `${bonusName(state.snapshot?.currentRun)} · get ready`;
       else if (isTarget) {
         const remaining = Math.max(0, Number(live.targetRemainingMs || 0) - (live.running ? performance.now() - live.receivedAt : 0));
         hint.textContent = `LIT · ${(remaining / 1000).toFixed(1)} s · ${live.hits} hit${live.hits === 1 ? "" : "s"}`;
-      } else hint.textContent = "Bonus round";
+      } else hint.textContent = bonusName(state.snapshot?.currentRun);
     });
   }
 
@@ -2142,21 +2154,43 @@
     ui.overallLeaderboardBody.replaceChildren(fragment);
   }
 
+  // A saved run's total as recorded: event points (or overrides), the bonus round, and the
+  // general run bonus.
+  function recordedRunTotal(run) {
+    return scorecardEvents(run).reduce((sum, event) =>
+      sum + Number(event.scoreOverride ?? event.score ?? 0), Number(run?.bonusPointsOverride || 0));
+  }
+
+  // Every recorded result a player has, grouped by player: official, playoffs, and each
+  // exhibition. The top official result is shown first.
   function renderLeaderboardPlayerOptions(officialRuns) {
-    const competitors = (state.snapshot?.competitors || []).slice().sort((a, b) => a.name.localeCompare(b.name));
-    const signature = competitors.map((item) => `${item.id}:${item.name}`).join("|");
+    const history = state.snapshot?.history || [];
+    const runsById = new Map(history.map((run) => [run.id, run]));
+    const groups = leaderboardTools.scorecardRunChoices(history, state.snapshot?.competitors || [], state.snapshot?.editionId);
+    const optionText = (choice) => {
+      const run = runsById.get(choice.runId);
+      const when = choice.label.match(/ \d+$/) ? ` · ${shortDate(run.recordedAt || run.finishedAt || run.createdAt)}` : "";
+      return `${choice.label} · ${recordedRunTotal(run)} pts${when}`;
+    };
+    const signature = JSON.stringify(groups.map((group) => [group.name, group.runs.map((choice) => [choice.runId, optionText(choice)])]));
     if (signature !== state.leaderboardCompetitorSignature) {
-      ui.leaderboardPlayerSelect.replaceChildren(new Option("Select a player…", ""));
-      competitors.forEach((competitor) => ui.leaderboardPlayerSelect.appendChild(new Option(competitor.name, competitor.id)));
+      ui.leaderboardPlayerSelect.replaceChildren(new Option("Select a player's run…", ""));
+      groups.forEach((group) => {
+        const optgroup = document.createElement("optgroup");
+        optgroup.label = group.name;
+        group.runs.forEach((choice) => optgroup.appendChild(new Option(`${group.name} · ${optionText(choice)}`, choice.runId)));
+        ui.leaderboardPlayerSelect.appendChild(optgroup);
+      });
       state.leaderboardCompetitorSignature = signature;
     }
-    const validCompetitors = new Set(competitors.map((item) => item.id));
-    if (!validCompetitors.has(state.selectedLeaderboardCompetitorId)) state.selectedLeaderboardCompetitorId = "";
-    if (!state.selectedLeaderboardCompetitorId && !state.leaderboardSelectionInitialized) {
-      state.selectedLeaderboardCompetitorId = officialRuns.find(({ run }) => validCompetitors.has(run.competitorId))?.run.competitorId || "";
+    const validRuns = new Set(groups.flatMap((group) => group.runs.map((choice) => choice.runId)));
+    if (!validRuns.has(state.selectedLeaderboardRunId)) state.selectedLeaderboardRunId = "";
+    if (!state.selectedLeaderboardRunId && !state.leaderboardSelectionInitialized) {
+      state.selectedLeaderboardRunId = officialRuns.find(({ run }) => validRuns.has(run.id))?.run.id ||
+        groups[0]?.runs[0]?.runId || "";
       state.leaderboardSelectionInitialized = true;
     }
-    ui.leaderboardPlayerSelect.value = state.selectedLeaderboardCompetitorId;
+    ui.leaderboardPlayerSelect.value = state.selectedLeaderboardRunId;
   }
 
   function runEventTimestamp(run, elapsedMs) {
@@ -2166,25 +2200,19 @@
     return remaining === null ? "—" : formatSeconds(remaining * 1000);
   }
 
-  function renderSelectedPlayerLeaderboard(officialRuns) {
-    const selectedId = state.selectedLeaderboardCompetitorId;
-    if (!selectedId) {
-      ui.playerLeaderboardCaption.textContent = "Select a player to review their event times and points.";
+  function renderSelectedPlayerLeaderboard() {
+    const selectedId = state.selectedLeaderboardRunId;
+    const run = selectedId ? (state.snapshot?.history || []).find((item) => item.id === selectedId) : null;
+    if (!run) {
+      ui.playerLeaderboardCaption.textContent = "Select a player's run to review their event times and points.";
       ui.playerLeaderboardTotal.textContent = "—";
-      appendEmptyTableRow(ui.playerLeaderboardBody, 5, "Select a player to see their scorecard.");
-      return;
-    }
-    const selected = officialRuns.find(({ run }) => run.competitorId === selectedId);
-    if (!selected) {
-      ui.playerLeaderboardCaption.textContent = "No counted official result for this player in the current edition.";
-      ui.playerLeaderboardTotal.textContent = "—";
-      appendEmptyTableRow(ui.playerLeaderboardBody, 5, "This player has no counted official run to display.");
+      appendEmptyTableRow(ui.playerLeaderboardBody, 5, "Select a player's run to see its scorecard.");
       return;
     }
 
-    const { row: overallRow, run } = selected;
-    ui.playerLeaderboardCaption.textContent = `Official result · ${overallRow.points} total points · ${shortDate(run.recordedAt || run.finishedAt || run.createdAt)}`;
-    ui.playerLeaderboardTotal.textContent = String(overallRow.points);
+    const total = recordedRunTotal(run);
+    ui.playerLeaderboardCaption.textContent = `${competitorName(run.competitorId)} · ${categoryLabel(run.category)} result · ${total} total points · ${shortDate(run.recordedAt || run.finishedAt || run.createdAt)}`;
+    ui.playerLeaderboardTotal.textContent = String(total);
     const eventResults = new Map(scorecardEvents(run).map((event) => [event.eventId, event]));
     const configuredEvents = leaderboardEventDefinitions(state.snapshot);
     if (!configuredEvents.length) {
@@ -2281,9 +2309,10 @@
       state.overallLeaderboardKey = overallKey;
     }
 
-    const playerKey = `${state.selectedLeaderboardCompetitorId}:${JSON.stringify(officialRuns.map(({ row, run }) => [row.runId, row.points, run.revision, run.events]))}:${JSON.stringify(snapshot.events)}`;
+    const selectedRun = (snapshot.history || []).find((run) => run.id === state.selectedLeaderboardRunId);
+    const playerKey = `${state.selectedLeaderboardRunId}:${JSON.stringify(selectedRun ? [selectedRun.revision, selectedRun.events, selectedRun.bonusGame, selectedRun.bonusPointsOverride] : null)}:${JSON.stringify(snapshot.events)}`;
     if (playerKey !== state.playerLeaderboardKey) {
-      renderSelectedPlayerLeaderboard(officialRuns);
+      renderSelectedPlayerLeaderboard();
       state.playerLeaderboardKey = playerKey;
     }
 
@@ -2468,6 +2497,13 @@
       : `Start ${masterActions.formatRunDuration(durationSeconds || 300)} run`;
     // Start controls live beside the event buttons and only show while a run can start.
     ui.start.hidden = locked && run?.status !== "armed";
+    // "Up Next" only changes the TV between runs; it shows once the last run is out of the way.
+    const primed = snapshot?.primed || null;
+    const primedMatches = Boolean(primed && primed.competitorId === selectedId &&
+      primed.category === ui.category.value && primed.durationLimitSeconds === durationSeconds);
+    ui.prime.hidden = locked;
+    ui.prime.disabled = state.busy || !selectedId || durationSeconds === null || primedMatches;
+    ui.prime.textContent = primedMatches ? "Up Next · on the TV" : "Up Next";
     ui.armPhysical.hidden = ui.start.hidden || !(state.master?.connected || run?.status === "armed");
     ui.armPhysical.disabled = state.busy || state.masterBusy || !masterActions.canArmPhysical(state.master, run, selectedId) || (!locked && durationSeconds === null);
     ui.armPhysical.textContent = run?.status === "armed"
@@ -2640,6 +2676,17 @@
     await removeMatchingQueueEntryAfterStart(started.competitorId, started.category);
   }
 
+  async function primeNextCompetitor() {
+    await request("/api/run/prime", {
+      method: "POST",
+      body: JSON.stringify({
+        competitorId: ui.competitor.value,
+        category: ui.category.value,
+        durationLimitSeconds: selectedRunDurationSeconds()
+      })
+    });
+  }
+
   async function armPhysicalRun() {
     const redo = confirmOfficialRedo(ui.competitor.value, ui.category.value);
     if (redo === false) return false;
@@ -2692,7 +2739,7 @@
       await performAction(async () => {
         const result = await request(`/api/runs/${encodeURIComponent(run.id)}/events/${encodeURIComponent(event.eventId)}/press`, { method: "POST" });
         if (String(result?.disposition || "").toLowerCase() !== "accepted") throw new Error(result?.reason || "That bonus press did not count.");
-      }, `Bonus hit on ${event.name}.`);
+      }, `${bonusName(run)} hit on ${event.name}.`);
       void pollBonusLive();
       return;
     }
@@ -2955,7 +3002,7 @@
       state.selectedHistoryId = null;
       state.selectedCompetitorAfterRefresh = null;
       state.queueCompetitorAfterRefresh = null;
-      state.selectedLeaderboardCompetitorId = "";
+      state.selectedLeaderboardRunId = "";
       state.discardedRunNotice = null;
       state.selectPromotedAfterRecord = false;
       ui.clearDatabaseConfirmation.value = "";
@@ -3024,6 +3071,8 @@
     });
     ui.armPhysical.addEventListener("click", () => performAction(armPhysicalRun, "Run armed · waiting for the physical Start button."));
     ui.start.addEventListener("click", () => performAction(startRun, "Countdown started. Run begins at Go."));
+    ui.prime.addEventListener("click", () => performAction(primeNextCompetitor,
+      `The TV now shows ${competitorName(ui.competitor.value)} as up next.`));
     ui.masterConnect.addEventListener("click", () => {
       const port = ui.masterPort.value;
       if (!port) return;
@@ -3169,7 +3218,7 @@
     });
     ui.queueCompetitor.addEventListener("change", updateControls);
     ui.leaderboardPlayerSelect.addEventListener("change", () => {
-      state.selectedLeaderboardCompetitorId = ui.leaderboardPlayerSelect.value;
+      state.selectedLeaderboardRunId = ui.leaderboardPlayerSelect.value;
       state.playerLeaderboardKey = null;
       renderLeaderboards();
     });

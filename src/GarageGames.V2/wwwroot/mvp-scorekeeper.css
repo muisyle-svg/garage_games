@@ -350,7 +350,12 @@ select:disabled, input:disabled { opacity: .58; }
 .leaderboard-player-select select { min-width: 0; }
 .leaderboard-table { font-variant-numeric: tabular-nums; }
 .leaderboard-table td { height: 38px; }
-.leaderboard-rank { width: 4.5rem; color: var(--dim); font-weight: 850; }
+/* Leaderboards fit their card: the first column is a short rank (not an event name), and
+   these tables never force a minimum width (so no sideways scrolling). */
+.score-table.leaderboard-table { min-width: 0; }
+.leaderboard-table td:first-child { min-width: 0; }
+.leaderboard-table th:first-child { width: 2.6rem; }
+.leaderboard-rank { width: 2.6rem; padding-right: .15rem !important; color: var(--dim); font-weight: 850; }
 .leaderboard-player { min-width: 120px; font-weight: 760; }
 .leaderboard-points { color: var(--green); font-weight: 900; text-align: right; white-space: nowrap; }
 .leaderboard-category { color: var(--muted); font-size: .62rem; white-space: nowrap; }
@@ -359,7 +364,10 @@ select:disabled, input:disabled { opacity: .58; }
 .leaderboard-table th:last-child { text-align: right; }
 .leaderboard-table-scroll { max-height: 450px; }
 .player-results-scroll { max-height: 540px; }
-.player-results-table { min-width: 680px; }
+/* The player scorecard's first column is the event name, so it keeps a sensible width. */
+.score-table.player-results-table { min-width: 0; }
+.player-results-table td:first-child { min-width: 120px; }
+.player-results-table th:first-child { width: auto; }
 .leaderboard-card tfoot th, .leaderboard-card tfoot td { padding: .58rem .55rem; border-top: 1px solid var(--line); color: var(--ink); font-size: .7rem; font-weight: 900; }
 .leaderboard-card tfoot td { color: var(--green); text-align: right; }
 .setup-panel { padding-bottom: .85rem; }
@@ -422,6 +430,7 @@ select:disabled, input:disabled { opacity: .58; }
 .setup-bonus-fields label { display: grid; gap: .25rem; color: var(--muted); font-size: .58rem; font-weight: 850; letter-spacing: .045em; text-transform: uppercase; }
 .setup-bonus-fields input { min-width: 0; min-height: 34px; font-size: .7rem; }
 .setup-bonus-fields input:disabled { opacity: .5; }
+.setup-bonus-fields .setup-bonus-name { grid-column: 1 / -1; max-width: 420px; }
 .setup-preview { display: grid; gap: .35rem; margin: .85rem .95rem 0; padding: .75rem; border: 1px solid rgba(104, 214, 164, .2); border-radius: 10px; background: rgba(104, 214, 164, .035); }
 .setup-preview h3 { margin: 0; font-size: .8rem; }
 .setup-preview .mvp-kicker { margin: 0 0 .12rem; }
@@ -443,7 +452,6 @@ select:disabled, input:disabled { opacity: .58; }
 .event-leaderboard-heading .small-note { flex: 0 0 auto; text-align: right; }
 .event-leaderboard-table-scroll { max-height: 310px; }
 .event-leaderboard-table { min-width: 0; }
-.event-leaderboard-table td:first-child { min-width: 55px; }
 .event-leaderboard-table .empty-cell { white-space: normal; }
 .danger-tools { margin-top: 1rem; border: 1px solid rgba(240, 135, 121, .2); border-radius: 11px; background: rgba(7, 15, 13, .22); }
 .danger-tools > summary { padding: .75rem .9rem; color: var(--muted); cursor: pointer; font-size: .7rem; font-weight: 850; }
@@ -476,6 +484,7 @@ select:disabled, input:disabled { opacity: .58; }
   .virtual-event-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .history-list { max-height: 230px; border-right: 0; border-bottom: 1px solid var(--line); }
   .score-table { min-width: 610px; }
+  .score-table.leaderboard-table { min-width: 0; }
 }
 
 @media (max-width: 500px) {

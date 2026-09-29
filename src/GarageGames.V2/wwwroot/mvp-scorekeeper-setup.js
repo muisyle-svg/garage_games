@@ -141,13 +141,15 @@
 
   // The bonus speed round's settings, edited in seconds (the app stores milliseconds).
   const BONUS_DEFAULTS = Object.freeze({
-    enabled: true, pointsPerPress: 5, initialWindowMs: 10_000, stepMs: 1_000, stepEveryMs: 10_000, minimumWindowMs: 2_000
+    name: "Bonus round", enabled: true, pointsPerPress: 5, initialWindowMs: 10_000, stepMs: 1_000, stepEveryMs: 10_000, minimumWindowMs: 2_000
   });
+  const MAX_BONUS_NAME_LENGTH = 60;
 
   function normalizeBonusGame(source) {
     const value = { ...BONUS_DEFAULTS, ...(source && typeof source === "object" ? source : {}) };
     const seconds = (ms) => String(Math.round(Number(ms) / 100) / 10);
     return {
+      name: String(value.name || BONUS_DEFAULTS.name),
       enabled: value.enabled !== false,
       pointsPerPress: String(value.pointsPerPress),
       initialSeconds: seconds(value.initialWindowMs),
@@ -169,7 +171,13 @@
     if (!validInteger(source.pointsPerPress, 0, 100_000)) {
       throw new Error("Bonus round: points per press must be a whole number from 0 to 100,000.");
     }
+    // A blank name falls back to the default.
+    const name = String(source.name ?? "").trim() || BONUS_DEFAULTS.name;
+    if (name.length > MAX_BONUS_NAME_LENGTH) {
+      throw new Error(`Bonus round: keep its name to ${MAX_BONUS_NAME_LENGTH} characters or fewer.`);
+    }
     const payload = {
+      name,
       enabled: source.enabled !== false,
       pointsPerPress: Number(source.pointsPerPress),
       initialWindowMs: secondsToMs(source.initialSeconds, "starting seconds per press", 0.5, 60),
