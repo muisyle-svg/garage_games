@@ -286,6 +286,12 @@ app.MapPost("/api/run/finish", async (RunService runs, PhysicalMasterSerialServi
     await master.SendCurrentStatusAsync(cancellationToken);
     return Results.Ok(run);
 });
+app.MapPost("/api/run/reopen", async (RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.ReopenFinished();
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
 app.MapPost("/api/run/record", async (RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
 {
     var run = runs.Record();

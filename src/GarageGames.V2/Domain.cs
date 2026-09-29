@@ -80,7 +80,8 @@ public enum MessageDisposition
     BonusNotReady,
     InvalidEnvelope,
     StaleSequence,
-    Undone
+    Undone,
+    TooSoon
 }
 
 public sealed class ScoringRule

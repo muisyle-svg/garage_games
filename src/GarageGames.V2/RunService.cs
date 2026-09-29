@@ -759,10 +759,12 @@ public sealed class RunService
     {
         lock (_gate)
         {
+            RefreshActiveClock();
             if (_current is not null)
             {
                 throw new CommandException("Finish and record (or discard) the current run before showing who is up next.");
             }
+            RequireLastRunSettled();
             RequireActiveCompetitor(competitorId);
             var duration = RequireRequestedRunDuration(durationLimitSeconds);
             _primed = new PrimedCompetitor(competitorId, category, duration);
@@ -1070,6 +1072,7 @@ public sealed class RunService
             {
                 throw new CommandException("Record or finish the current run before starting another competitor.");
             }
+            RequireLastRunSettled();
             RequireActiveCompetitor(competitorId);
             if (!Enum.IsDefined(category))
             {
@@ -1263,6 +1266,7 @@ public sealed class RunService
             {
                 throw new CommandException("Finish, pause, or abort the current run before arming another.");
             }
+            RequireLastRunSettled();
 
             var queueItem = _data.Queue.SingleOrDefault(q => q.Id == queueId)
                 ?? throw new CommandException("Queue item was not found.");
@@ -1605,7 +1609,9 @@ public sealed class RunService
         // completed event as it was.
         var bonusPressNotCounted = run?.BonusGame is not null && eventResult?.Status == EventStatus.Completed &&
             result.Disposition is MessageDisposition.InvalidSignal or MessageDisposition.StaleTimestamp;
-        if (result.Disposition is MessageDisposition.Accepted or MessageDisposition.Duplicate or MessageDisposition.AlreadyCompleted ||
+        // A double press ignored by the finish lockout leaves the event running.
+        if (result.Disposition is MessageDisposition.Accepted or MessageDisposition.Duplicate or MessageDisposition.AlreadyCompleted
+                or MessageDisposition.TooSoon ||
             keypadStillRunning || bonusPressNotCounted)
         {
             state = eventResult is null ? "REJECTED" : eventResult.Status switch
@@ -1706,7 +1712,11 @@ public sealed class RunService
             {
                 return Clone(run);
             }
-            if (run.Status is not RunStatus.Active and not RunStatus.Paused and not RunStatus.Armed)
+            if (run.Status == RunStatus.Armed)
+            {
+                throw new CommandException("This run hasn't started, so there is nothing to finish. Discard it instead.");
+            }
+            if (run.Status is not RunStatus.Active and not RunStatus.Paused)
             {
                 throw new CommandException("The current session cannot be finished in its current state.");
             }
@@ -1731,6 +1741,53 @@ public sealed class RunService
         }
     }
 
+    // Takes back a Finish that was pressed by mistake: the unrecorded run returns paused with
+    // its clock where it stopped, and Resume carries on from there.
+    public RunRecord ReopenFinished()
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            var run = _current is { Status: RunStatus.Finished } finished
+                ? finished
+                : throw new CommandException("Only a finished run that hasn't been recorded can be reopened.");
+            if (run.BonusGame is not null)
+            {
+                throw new CommandException("The bonus round already ended this run, so it can't be reopened. Edit its results instead.");
+            }
+            if (run.AllEventsCompleted)
+            {
+                throw new CommandException("Every event in this run is complete, so there is nothing left to play.");
+            }
+            if (run.ActiveElapsedMs >= run.Edition.DurationLimitSeconds * 1000L)
+            {
+                throw new CommandException("This run has no time left to reopen.");
+            }
+
+            run.Status = RunStatus.Paused;
+            run.PausedFromPhase = RunPhase.Normal.ToString();
+            run.Phase = RunPhase.Normal;
+            run.FinishedAt = null;
+            run.Revision++;
+            RestartClockAnchor();
+            var message = CreateMessage(NewId("reopen"), run.Id, run.Id, "operator", "operator-reopen", run.ActiveElapsedMs,
+                MessageDisposition.Accepted, "Operator reopened a finished run; it is paused until resumed.", null);
+            try
+            {
+                _store.SaveRunAndMessage(run, message);
+            }
+            catch
+            {
+                ReloadInMemoryAfterPersistenceFailure();
+                throw;
+            }
+            _data.Messages.Add(message);
+            _lastDisplayedRun = run;
+            UpdateDeviceLeds();
+            return Clone(run);
+        }
+    }
+
     public RunRecord Record()
     {
         lock (_gate)
@@ -1749,14 +1806,14 @@ public sealed class RunService
                 throw new CommandException("There is no run ready to record.");
             }
 
-            if (_current.Status == RunStatus.Countdown)
+            // Only a run that is over can be recorded: recording never ends a run by itself.
+            if (_current.Status == RunStatus.Armed)
             {
-                throw new CommandException("A countdown must finish before the run can be recorded.");
+                throw new CommandException("This run hasn't started, so there is nothing to record. Discard it instead.");
             }
-
-            if (_current.Status is RunStatus.Armed or RunStatus.Active or RunStatus.Paused)
+            if (_current.Status is RunStatus.Countdown or RunStatus.Active or RunStatus.Paused)
             {
-                Finish();
+                throw new CommandException("This run is still in progress. Finish it first, then record the result.");
             }
             var run = RequireCurrent();
             if (run.Status != RunStatus.Finished)
@@ -1802,6 +1859,10 @@ public sealed class RunService
         if (run.IsRecorded)
         {
             return Clone(run);
+        }
+        if (NeverStarted(run))
+        {
+            throw new CommandException("This run never started, so there is no result to record.");
         }
 
         // A replacement displaces its source only once it is recorded, so discarding
@@ -2130,6 +2191,9 @@ public sealed class RunService
     // Presses are timed when pressed but can arrive a little later over the radio; wait this
     // long past a deadline before calling it a miss.
     public const long BonusMissGraceMilliseconds = 300;
+    // No event can really be finished this fast, so a finish press this soon after the start
+    // press is a double press (or a bounce) and is ignored; the event keeps running.
+    public const long FinishPressLockoutMilliseconds = 500;
 
     private bool TryStartBonusGame(RunRecord run)
     {
@@ -2738,6 +2802,11 @@ public sealed class RunService
                     reason = "Completion timestamp precedes event start.";
                     return MessageDisposition.StaleTimestamp;
                 }
+                if (envelope.ElapsedMilliseconds - start < FinishPressLockoutMilliseconds)
+                {
+                    reason = "Finish press ignored: it came too soon after the start press (a double press).";
+                    return MessageDisposition.TooSoon;
+                }
 
                 eventResult.FinishElapsedMs = envelope.ElapsedMilliseconds;
                 eventResult.Status = EventStatus.Completed;
@@ -2791,6 +2860,12 @@ public sealed class RunService
                 {
                     reason = "Keypad completion timestamp precedes its prompt start.";
                     return MessageDisposition.StaleTimestamp;
+                }
+                // The operator's override tap gets the same double-press guard as a finish press.
+                if (envelope.Type == "keypad-success" && envelope.ElapsedMilliseconds - start < FinishPressLockoutMilliseconds)
+                {
+                    reason = "Override tap ignored: it came too soon after the start press (a double press).";
+                    return MessageDisposition.TooSoon;
                 }
 
                 reason = SolveKeypadChallenge(run, eventResult, current, envelope,
@@ -3671,6 +3746,20 @@ public sealed class RunService
         run.Phase = RunPhase.Normal;
         run.BonusStartedElapsedMs = null;
     }
+
+    // A run that timed out stays on screen unrecorded; the next run waits until it is
+    // recorded or discarded so no result is left behind by accident.
+    private void RequireLastRunSettled()
+    {
+        if (_lastDisplayedRun is { Status: RunStatus.TimedOut, IsRecorded: false, IsDeleted: false } timedOut)
+        {
+            var name = _data.Competitors.SingleOrDefault(c => c.Id == timedOut.CompetitorId)?.Name ?? "The last competitor";
+            throw new CommandException($"{name}'s run timed out and hasn't been recorded. Record or discard it before starting the next run.");
+        }
+    }
+
+    private static bool NeverStarted(RunRecord run) =>
+        run.StartedAt is null && run.ActiveElapsedMs == 0 && run.Events.All(item => item.StartElapsedMs is null);
 
     private static void ReopenRun(RunRecord run)
     {

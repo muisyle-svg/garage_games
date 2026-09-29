@@ -21,6 +21,7 @@ var tests = new (string Name, Action Run)[]
     ("physical master start is durable, deduplicated, and consumes its on-deck item", PhysicalMasterStartDurabilityAndQueue),
     ("physical master status follows run countdown", PhysicalMasterStatusCountdown),
     ("timeout autosaves and releases next competitor", MvpTimeoutAndNextRun),
+    ("only a finished run is recorded, and a mistaken finish can be reopened", RecordNeedsFinishedRunAndFinishReopens),
     ("HTTP arm request duration flows into the saved run and ten-second timeout", ArmRequestDurationHandoff),
     ("custom run duration snapshots timeout and preserves edition leaderboard identity", PerRunDurationSnapshot),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
@@ -611,8 +612,8 @@ static void PhysicalSpokeDedupesAndMixesWithVirtual()
     protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} FFFFFFFFFFFF 6", ReceiveStart, ReceivePress);
     Assert.Equal(MessageDisposition.UnknownStation, received!.Disposition);
     h.Service.PressEvent(run.Id, "spoke-event-02");
-    h.Service.PressEvent(run.Id, "spoke-event-02");
     h.Clock.Advance(TimeSpan.FromMilliseconds(700));
+    h.Service.PressEvent(run.Id, "spoke-event-02");
     protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 7", ReceiveStart, ReceivePress);
     Assert.Equal(MessageDisposition.Accepted, received!.Disposition);
     Assert.Equal("COMPLETED", received.State);
@@ -647,6 +648,15 @@ static void PhysicalButtonStateSnapshotTracksMixedInputs()
     Assert.Equal(MessageDisposition.Accepted, physicalStart.Disposition);
     Assert.Equal("ACTIVE", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
 
+    // A double press within the finish lockout is ignored and the button keeps running.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.FinishPressLockoutMilliseconds - 100));
+    var doublePress = h.Service.ReceivePhysicalSpokePress(
+        new MasterPhysicalPress("boot-test", runToken, firstMac, 2), sessionAllowed: true);
+    Assert.Equal(MessageDisposition.TooSoon, doublePress.Disposition);
+    Assert.Equal("ACTIVE", doublePress.State);
+    Assert.Equal(EventStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(item => item.DeviceId == firstMac).Status);
+
+    h.Clock.Advance(TimeSpan.FromMilliseconds(100));
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "spoke-event-01").Disposition);
     Assert.Equal("COMPLETED", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
 
@@ -659,8 +669,9 @@ static void PhysicalButtonStateSnapshotTracksMixedInputs()
     Assert.Equal("PENDING", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
 
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "spoke-event-01").Disposition);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
     var physicalFinish = h.Service.ReceivePhysicalSpokePress(
-        new MasterPhysicalPress("boot-test", runToken, firstMac, 2), sessionAllowed: true);
+        new MasterPhysicalPress("boot-test", runToken, firstMac, 3), sessionAllowed: true);
     Assert.Equal(MessageDisposition.Accepted, physicalFinish.Disposition);
     Assert.Equal("COMPLETED", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
 
@@ -880,12 +891,64 @@ static void MvpTimeoutAndNextRun()
     Assert.Equal(1, h.Service.GetOperatorSnapshot().History.Count(r => r.Id == first.Id));
     Assert.Equal(MessageDisposition.TimedOut, h.Service.PressEvent(first.Id, "event-01").Disposition);
 
+    // The next run (and the Up Next view) waits until the timed-out run is recorded or discarded.
     var nextCompetitor = h.AddCompetitor("Next competitor");
+    var blocked = Assert.Throws<CommandException>(() => h.Service.ArmCompetitor(nextCompetitor.Id, RunCategory.Official));
+    Assert.True(blocked.Message.Contains("timed out", StringComparison.Ordinal));
+    Assert.Throws<CommandException>(() => h.Service.PrimeNextCompetitor(nextCompetitor.Id, RunCategory.Official, 2));
+    var queued = h.Service.AddToQueue(nextCompetitor.Id, RunCategory.Exhibition);
+    Assert.Throws<CommandException>(() => h.Service.Arm(queued.Id));
+    h.Service.RecordHistoricalRun(first.Id);
     var nextRun = h.Service.ArmCompetitor(nextCompetitor.Id, RunCategory.Official);
     Assert.Equal(RunStatus.Armed, nextRun.Status);
     Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == first.Id).Status);
     Assert.Equal(nextRun.Id, h.StartRun().Id);
     Assert.Equal(RunStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+}
+
+static void RecordNeedsFinishedRunAndFinishReopens()
+{
+    using var h = new TestHarness(MakeMvpEdition(durationSeconds: 60), NewPath());
+    var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 60);
+    // An armed run has nothing to finish or record; it can only be discarded.
+    Assert.Throws<CommandException>(() => h.Service.Record());
+    Assert.Throws<CommandException>(() => h.Service.Finish());
+    Assert.Throws<CommandException>(() => h.Service.RecordHistoricalRun(run.Id));
+    var countdown = h.Service.StartMaster();
+    Assert.Throws<CommandException>(() => h.Service.Record());
+    h.Service.CompleteCountdown(countdown.Id);
+    h.Service.PressEvent(run.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+
+    // Recording never ends a run in progress.
+    Assert.Throws<CommandException>(() => h.Service.Record());
+    Assert.Equal(RunStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+    h.Service.Pause();
+    Assert.Throws<CommandException>(() => h.Service.Record());
+    h.Service.Resume();
+    Assert.Throws<CommandException>(() => h.Service.ReopenFinished());
+
+    // A mistaken Finish is reopened paused, with the clock where it stopped.
+    var finished = h.Service.Finish();
+    var reopened = h.Service.ReopenFinished();
+    Assert.Equal(RunStatus.Paused, reopened.Status);
+    Assert.Equal(finished.ActiveElapsedMs, reopened.ActiveElapsedMs);
+    Assert.Equal<DateTimeOffset?>(null, reopened.FinishedAt);
+    Assert.Equal(RunStatus.Paused, h.Store.Load().Runs.Single(r => r.Id == run.Id).Status);
+    h.Clock.Advance(TimeSpan.FromSeconds(30));
+    var resumed = h.Service.Resume();
+    Assert.Equal(finished.ActiveElapsedMs, resumed.ActiveElapsedMs);
+    h.Clock.Advance(TimeSpan.FromSeconds(2));
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "event-01").Disposition);
+    h.Service.Finish();
+    Assert.True(h.Service.Record().IsRecorded);
+    Assert.Throws<CommandException>(() => h.Service.ReopenFinished());
+
+    // A discarded run that never started cannot be recorded from history either.
+    var other = h.AddCompetitor("Never started");
+    var armed = h.Service.ArmCompetitor(other.Id, RunCategory.Exhibition, 60);
+    h.Service.Abort("Wrong player");
+    Assert.Throws<CommandException>(() => h.Service.RecordHistoricalRun(armed.Id));
 }
 
 static void PerRunDurationSnapshot()
@@ -925,6 +988,7 @@ static void PerRunDurationSnapshot()
     Assert.Equal(2, persistedCustomRun.Edition.DurationLimitSeconds);
     Assert.Equal(edition.EditionId, persistedCustomRun.EditionId);
 
+    h.Service.Abort("Discarded so the next run can start");
     var defaultRun = h.Service.ArmCompetitor(nextCompetitor.Id, RunCategory.Official);
     Assert.Equal(300, defaultRun.Edition.DurationLimitSeconds);
     Assert.Equal(edition.EditionId, defaultRun.EditionId);
@@ -1544,7 +1608,11 @@ static void DuplicateAndStale()
     Assert.Equal(MessageDisposition.Accepted, otherStation.Disposition);
     var staleEventOne = h.Send(run, "station-01", "event-press", "event-one-stale", 4_000);
     Assert.Equal(MessageDisposition.StaleTimestamp, staleEventOne.Disposition);
-    var eventOneCompletion = h.Send(run, "station-01", "event-press", "event-one-finish", 5_000);
+    // A finish press within half a second of the start is a double press and is ignored.
+    var doublePress = h.Send(run, "station-01", "event-press", "event-one-double", 5_000 + RunService.FinishPressLockoutMilliseconds - 1);
+    Assert.Equal(MessageDisposition.TooSoon, doublePress.Disposition);
+    Assert.Equal(EventStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == "station-01").Status);
+    var eventOneCompletion = h.Send(run, "station-01", "event-press", "event-one-finish", 5_000 + RunService.FinishPressLockoutMilliseconds);
     Assert.Equal(MessageDisposition.Accepted, eventOneCompletion.Disposition);
 }
 
@@ -1767,6 +1835,7 @@ static void VirtualPressReadinessFallback()
 
     Assert.Equal(MessageDisposition.Offline, h.Send(run, "station-01", "event-press", "unverified-packet").Disposition);
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "event-01").Disposition);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "event-01").Disposition);
     Assert.Equal(DeviceAvailability.Unverified, h.Service.GetOperatorSnapshot().Devices
         .Single(device => device.DeviceId == "station-01").Availability);
@@ -1819,6 +1888,7 @@ static void RestartAndOfficialRule()
     Assert.Equal(RunStatus.Completed, history.Single(r => r.Id == first.Id).Status);
     Assert.Equal(first.Id, h.Service.GetOperatorSnapshot().Leaderboard.Single().RunId);
 
+    h.StartRun();
     h.Service.Finish();
     h.Service.Record();
     Assert.Equal(RunStatus.Superseded, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == first.Id).Status);
@@ -2031,11 +2101,16 @@ static void HistoricalRecordKeepsOnDeckQueue()
     h.Clock.Advance(TimeSpan.FromSeconds(3));
     Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
 
+    // The next run waits for the timed-out one, so set it aside (delete) and bring it back
+    // afterwards to record it from history.
     var next = h.AddCompetitor("Next competitor");
     var onDeckCompetitor = h.AddCompetitor("On-deck competitor");
+    var oldRevision = h.Service.GetOperatorSnapshot().CurrentRun!.Revision;
+    h.Service.DeleteRun(old.Id, oldRevision, "Set aside");
     h.Service.ArmCompetitor(next.Id, RunCategory.Official, 60);
     var onDeck = h.Service.AddToQueue(onDeckCompetitor.Id, RunCategory.Official);
 
+    h.Service.RestoreRun(old.Id);
     h.Service.RecordHistoricalRun(old.Id);
     Assert.Equal(onDeck.Id, h.Service.GetOperatorSnapshot().Queue.Single().Id);
     Assert.Equal(onDeck.Id, h.Store.Load().Queue.Single().Id);
@@ -2064,11 +2139,14 @@ static void SecondOfficialCannotBeRecordedFromHistory()
     h.Clock.Advance(TimeSpan.FromSeconds(3));
     Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
 
+    var timedOutRevision = h.Service.GetOperatorSnapshot().CurrentRun!.Revision;
+    h.Service.DeleteRun(timedOut.Id, timedOutRevision, "Set aside");
     var second = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 60);
     h.StartRun();
     h.Service.Finish();
     h.Service.Record();
 
+    h.Service.RestoreRun(timedOut.Id);
     Assert.Throws<CommandException>(() => h.Service.RecordHistoricalRun(timedOut.Id));
     Assert.Equal(second.Id, h.Service.GetScoreboard().Leaderboard.Single(r => r.Category == RunCategory.Official).RunId);
     Assert.True(!h.Store.Load().Runs.Single(r => r.Id == timedOut.Id).IsRecorded);
@@ -2286,9 +2364,13 @@ static void KeypadOperatorOverrideAndAutoFinish()
     var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
 
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "regular").Disposition);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "regular").Disposition);
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "keypad").Disposition);
     Assert.Equal("Summer League 2009", h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Prompt);
+    // A double tap on the tile is not taken as the operator's override.
+    Assert.Equal(MessageDisposition.TooSoon, h.Service.PressEvent(run.Id, "keypad").Disposition);
+    Assert.Equal(EventStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad").Status);
 
     // A physical wrong code followed by the operator's override finishes the event.
     var wrong = h.Service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, 1, true, "1234"), sessionAllowed: true);
@@ -2341,9 +2423,9 @@ static void KeypadEventUndo()
 
     // An operator override finishing the whole run is undone too, reopening the run.
     h.Service.PressEvent(run.Id, "regular");
-    h.Service.PressEvent(run.Id, "regular");
     h.Service.PressEvent(run.Id, "keypad");
     h.Clock.Advance(TimeSpan.FromSeconds(1));
+    h.Service.PressEvent(run.Id, "regular");
     h.Service.PressEvent(run.Id, "keypad");
     Assert.Equal(RunStatus.Finished, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
     var reopened = h.Service.UndoEventPress("keypad");
@@ -3332,6 +3414,7 @@ static void EditsAndIsolation()
     using var h = NewHarness();
     var first = h.ArmAndStart();
     Assert.Equal(MessageDisposition.Accepted, h.Send(first, "station-01", "event-press", "history-start").Disposition);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
     Assert.Equal(MessageDisposition.Accepted, h.Send(first, "station-01", "event-press", "history-finish").Disposition);
     var historical = h.Service.Finish();
     h.Service.Record();
@@ -3496,14 +3579,17 @@ static void BuildIdentityFingerprint()
 
 static void CompleteAllEvents(TestHarness h, RunRecord run)
 {
+    // Finishes land a second after the starts, past the double-press lockout.
+    var finishAt = h.Service.GetOperatorSnapshot().CurrentRun!.ActiveElapsedMs + 1_000;
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
     h.Send(run, "station-01", "event-press", "bonus-e1-start", 0);
-    h.Send(run, "station-01", "event-press", "bonus-e1-finish", 0);
+    h.Send(run, "station-01", "event-press", "bonus-e1-finish", finishAt);
     h.Send(run, "station-02", "event-press", "bonus-key-start", 0);
-    h.Send(run, "station-02", "keypad-success", "bonus-key-success", 0);
+    h.Send(run, "station-02", "keypad-success", "bonus-key-success", finishAt);
     h.Send(run, "station-03", "arcade-start", "bonus-arcade-start", 0);
-    h.Send(run, "station-03", "arcade-finish", "bonus-arcade-finish", 0);
+    h.Send(run, "station-03", "arcade-finish", "bonus-arcade-finish", finishAt);
     h.Send(run, "station-04", "event-press", "bonus-e4-start", 0);
-    h.Send(run, "station-04", "event-press", "bonus-e4-finish", 0);
+    h.Send(run, "station-04", "event-press", "bonus-e4-finish", finishAt);
 }
 
 static TestHarness NewHarness(int durationSeconds = 300, bool simulatedDevicesOnline = true) =>
