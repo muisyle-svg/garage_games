@@ -1014,7 +1014,7 @@
   // The bonus speed round: the lit button's event and its time left, counted down locally
   // between fetches; afterwards a short summary strip above the event results.
   let scoreboardBonus = null;
-  const bonusEndLabels = { miss: "missed a button", timeout: "time ran out", operator: "ended by the scorekeeper" };
+  const bonusEndLabels = { miss: "missed a button", timeout: "time ran out", operator: "ended by the scorekeeper", "no-buttons": "no buttons left answering" };
   function renderScoreboardBonus() {
     const panel = q("#scoreboard-bonus");
     const summary = q("#scoreboard-bonus-summary");

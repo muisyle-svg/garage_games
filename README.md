@@ -236,6 +236,21 @@ operation.
 The master handles Garage Start, run-status display, and physical spoke event
 inputs. Physical operation still requires on-device verification.
 
+If the master's USB connection drops without **Disconnect** being chosen (a
+bumped cable, a USB glitch, the master rebooting), the app reopens the same port
+every two seconds until it is back, and the scorekeeper shows "Physical master
+disconnected · reconnecting…" in its message slot until then; virtual buttons keep
+working. While it runs, the app also asks Windows not to sleep (start it with
+`--allow-sleep` to turn that off). Also turn off USB selective suspend in Windows
+power options for the event laptop. The app sends each button's state when it
+changes (twice), plus one button per second in rotation, so the master's serial
+input is never flooded.
+
+A press made while the run was going that reaches the app just after it paused
+or timed out (radio retries can take a few hundred milliseconds) still counts at
+the time it was pressed; the timed-out run stays timed out. Presses made after
+the pause or buzzer are refused as before.
+
 ## Storage and recovery
 
 SQLite uses WAL mode and `synchronous=FULL`; each command and accepted or
@@ -352,6 +367,7 @@ only shows the countdown and reports Go as a backup.
 | Countdown voice | A run's countdown starts | `wwwroot/sounds/3-seconds-countdown-deep-voice-game.mp3` |
 | Keypad chime | A keypad message appears on the TV | `wwwroot/sounds/keypad-message.wav` |
 | Bonus chime | The bonus round's first button lights | `wwwroot/sounds/bonus-start.wav` |
+| Keypad buzzer | A wrong code is entered on a keypad | `wwwroot/sounds/keypad-wrong.wav` |
 
 Replace a file (same name, WAV or MP3) to change a sound; add a `SoundCue` in
 `SoundService.cs` with its file to add one. Set the volume with Windows' volume
@@ -378,6 +394,16 @@ bonus round begins:
 4. A missed button ends the run where its window closed; running out of run time
    ends it as a timeout. Either way the points (hits x points per press) are added
    to the run total, shown on the TV and scorekeeper, and counted once recorded.
+
+Buttons that die mid-round (a power switch bumped, a flat battery) are handled
+like the standalone Speed game: every button sends a heartbeat through the round,
+only buttons still answering are lit, a newly lit button's window starts once it
+confirms it is showing the target, and a lit button that never confirms or goes
+silent is swapped for another one without counting a miss. If no button is left
+answering, the round ends ("no buttons left answering") and keeps its hits. Each
+button's bonus memory resets with every run, and each round numbers its targets
+from a fresh random start. Buttons on older firmware (no heartbeats) are lit and
+timed as before.
 
 Pausing freezes the lit button's time. The scorekeeper's Finish (or Discard) ends
 the round too. Presses can't be undone once a bonus round has started; correct

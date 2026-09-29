@@ -90,6 +90,8 @@
     refresh: $("refresh-button"),
     alert: $("alert-region"),
     tabAlert: $("tab-alert-region"),
+    masterLostDesk: $("master-lost-desk"),
+    masterLostTab: $("master-lost-tab"),
     tabs: [$("tab-scorekeeping"), $("tab-on-deck"), $("tab-history"), $("tab-leaderboards"), $("tab-setup")],
     tabPanels: [$("panel-scorekeeping"), $("panel-on-deck"), $("panel-history"), $("panel-leaderboards"), $("panel-setup")],
     caption: $("run-caption"),
@@ -331,6 +333,21 @@
         : "Not connected";
     ui.masterModeLabel.textContent = `Mode: ${master?.mode ? master.mode.toUpperCase() : master?.connected ? "WAITING FOR MASTER" : "—"}`;
     ui.masterLastMessage.textContent = `Last message: ${master?.lastMessage || "—"}`;
+
+    // A dropped master stops every physical button, so say so where it's seen, not only in
+    // the Hardware panel. The app keeps trying to reopen the port on its own.
+    const lostPort = !master?.connected && master?.reconnectingPort ? master.reconnectingPort : null;
+    const lostText = lostPort
+      ? `Physical master disconnected (${lostPort}) · reconnecting… Physical buttons won't respond until it's back; the virtual buttons still work.`
+      : "";
+    // On the Scorekeeping tab it shows in the desk's slot; elsewhere beside the tabs.
+    const onScorekeeping = (state.activeTab ?? 0) === 0;
+    [[ui.masterLostDesk, onScorekeeping], [ui.masterLostTab, !onScorekeeping]].forEach(([notice, here]) => {
+      notice.hidden = !lostPort || !here;
+      notice.textContent = lostText;
+      notice.title = lostText;
+    });
+    if (lostPort) ui.masterConnectionLabel.textContent = `Reconnecting to ${lostPort}…`;
 
     const run = state.snapshot?.currentRun || null;
     const handshakeHelp = masterActions.handshakeGuidance(master);
@@ -1832,7 +1849,7 @@
   }
 
   // ---- Bonus speed round (live) ----
-  const BONUS_END_TEXT = { miss: "missed a button", timeout: "time ran out", operator: "ended by the scorekeeper" };
+  const BONUS_END_TEXT = { miss: "missed a button", timeout: "time ran out", operator: "ended by the scorekeeper", "no-buttons": "no buttons left answering" };
 
   function bonusGamePoints(run) {
     const bonus = run?.bonusGame;
@@ -2627,6 +2644,7 @@
     // A message still showing follows to the slot for the tab now in view.
     const showing = ui.alert.firstElementChild || ui.tabAlert.firstElementChild;
     if (showing && showing.parentElement !== alertSlot()) alertSlot().appendChild(showing);
+    renderMasterControls();
     if (moveFocus) ui.tabs[index].focus();
   }
 
@@ -3315,7 +3333,14 @@
   window.setInterval(() => loadMaster(true), 2000);
   // The master reports physical START immediately; short local polling keeps the
   // browser cue aligned with that hardware countdown instead of adding 250ms skew.
-  window.setInterval(() => countdownCoordinator.poll(), 50);
+  // The countdown is checked every 50 ms only while a run is armed or counting down (the app
+  // itself runs the countdown and its audio); otherwise twice a second, so an idle page
+  // isn't sending the app twenty requests a second all day.
+  (function scheduleCountdownPoll() {
+    const status = state.snapshot?.currentRun?.status;
+    const delay = status === "armed" || status === "countdown" ? 50 : 500;
+    window.setTimeout(() => void countdownCoordinator.poll().finally(scheduleCountdownPoll), delay);
+  })();
   window.setInterval(tickClock, 200);
   window.setInterval(() => void pollBonusLive(), 250);
   window.setInterval(renderBonusLive, 100);

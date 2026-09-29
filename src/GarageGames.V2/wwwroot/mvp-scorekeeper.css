@@ -58,6 +58,11 @@ a { color: inherit; }
 .message-slot { display: grid; min-width: 0; overflow: hidden; }
 .message-slot > * { grid-area: 1 / 1; min-width: 0; }
 .message-slot .alert-region { display: grid; }
+/* One message at a time in a slot: a fresh alert, then a dropped master, then the countdown. */
+.master-lost-notice[hidden] { display: none !important; }
+.message-slot:has(.alert-region:not(:empty)) > :not(.alert-region) { visibility: hidden; }
+.message-slot:has(.master-lost-notice:not([hidden])) > .countdown-audio-notice { visibility: hidden; }
+.master-lost-notice { font-weight: 800; }
 .message-slot .alert { display: -webkit-box; margin: 0; padding: .45rem .7rem; overflow: hidden; font-size: .72rem; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .desk-messages { flex: 1 1 14rem; align-self: stretch; height: 4.3rem; }
 .desk-messages .alert { align-self: stretch; }

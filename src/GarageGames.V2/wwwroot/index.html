@@ -30,7 +30,10 @@
       <button id="tab-leaderboards" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-leaderboards" tabindex="-1">Leaderboards</button>
       <button id="tab-setup" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-setup" tabindex="-1">Setup</button>
       <!-- Messages on the other tabs use the spare room beside the tabs, so nothing shifts. -->
-      <div id="tab-alert-region" class="message-slot tab-alert-region" aria-live="polite"></div>
+      <div class="message-slot tab-alert-region">
+        <div id="master-lost-tab" class="alert master-lost-notice" role="alert" hidden></div>
+        <div id="tab-alert-region" class="alert-region" aria-live="polite"></div>
+      </div>
     </div>
 
     <section id="panel-scorekeeping" class="tab-panel" role="tabpanel" aria-labelledby="tab-scorekeeping" tabindex="0">
@@ -43,6 +46,7 @@
         </div>
         <!-- A fixed-size slot for messages, so they never push the buttons around. -->
         <div class="message-slot desk-messages">
+          <div id="master-lost-desk" class="alert master-lost-notice" role="alert" hidden></div>
           <div id="countdown-audio-notice" class="countdown-audio-notice" role="status" aria-live="polite" hidden>
             <span id="countdown-audio-message"></span>
             <button id="countdown-audio-retry" class="button button-secondary" type="button" hidden>Retry countdown audio</button>
