@@ -938,7 +938,6 @@
   }
 
   function renderScoreboard(snapshot) {
-    setMode(!!snapshot.simulationMode, snapshot.editionName, "#scoreboard-mode");
     text(q("#scoreboard-edition"), snapshot.editionName || "Scoreboard");
     text(q("#scoreboard-leaderboard-note"), snapshot.showExhibitionsOnLeaderboard
       ? "Official · exhibitions shown"
@@ -949,10 +948,16 @@
     const remaining = run ? Number(run.remainingMilliseconds || 0) : Number(snapshot.durationLimitSeconds || 300) * 1000;
     text(q("#scoreboard-competitor"), run ? run.competitorName : "No active run");
     const category = q("#scoreboard-category"); text(category, run ? pretty(run.category) : "—"); category.className = `category-pill${run ? ` ${categoryClass(run.category)}` : ""}`;
-    const phase = q("#scoreboard-phase"); text(phase, run ? pretty(run.phase) : "Waiting"); phase.className = `phase-chip${run && run.phase === "bonus" ? " phase-bonus" : " phase-normal"}`;
+    // In the bonus speed round the chip names the round (as set in Setup).
+    const phaseLabel = run && run.bonusGame && run.phase === "bonus" ? String(run.bonusGame.name || "").trim() || "Bonus round" : null;
+    const phase = q("#scoreboard-phase"); text(phase, phaseLabel || (run ? pretty(run.phase) : "Waiting")); phase.className = `phase-chip${run && run.phase === "bonus" ? " phase-bonus" : " phase-normal"}`;
     scoreboardClock = { remaining, running: !!run && String(run.status).toLowerCase() === "active", receivedAt: performance.now() };
     renderScoreboardClock();
-    text(q("#scoreboard-run-status"), run ? pretty(run.status) : "Awaiting master start");
+    // An "Up Next" competitor from the scorekeeper: full clock, no scores, not started.
+    const upNext = !!(run && run.isPrimed);
+    text(q("#scoreboard-competitor-label"), upNext ? "Up next" : "Now competing");
+    if (upNext) text(q("#scoreboard-phase"), "Up next");
+    text(q("#scoreboard-run-status"), upNext ? "Get ready" : run ? pretty(run.status) : "Awaiting master start");
     text(q("#scoreboard-points"), run ? run.awardedPoints || 0 : 0);
     text(q("#scoreboard-event-progress"), `${completed} / ${total} complete`);
     const fill = q("#scoreboard-progress-fill"); if (fill) fill.style.width = `${total ? Math.min(100, completed / total * 100) : 0}%`;
@@ -1021,11 +1026,13 @@
     panel.hidden = !bonus || phase === "ended";
     summary.hidden = !bonus || phase !== "ended";
     if (!bonus) return;
+    const name = String(bonus.name || "").trim() || "Bonus round";
     if (phase === "ended") {
       const points = Number(bonus.awardedPoints ?? hits * perPress);
-      text(summary, `Bonus round: ${hits} hit${hits === 1 ? "" : "s"} · +${points} points${bonusEndLabels[bonus.endReason] ? ` · ${bonusEndLabels[bonus.endReason]}` : ""}`);
+      text(summary, `${name}: ${hits} hit${hits === 1 ? "" : "s"} · +${points} points${bonusEndLabels[bonus.endReason] ? ` · ${bonusEndLabels[bonus.endReason]}` : ""}`);
       return;
     }
+    text(q("#scoreboard-bonus-name"), name);
     text(q("#scoreboard-bonus-stats"), `${hits} hit${hits === 1 ? "" : "s"} · +${hits * perPress} points`);
     const fill = q("#scoreboard-bonus-bar-fill");
     if (phase === "intro") {
@@ -1089,7 +1096,15 @@
     run.events.forEach((event) => {
       const card = make("article", `tv-event ${event.status || "pending"}`);
       const name = make("span", "tv-event-name", event.name); card.appendChild(name);
-      const meta = make("div", "tv-event-meta"); meta.appendChild(make("span", "tv-event-status", pretty(event.status))); meta.appendChild(make("strong", "", event.awardedPoints || 0)); card.appendChild(meta);
+      const meta = make("div", "tv-event-meta");
+      // A finished event shows how long it took (rounded like the scorekeeper) and its points
+      // large; others show their status.
+      const finished = event.status === "completed" && Number.isFinite(event.durationMs);
+      meta.appendChild(finished
+        ? make("span", "tv-event-time", scorekeeperTime.formatClockMs(event.durationMs))
+        : make("span", "tv-event-status", pretty(event.status)));
+      meta.appendChild(make("strong", "tv-event-points", event.awardedPoints || 0));
+      card.appendChild(meta);
       container.appendChild(card);
     });
   }
