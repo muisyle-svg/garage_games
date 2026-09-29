@@ -426,6 +426,15 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                     return;
                 }
 
+                if (MasterProtocolCodec.TryParseBonusPollReply(line, out var bonusBootToken, out var bonusRunToken, out var bonusDeviceId))
+                {
+                    if (_protocol.Mode == MasterMode.Idle && string.Equals(_protocol.BootToken, bonusBootToken, StringComparison.Ordinal))
+                    {
+                        _runs.ReceiveBonusPollReply(bonusRunToken, bonusDeviceId);
+                    }
+                    return;
+                }
+
                 if (MasterProtocolCodec.TryParseScanReply(line, out var scanReply))
                 {
                     if (_pendingScan is { } scan && string.Equals(scan.ScanId, scanReply.ScanId, StringComparison.Ordinal))
@@ -458,6 +467,17 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                         var result = _runs.ReceivePhysicalSpokePress(press, sessionAllowed);
                         reply = MasterProtocolCodec.FormatPhysicalPressResult(press, result.State);
                         pushStatus |= result.Disposition == MessageDisposition.Accepted;
+                        return result;
+                    },
+                    (keypad, sessionAllowed) =>
+                    {
+                        // Typed-entry updates return null: they only refresh the TV and need no reply.
+                        var result = _runs.ReceivePhysicalKeypadInput(keypad, sessionAllowed);
+                        if (result is not null)
+                        {
+                            reply = MasterProtocolCodec.FormatKeypadResult(keypad, result.State);
+                            pushStatus |= result.Disposition == MessageDisposition.Accepted;
+                        }
                         return result;
                     });
             }
@@ -525,7 +545,8 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                 var (status, garageStatus, eventSnapshot) = _runs.GetMasterStatuses();
                 var lines = new StringBuilder()
                     .Append(MasterProtocolCodec.FormatStatus(status)).Append('\n')
-                    .Append(MasterProtocolCodec.FormatGarageStatus(garageStatus)).Append('\n');
+                    .Append(MasterProtocolCodec.FormatGarageStatus(garageStatus)).Append('\n')
+                    .Append(MasterProtocolCodec.FormatBonusStatus(_runs.GetMasterBonusStatus())).Append('\n');
                 var syncEvents = false;
                 if (eventSnapshot.Version is not null && eventSnapshot.Events.Count > 0)
                 {

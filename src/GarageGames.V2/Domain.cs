@@ -114,6 +114,57 @@ public sealed class EventDefinition
     public int? GraceSeconds { get; set; }
     public string? Prompt { get; set; }
     public string? Answer { get; set; }
+    // Keypad events: how many messages must be answered correctly to finish (default 1).
+    public int? RequiredSuccesses { get; set; }
+}
+
+// The bonus speed round played after the last event when time remains. Timing mirrors the
+// standalone Speed game: each target allows InitialWindowMs, and every StepEveryMs of bonus
+// time the window shrinks by StepMs, down to MinimumWindowMs.
+public sealed class BonusGameSettings
+{
+    public const int MaximumPointsPerPress = 100_000;
+    public const int MinimumWindowLimitMs = 500;
+    public const int MaximumWindowLimitMs = 60_000;
+
+    public bool Enabled { get; set; } = true;
+    public int PointsPerPress { get; set; } = 5;
+    public int InitialWindowMs { get; set; } = 10_000;
+    public int StepMs { get; set; } = 1_000;
+    public int StepEveryMs { get; set; } = 10_000;
+    public int MinimumWindowMs { get; set; } = 2_000;
+
+    public BonusGameSettings Clone() => new()
+    {
+        Enabled = Enabled,
+        PointsPerPress = PointsPerPress,
+        InitialWindowMs = InitialWindowMs,
+        StepMs = StepMs,
+        StepEveryMs = StepEveryMs,
+        MinimumWindowMs = MinimumWindowMs
+    };
+
+    // The time allowed for a target chosen this far into the bonus round.
+    public long WindowForBonusElapsed(long bonusElapsedMs)
+    {
+        var steps = StepEveryMs <= 0 ? 0 : Math.Max(0, bonusElapsedMs) / StepEveryMs;
+        return Math.Max(MinimumWindowMs, InitialWindowMs - steps * (long)StepMs);
+    }
+
+    public void Validate(string source)
+    {
+        if (PointsPerPress is < 0 or > MaximumPointsPerPress ||
+            InitialWindowMs is < MinimumWindowLimitMs or > MaximumWindowLimitMs ||
+            MinimumWindowMs is < MinimumWindowLimitMs or > MaximumWindowLimitMs || MinimumWindowMs > InitialWindowMs ||
+            StepMs is < 0 or > MaximumWindowLimitMs ||
+            StepEveryMs is < 1_000 or > 600_000)
+        {
+            throw new InvalidDataException(
+                $"Bonus round settings in '{source}' are invalid: points per press 0-{MaximumPointsPerPress}, press windows " +
+                $"{MinimumWindowLimitMs / 1000.0:0.#}-{MaximumWindowLimitMs / 1000} s with the minimum no longer than the start, " +
+                "a drop of 0-60 s, and a drop every 1-600 s.");
+        }
+    }
 }
 
 public sealed class EditionDefinition
@@ -127,6 +178,8 @@ public sealed class EditionDefinition
     public int DurationLimitSeconds { get; set; } = 300;
     public ScoringRule Scoring { get; set; } = new();
     public List<EventDefinition> Events { get; set; } = [];
+    // Absent in older configurations; then the bonus round uses its defaults.
+    public BonusGameSettings? BonusGame { get; set; }
 
     public EditionSnapshot ToSnapshot() => new()
     {
@@ -134,6 +187,7 @@ public sealed class EditionDefinition
         Name = Name,
         DurationLimitSeconds = DurationLimitSeconds,
         Scoring = Scoring.Clone(),
+        BonusGame = (BonusGame ?? new BonusGameSettings()).Clone(),
         Events = Events.Select(e => new EventSnapshot
         {
             EventId = e.EventId,
@@ -146,9 +200,12 @@ public sealed class EditionDefinition
             DecayEverySeconds = e.DecayEverySeconds,
             GraceSeconds = e.GraceSeconds,
             Prompt = e.Prompt,
-            Answer = e.Answer
+            Answer = e.Answer,
+            RequiredSuccesses = e.RequiredSuccesses
         }).ToList()
     };
+
+    public const int MaximumKeypadRequiredSuccesses = 20;
 
     public static EditionDefinition FromJson(string path)
     {
@@ -174,6 +231,8 @@ public sealed class EditionDefinition
         {
             throw new InvalidDataException($"Edition '{source}' contains an invalid duration or scoring rule.");
         }
+
+        edition.BonusGame?.Validate(source);
 
         if (edition.Events.Count is 0 or > 64 ||
             edition.Events.GroupBy(e => e.EventId, StringComparer.Ordinal).Any(g => g.Count() > 1) ||
@@ -218,9 +277,11 @@ public sealed class EditionDefinition
                 throw new InvalidDataException($"Event '{eventDefinition.EventId}' grace period must be between 0 and {MaximumScoringSeconds} seconds.");
             }
 
-            if (eventDefinition.Type == EventKind.Keypad && string.IsNullOrWhiteSpace(eventDefinition.Answer))
+            // Keypad messages and codes normally come from the keypad answer file; a fixed
+            // prompt/answer on the event is only a fallback when that file is unavailable.
+            if (eventDefinition.RequiredSuccesses is < 1 or > MaximumKeypadRequiredSuccesses)
             {
-                throw new InvalidDataException($"Keypad event '{eventDefinition.EventId}' requires an answer.");
+                throw new InvalidDataException($"Event '{eventDefinition.EventId}' must require between 1 and {MaximumKeypadRequiredSuccesses} correct codes.");
             }
 
             if (!Enum.IsDefined(eventDefinition.Type))
@@ -237,6 +298,11 @@ public sealed class EditionSetup
     public required string Name { get; set; }
     public List<EventDefinition> Events { get; set; } = [];
     public ScoringRule? Scoring { get; set; }
+    public BonusGameSettings? BonusGame { get; set; }
+    // Read-only report of the keypad answer file, for Setup; ignored when saving.
+    public int KeypadMessageCount { get; set; }
+    public string? KeypadMessageSource { get; set; }
+    public string? KeypadMessageError { get; set; }
 }
 
 public sealed class EditionSnapshot
@@ -246,6 +312,14 @@ public sealed class EditionSnapshot
     public int DurationLimitSeconds { get; set; }
     public required ScoringRule Scoring { get; set; }
     public required List<EventSnapshot> Events { get; set; }
+    // Bonus round settings as they were when the run was created; older runs have none
+    // (and never had a bonus round).
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BonusGameSettings? BonusGame { get; set; }
+    // The keypad message pool as it was when the run was created, so a run keeps its
+    // messages and codes even if the answer file changes later.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<KeypadChallengeDefinition>? KeypadChallenges { get; set; }
 }
 
 public sealed class EventSnapshot
@@ -262,6 +336,75 @@ public sealed class EventSnapshot
     public string? Prompt { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Answer { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? RequiredSuccesses { get; set; }
+}
+
+// A keypad event's messages in the order they were drawn during a run. The last unsolved
+// one is on the TV; the event finishes once enough are solved.
+public sealed class KeypadProgress
+{
+    public List<KeypadAttemptRecord> Challenges { get; set; } = [];
+
+    [JsonIgnore]
+    public KeypadAttemptRecord? Current => Challenges.LastOrDefault(challenge => !challenge.IsSolved);
+    [JsonIgnore]
+    public int SolvedCount => Challenges.Count(challenge => challenge.IsSolved);
+}
+
+public enum BonusGamePhase
+{
+    // Buttons are polled and flash their intro sequence.
+    Intro,
+    // A target is lit and must be pressed before its deadline.
+    Target,
+    Ended
+}
+
+// A run's bonus speed round. Times are run active-elapsed milliseconds, so pausing the run
+// freezes the target's remaining time too.
+public sealed class BonusGameRecord
+{
+    public BonusGamePhase Phase { get; set; }
+    public long StartedElapsedMs { get; set; }
+    public long IntroEndsElapsedMs { get; set; }
+    public long? FirstTargetElapsedMs { get; set; }
+    // Devices that answered the bonus poll; empty means every event's tile is used virtually.
+    public List<string> RespondingDeviceIds { get; set; } = [];
+    public int Sequence { get; set; }
+    public string? TargetEventId { get; set; }
+    public string? TargetDeviceId { get; set; }
+    public long? TargetStartElapsedMs { get; set; }
+    public long? TargetWindowMs { get; set; }
+    public int Hits { get; set; }
+    public int PointsPerPress { get; set; }
+    // "miss", "timeout", or "operator"; set when the round ends.
+    public string? EndReason { get; set; }
+    public long? EndedElapsedMs { get; set; }
+    // Hits x points per press, set when the round ends (and recalculated by corrections).
+    public int? AwardedPoints { get; set; }
+    // A scorecard correction that replaces the calculated points, like an event's.
+    public int? ScoreOverride { get; set; }
+
+    [JsonIgnore]
+    public long? TargetDeadlineElapsedMs => TargetStartElapsedMs + TargetWindowMs;
+    // Points counted toward the run total: only once the round has ended.
+    [JsonIgnore]
+    public int CountedPoints => Phase == BonusGamePhase.Ended ? ScoreOverride ?? AwardedPoints ?? Hits * PointsPerPress : 0;
+}
+
+public sealed class KeypadAttemptRecord
+{
+    public required string Prompt { get; set; }
+    public required string Answer { get; set; }
+    public long DrawnElapsedMs { get; set; }
+    public long? SolvedElapsedMs { get; set; }
+    // The accepted code submission or operator override that solved it, so undo can
+    // retract that exact message.
+    public string? SolvedByMessageId { get; set; }
+
+    [JsonIgnore]
+    public bool IsSolved => SolvedElapsedMs is not null;
 }
 
 public sealed class CompetitorRecord
@@ -317,6 +460,8 @@ public sealed class EventRecord
     public string? MeasurementJson { get; set; }
     public string? Notes { get; set; }
     public long? LastSignalElapsedMs { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public KeypadProgress? Keypad { get; set; }
 
     [JsonIgnore]
     public long? DurationMs => StartElapsedMs is long start && FinishElapsedMs is long finish ? finish - start : null;
@@ -358,10 +503,15 @@ public sealed class RunRecord
     public string? BonusResultJson { get; set; }
     public int? BonusPointsOverride { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BonusGameRecord? BonusGame { get; set; }
+
     [JsonIgnore]
     public int BonusPoints => BonusPointsOverride ?? 0;
     [JsonIgnore]
-    public int TotalPoints => Events.Sum(e => e.Score) + BonusPoints;
+    public int BonusGamePoints => BonusGame?.CountedPoints ?? 0;
+    [JsonIgnore]
+    public int TotalPoints => Events.Sum(e => e.Score) + BonusPoints + BonusGamePoints;
     public bool IsRecorded => RecordedAt is not null || Status == RunStatus.Completed;
     public bool IsDeleted => DeletedAt is not null;
     [JsonIgnore]
@@ -462,6 +612,37 @@ public sealed class ScoreboardRun
     public int CompletedEvents { get; set; }
     public int TotalEvents { get; set; }
     public required List<ScoreboardEvent> Events { get; set; }
+    // The running keypad event's message, shown large on the TV until its code is entered
+    // or the run ends. Never carries the answer.
+    public ScoreboardKeypadChallenge? KeypadChallenge { get; set; }
+    public ScoreboardBonusGame? BonusGame { get; set; }
+}
+
+public sealed class ScoreboardBonusGame
+{
+    public BonusGamePhase Phase { get; set; }
+    public string? TargetEventId { get; set; }
+    public string? TargetEventName { get; set; }
+    // Time left to press the lit button, as of this snapshot (it counts down only while the
+    // run is active).
+    public long? TargetRemainingMs { get; set; }
+    public long? TargetWindowMs { get; set; }
+    public int Hits { get; set; }
+    public int PointsPerPress { get; set; }
+    public int? AwardedPoints { get; set; }
+    public string? EndReason { get; set; }
+}
+
+public sealed class ScoreboardKeypadChallenge
+{
+    public required string EventName { get; set; }
+    public required string Prompt { get; set; }
+    public string Entry { get; set; } = "";
+    public bool ShowWrong { get; set; }
+    // Briefly true after a correct code that was not the last one needed.
+    public bool ShowCorrect { get; set; }
+    public int Successes { get; set; }
+    public int RequiredSuccesses { get; set; } = 1;
 }
 
 public sealed class ScoreboardEvent

@@ -51,6 +51,8 @@ public sealed class EventEditRequest
     public bool ClearNotes { get; set; }
     public string? MeasurementJson { get; set; }
     public string? Notes { get; set; }
+    // Bonus round only (EventId = RunService.BonusEventId): the number of hits.
+    public int? Hits { get; set; }
 }
 
 public sealed class RunService
@@ -75,12 +77,53 @@ public sealed class RunService
     // Active elapsed time when the current run last became Active; aged physical
     // presses are never back-dated into a pause or before the run started.
     private long _activeSegmentStartElapsedMs;
+    // What each running keypad event's player has typed so far, for the TV only. It is
+    // display state: not persisted, and reset whenever another run takes over.
+    private readonly Dictionary<string, KeypadEntryState> _keypadEntries = new(StringComparer.Ordinal);
 
-    public RunService(RunStore store, EditionDefinition edition, IMonotonicClock clock)
+    public const long KeypadWrongDisplayMilliseconds = 2_000;
+    private readonly KeypadChallengeSet _keypadChallenges;
+
+    // Raised (under the service lock) when the game calls for a sound; the host plays it
+    // through this computer's speakers. Handlers must only queue the sound.
+    public event Action<SoundCue>? SoundCueRequested;
+
+    private sealed class KeypadEntryState
+    {
+        public required string RunId { get; init; }
+        public uint Sequence { get; set; }
+        public string Entry { get; set; } = "";
+        public long? WrongAtMonotonicMs { get; set; }
+        public long? CorrectAtMonotonicMs { get; set; }
+    }
+
+    // Keypad events start and finish from the same physical spoke as regular events;
+    // only their finish signal differs.
+    private static bool IsButtonEvent(EventKind kind) => kind is EventKind.Standard or EventKind.Keypad;
+
+    private KeypadEntryState KeypadEntryFor(RunRecord run, EventRecord eventResult)
+    {
+        foreach (var stale in _keypadEntries.Where(pair => pair.Value.RunId != run.Id).Select(pair => pair.Key).ToList())
+        {
+            _keypadEntries.Remove(stale);
+        }
+
+        if (!_keypadEntries.TryGetValue(eventResult.EventId, out var entry))
+        {
+            entry = new KeypadEntryState { RunId = run.Id };
+            _keypadEntries[eventResult.EventId] = entry;
+        }
+
+        return entry;
+    }
+
+    public RunService(RunStore store, EditionDefinition edition, IMonotonicClock clock,
+        KeypadChallengeSet? keypadChallenges = null)
     {
         EditionDefinition.Validate(edition);
         _store = store;
         _clock = clock;
+        _keypadChallenges = keypadChallenges ?? KeypadChallengeSet.Empty;
         _edition = _store.LoadOrInitializeActiveEdition(edition);
         _store.EnsureDevices(_edition);
         _data = _store.Load();
@@ -155,7 +198,8 @@ public sealed class RunService
                 Name = request.Name?.Trim() ?? "",
                 DurationLimitSeconds = _edition.DurationLimitSeconds,
                 Scoring = _edition.Scoring.Clone(),
-                Events = (request.Events ?? []).Select(CloneEventDefinition).ToList()
+                Events = (request.Events ?? []).Select(CloneEventDefinition).ToList(),
+                BonusGame = (request.BonusGame ?? _edition.BonusGame)?.Clone()
             };
             foreach (var eventDefinition in candidate.Events)
             {
@@ -173,7 +217,11 @@ public sealed class RunService
                 throw new CommandException(exception.Message);
             }
 
-            var eventSetupChanged = !SameEventSetup(_edition.Events, candidate.Events);
+            // Bonus round points and timing score runs too, so they version the edition like
+            // event scoring does.
+            var eventSetupChanged = !SameEventSetup(_edition.Events, candidate.Events) ||
+                !string.Equals(Serialize(_edition.BonusGame ?? new BonusGameSettings()),
+                    Serialize(candidate.BonusGame ?? new BonusGameSettings()), StringComparison.Ordinal);
             if (eventSetupChanged && string.Equals(candidate.EditionId, _edition.EditionId, StringComparison.Ordinal) &&
                 _data.Runs.Any(run => run.EditionId == _edition.EditionId && run.IsRecorded))
             {
@@ -321,14 +369,22 @@ public sealed class RunService
                 throw new CommandException("This run changed before the event could be cleared. Reload it and try again.");
             }
 
-            var eventResult = run.Events.SingleOrDefault(item => item.EventId == eventId)
-                ?? throw new CommandException("That event is not part of this run.");
-            var reopenRun = isCurrent && run.Status == RunStatus.Finished &&
-                run.Events.All(item => item.Type == EventKind.Standard);
+            // The bonus round's row clears its result only; it never reopens the run.
+            var isBonus = eventId == BonusEventId;
+            if (isBonus && run.BonusGame is null)
+            {
+                throw new CommandException("This run has no bonus round result to clear.");
+            }
+            var eventName = isBonus
+                ? "Bonus round"
+                : (run.Events.SingleOrDefault(item => item.EventId == eventId)
+                    ?? throw new CommandException("That event is not part of this run.")).Name;
+            var reopenRun = !isBonus && isCurrent && run.Status == RunStatus.Finished &&
+                run.Events.All(item => IsButtonEvent(item.Type));
             var request = new EditRunRequest
             {
                 ExpectedRevision = expectedRevision,
-                Reason = $"Operator cleared event '{eventResult.Name}'.",
+                Reason = $"Operator cleared event '{eventName}'.",
                 Status = reopenRun ? RunStatus.Active : null,
                 ReopenRunClock = reopenRun,
                 Events =
@@ -373,14 +429,18 @@ public sealed class RunService
             {
                 throw new CommandException("Undo is available after the run has started.");
             }
+            if (run.BonusGame is not null)
+            {
+                throw new CommandException("Presses can't be undone once the bonus round has started; correct event times on the scorecard instead.");
+            }
 
             var requestedEvent = eventId is null
                 ? null
                 : run.Events.SingleOrDefault(item => item.EventId == eventId)
                     ?? throw new CommandException("That event is not part of this run.");
-            if (requestedEvent is not null && requestedEvent.Type != EventKind.Standard)
+            if (requestedEvent is not null && !IsButtonEvent(requestedEvent.Type))
             {
-                throw new CommandException("Only standard two-press events can be undone this way; use the scorecard to correct it.");
+                throw new CommandException("Only button and keypad events can be undone this way; use the scorecard to correct it.");
             }
             if (requestedEvent is not null && requestedEvent.Status == EventStatus.Pending)
             {
@@ -388,22 +448,20 @@ public sealed class RunService
             }
 
             var selected = _data.Messages
-                .Where(message => message.RunId == run.Id && message.Type == "event-press" && message.Disposition == MessageDisposition.Accepted)
+                .Where(message => message.RunId == run.Id && message.Disposition == MessageDisposition.Accepted)
                 .Select(message => new
                 {
                     Message = message,
-                    Event = run.Events.SingleOrDefault(item => item.Type == EventKind.Standard &&
+                    Event = run.Events.SingleOrDefault(item => IsButtonEvent(item.Type) &&
                         string.Equals(item.DeviceId, message.DeviceId, StringComparison.OrdinalIgnoreCase))
                 })
                 .Where(item => item.Event is not null && (requestedEvent is null || item.Event.EventId == requestedEvent.EventId) &&
-                    item.Event.LastSignalElapsedMs == item.Message.ElapsedMilliseconds &&
-                    ((item.Event.Status == EventStatus.Completed && item.Event.FinishElapsedMs == item.Message.ElapsedMilliseconds) ||
-                     (item.Event.Status == EventStatus.Active && item.Event.StartElapsedMs == item.Message.ElapsedMilliseconds && item.Event.FinishElapsedMs is null)))
+                    IsUndoablePress(item.Event, item.Message))
                 .OrderByDescending(item => item.Message.Id)
                 .FirstOrDefault();
             if (selected is null && requestedEvent is null)
             {
-                throw new CommandException("There are no remaining standard event-button presses to undo.");
+                throw new CommandException("There are no remaining event-button presses to undo.");
             }
 
             // A targeted event whose current time came from a scorecard edit has no press
@@ -413,7 +471,28 @@ public sealed class RunService
             var candidate = Clone(run);
             var candidateEvent = candidate.Events.Single(item => item.EventId == targetEvent.EventId);
             var undoneFinish = candidateEvent.Status == EventStatus.Completed;
-            if (undoneFinish)
+            var undoneKeypadCode = candidateEvent.Type == EventKind.Keypad
+                ? candidateEvent.Keypad?.Challenges.LastOrDefault(challenge => challenge.IsSolved)
+                : null;
+            var undoneStep = undoneFinish ? "finish" : "start";
+            if (undoneKeypadCode is not null)
+            {
+                // Put the last solved message back on screen: drop any message drawn after it
+                // and reopen the event if that code had finished it.
+                var progress = candidateEvent.Keypad!;
+                var solvedBefore = progress.SolvedCount;
+                progress.Challenges.RemoveAll(challenge => !challenge.IsSolved);
+                undoneKeypadCode.SolvedElapsedMs = null;
+                undoneKeypadCode.SolvedByMessageId = null;
+                candidateEvent.Prompt = undoneKeypadCode.Prompt;
+                candidateEvent.FinishElapsedMs = null;
+                candidateEvent.Status = EventStatus.Active;
+                candidateEvent.LastSignalElapsedMs = progress.Challenges.LastOrDefault(challenge => challenge.IsSolved)?.SolvedElapsedMs
+                    ?? candidateEvent.StartElapsedMs;
+                candidateEvent.ScoreOverride = null;
+                undoneStep = $"code {solvedBefore} of {RequiredKeypadSuccesses(candidate, candidateEvent)}";
+            }
+            else if (undoneFinish)
             {
                 candidateEvent.FinishElapsedMs = null;
                 candidateEvent.Status = EventStatus.Active;
@@ -427,11 +506,19 @@ public sealed class RunService
                 candidateEvent.Status = EventStatus.Pending;
                 candidateEvent.LastSignalElapsedMs = null;
                 candidateEvent.ScoreOverride = null;
+                if (candidateEvent.Type == EventKind.Keypad)
+                {
+                    // Its drawn messages go back into the pool for the next start.
+                    candidateEvent.Keypad = null;
+                    candidateEvent.Prompt = null;
+                }
             }
             candidateEvent.Score = CalculateScore(candidateEvent, candidate.Edition);
+            // A keypad event stepped back to running starts a fresh entry on the TV.
+            _keypadEntries.Remove(candidateEvent.EventId);
 
             var reopenRun = candidate.Status == RunStatus.Finished &&
-                run.Events.All(item => item.Type == EventKind.Standard);
+                run.Events.All(item => IsButtonEvent(item.Type));
             if (reopenRun)
             {
                 candidate.Status = RunStatus.Active;
@@ -446,7 +533,7 @@ public sealed class RunService
             {
                 RunId = run.Id,
                 CreatedAt = _clock.UtcNow,
-                Reason = $"Undid the latest {(undoneFinish ? "finish" : "start")} for '{targetEvent.Name}'.",
+                Reason = $"Undid the latest {undoneStep} for '{targetEvent.Name}'.",
                 BeforeJson = before,
                 AfterJson = after
             };
@@ -457,7 +544,9 @@ public sealed class RunService
                 if (selected is not null)
                 {
                     selected.Message.Disposition = MessageDisposition.Undone;
-                    selected.Message.Reason = $"Undone by operator; removed the {(undoneFinish ? "finish" : "start")} press for '{targetEvent.Name}'.";
+                    selected.Message.Reason = undoneKeypadCode is not null
+                        ? $"Undone by operator; removed {undoneStep} for '{targetEvent.Name}'."
+                        : $"Undone by operator; removed the {undoneStep} press for '{targetEvent.Name}'.";
                     _store.AddEditAndUndoMessage(candidate, edit, selected.Message);
                 }
                 else
@@ -475,6 +564,36 @@ public sealed class RunService
             UpdateDeviceLeds();
             return Clone(candidate);
         }
+    }
+
+    // The message that produced an event's current state: its start press while running, or
+    // its finish (a second press, or for a keypad event the correct code or the operator's
+    // override) once completed. Wrong keypad codes are accepted signals that move a running
+    // keypad event's last-signal time, so its start is matched on the start time alone.
+    private static bool IsUndoablePress(EventRecord eventResult, MessageRecord message)
+    {
+        var elapsed = message.ElapsedMilliseconds;
+        if (eventResult.Type == EventKind.Keypad)
+        {
+            // Keypad events step back one solved code at a time, then their start.
+            var lastSolved = eventResult.Keypad?.Challenges.LastOrDefault(challenge => challenge.IsSolved);
+            if (lastSolved is not null)
+            {
+                return eventResult.Status is EventStatus.Active or EventStatus.Completed &&
+                    lastSolved.SolvedByMessageId == message.MessageId;
+            }
+            return eventResult.Status == EventStatus.Active && message.Type == "event-press" &&
+                eventResult.StartElapsedMs == elapsed && eventResult.FinishElapsedMs is null;
+        }
+
+        if (eventResult.Status == EventStatus.Completed)
+        {
+            return message.Type == "event-press" && eventResult.FinishElapsedMs == elapsed && eventResult.LastSignalElapsedMs == elapsed;
+        }
+
+        return eventResult.Status == EventStatus.Active && message.Type == "event-press" &&
+            eventResult.StartElapsedMs == elapsed && eventResult.FinishElapsedMs is null &&
+            eventResult.LastSignalElapsedMs == elapsed;
     }
 
     public RunCountdownState GetCountdownState()
@@ -535,7 +654,7 @@ public sealed class RunService
         }
 
         var events = run.Events
-            .Where(eventResult => eventResult.Type == EventKind.Standard && MasterProtocolCodec.IsValidDeviceId(eventResult.DeviceId))
+            .Where(eventResult => IsButtonEvent(eventResult.Type) && MasterProtocolCodec.IsValidDeviceId(eventResult.DeviceId))
             .OrderBy(eventResult => eventResult.DeviceId, StringComparer.OrdinalIgnoreCase)
             .Select(eventResult => new MasterGarageEventStatus(token, run.Revision, eventResult.DeviceId,
                 eventResult.Status switch
@@ -652,10 +771,13 @@ public sealed class RunService
                 Events = displayedRun.Events.Select(e => new ScoreboardEvent
                 {
                     Name = e.Name,
-                    Prompt = e.Prompt,
+                    // A keypad message is revealed only once its event has been started.
+                    Prompt = e.Type == EventKind.Keypad && e.Status != EventStatus.Active ? null : e.Prompt,
                     Status = e.Status,
                     AwardedPoints = e.Score
-                }).ToList()
+                }).ToList(),
+                KeypadChallenge = BuildKeypadChallenge(displayedRun),
+                BonusGame = BuildScoreboardBonus(displayedRun)
             };
 
             var onDeck = _data.Queue.OrderBy(q => q.Position).Take(4)
@@ -674,6 +796,66 @@ public sealed class RunService
                 Leaderboard = BuildLeaderboard()
             };
         }
+    }
+
+    private static ScoreboardBonusGame? BuildScoreboardBonus(RunRecord run)
+    {
+        if (run.BonusGame is not { } bonus)
+        {
+            return null;
+        }
+
+        var target = bonus.Phase == BonusGamePhase.Target
+            ? run.Events.SingleOrDefault(e => e.EventId == bonus.TargetEventId)
+            : null;
+        return new ScoreboardBonusGame
+        {
+            Phase = bonus.Phase,
+            TargetEventId = target?.EventId,
+            TargetEventName = target?.Name,
+            TargetRemainingMs = target is null ? null : Math.Max(0, (bonus.TargetDeadlineElapsedMs ?? 0) - run.ActiveElapsedMs),
+            TargetWindowMs = target is null ? null : bonus.TargetWindowMs,
+            Hits = bonus.Hits,
+            PointsPerPress = bonus.PointsPerPress,
+            AwardedPoints = bonus.Phase == BonusGamePhase.Ended ? bonus.CountedPoints : null,
+            EndReason = bonus.EndReason
+        };
+    }
+
+    private ScoreboardKeypadChallenge? BuildKeypadChallenge(RunRecord run)
+    {
+        if (run.Status is not (RunStatus.Active or RunStatus.Paused))
+        {
+            return null;
+        }
+
+        var eventResult = run.Events
+            .Where(e => e.Type == EventKind.Keypad && e.Status == EventStatus.Active)
+            .OrderByDescending(e => e.StartElapsedMs ?? 0)
+            .FirstOrDefault();
+        var prompt = eventResult?.Keypad?.Current?.Prompt ?? eventResult?.Prompt;
+        if (eventResult is null || string.IsNullOrWhiteSpace(prompt))
+        {
+            return null;
+        }
+
+        _keypadEntries.TryGetValue(eventResult.EventId, out var entry);
+        if (entry is not null && entry.RunId != run.Id)
+        {
+            entry = null;
+        }
+
+        var now = _clock.MonotonicMilliseconds;
+        return new ScoreboardKeypadChallenge
+        {
+            EventName = eventResult.Name,
+            Prompt = prompt,
+            Entry = entry?.Entry ?? "",
+            ShowWrong = entry?.WrongAtMonotonicMs is long wrongAt && now - wrongAt < KeypadWrongDisplayMilliseconds,
+            ShowCorrect = entry?.CorrectAtMonotonicMs is long correctAt && now - correctAt < KeypadWrongDisplayMilliseconds,
+            Successes = eventResult.Keypad?.SolvedCount ?? 0,
+            RequiredSuccesses = RequiredKeypadSuccesses(run, eventResult)
+        };
     }
 
     public CompetitorRecord AddCompetitor(string name)
@@ -915,14 +1097,17 @@ public sealed class RunService
                     : throw new CommandException("That run is no longer accepting virtual event presses.");
             var eventResult = run.Events.SingleOrDefault(e => e.EventId == eventId)
                 ?? throw new CommandException("Event was not found in this run.");
+            // Players finish a keypad event only with its code; the operator's second tap is
+            // the override for a stuck player or a broken keypad.
+            var keypadOverride = eventResult is { Type: EventKind.Keypad, Status: EventStatus.Active };
             using var payload = JsonDocument.Parse("{}");
             return ReceiveCore(new InputEnvelope
             {
-                MessageId = NewId("virtual-press"),
+                MessageId = NewId(keypadOverride ? "virtual-keypad-override" : "virtual-press"),
                 SessionId = run.Id,
                 RunId = run.Id,
                 DeviceId = eventResult.DeviceId,
-                Type = "event-press",
+                Type = keypadOverride ? "keypad-success" : "event-press",
                 ElapsedMilliseconds = run.ActiveElapsedMs,
                 Payload = payload.RootElement.Clone()
             }, trustedVirtual: true);
@@ -1196,54 +1381,103 @@ public sealed class RunService
     {
         lock (_gate)
         {
+            return ReceivePhysicalSpokeInput(press.BootToken, press.RunToken, press.DeviceId, press.Sequence,
+                press.AgeMilliseconds, MasterProtocolCodec.GetPhysicalPressMessageId(press.RunToken, press.DeviceId, press.Sequence),
+                "event-press", new
+                {
+                    bootToken = press.BootToken,
+                    token = press.RunToken,
+                    mac = press.DeviceId,
+                    sequence = press.Sequence
+                }, sessionAllowed);
+        }
+    }
+
+    // Typed-entry updates only drive the TV display and are not persisted; they return null.
+    // A submission ('*' on the keypad) is recorded like a press and answered with the event
+    // state: COMPLETED for the right code, ACTIVE (still running) for a wrong one.
+    public MasterPhysicalPressResult? ReceivePhysicalKeypadInput(MasterKeypadInput input, bool sessionAllowed)
+    {
+        lock (_gate)
+        {
             RefreshActiveClock();
-            var messageId = MasterProtocolCodec.GetPhysicalPressMessageId(press.RunToken, press.DeviceId, press.Sequence);
+            var run = _current;
+            var eventResult = run?.Events.SingleOrDefault(eventItem =>
+                string.Equals(eventItem.DeviceId, input.DeviceId, StringComparison.OrdinalIgnoreCase));
+            var liveKeypadEvent = sessionAllowed && run is { Status: RunStatus.Active } &&
+                string.Equals(MasterProtocolCodec.GetGarageRunToken(run.Id), input.RunToken, StringComparison.Ordinal) &&
+                eventResult is { Type: EventKind.Keypad, Status: EventStatus.Active };
+            var entryState = liveKeypadEvent ? KeypadEntryFor(run!, eventResult!) : null;
+            if (entryState is not null && input.Sequence > entryState.Sequence)
+            {
+                entryState.Sequence = input.Sequence;
+                entryState.Entry = input.Submit ? "" : input.Entry;
+            }
+
+            if (!input.Submit)
+            {
+                return null;
+            }
+
+            return ReceivePhysicalSpokeInput(input.BootToken, input.RunToken, input.DeviceId, input.Sequence,
+                input.AgeMilliseconds, MasterProtocolCodec.GetKeypadSubmitMessageId(input.RunToken, input.DeviceId, input.Sequence),
+                "keypad-response", new
+                {
+                    bootToken = input.BootToken,
+                    token = input.RunToken,
+                    mac = input.DeviceId,
+                    sequence = input.Sequence,
+                    answer = input.Entry
+                }, sessionAllowed);
+        }
+    }
+
+    private MasterPhysicalPressResult ReceivePhysicalSpokeInput(string bootToken, string runToken, string deviceId,
+        uint sequence, uint ageMilliseconds, string messageId, string type, object payload, bool sessionAllowed)
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
             var tokenRun = _data.Runs
-                .Where(run => string.Equals(MasterProtocolCodec.GetGarageRunToken(run.Id), press.RunToken, StringComparison.Ordinal))
+                .Where(run => string.Equals(MasterProtocolCodec.GetGarageRunToken(run.Id), runToken, StringComparison.Ordinal))
                 .OrderByDescending(run => run.Id == _current?.Id)
                 .ThenByDescending(run => run.Id == _lastDisplayedRun?.Id)
                 .FirstOrDefault();
             var run = _current;
             var messageRun = tokenRun ?? run;
             var elapsed = messageRun is not null && ReferenceEquals(messageRun, run) && run.Status == RunStatus.Active
-                ? PhysicalPressElapsed(run, press)
+                ? PhysicalPressElapsed(run, deviceId, ageMilliseconds)
                 : messageRun?.ActiveElapsedMs ?? 0;
             var envelope = new InputEnvelope
             {
                 MessageId = messageId,
-                SessionId = messageRun?.Id ?? $"garage-{press.RunToken}",
-                RunId = messageRun?.Id ?? $"garage-{press.RunToken}",
-                DeviceId = press.DeviceId,
-                Type = "event-press",
+                SessionId = messageRun?.Id ?? $"garage-{runToken}",
+                RunId = messageRun?.Id ?? $"garage-{runToken}",
+                DeviceId = deviceId,
+                Type = type,
                 ElapsedMilliseconds = elapsed,
-                Payload = JsonSerializer.SerializeToElement(new
-                {
-                    bootToken = press.BootToken,
-                    token = press.RunToken,
-                    mac = press.DeviceId,
-                    sequence = press.Sequence
-                }, JsonDefaults.Options)
+                Payload = JsonSerializer.SerializeToElement(payload, JsonDefaults.Options)
             };
             var payloadJson = envelope.Payload.GetRawText();
 
             if (_data.Messages.Any(message => string.Equals(message.MessageId, messageId, StringComparison.Ordinal)))
             {
                 var duplicate = ReceiveCore(envelope, trustedVirtual: false);
-                return PhysicalPressResult(duplicate, tokenRun, press.DeviceId);
+                return PhysicalPressResult(duplicate, tokenRun, deviceId, messageId);
             }
 
             if (!sessionAllowed)
             {
                 return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.InvalidSignal,
-                    "Physical spoke press does not match the current master handshake or IDLE mode.", payloadJson),
-                    tokenRun, press.DeviceId);
+                    "Physical spoke input does not match the current master handshake or IDLE mode.", payloadJson),
+                    tokenRun, deviceId);
             }
 
             var currentToken = MasterProtocolCodec.GetGarageRunToken(run?.Id);
-            if (run is null || !string.Equals(currentToken, press.RunToken, StringComparison.Ordinal))
+            if (run is null || !string.Equals(currentToken, runToken, StringComparison.Ordinal))
             {
                 return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.WrongRun,
-                    "Physical spoke press token does not identify the current run.", payloadJson), tokenRun, press.DeviceId);
+                    "Physical spoke input token does not identify the current run.", payloadJson), tokenRun, deviceId);
             }
 
             if (run.Status != RunStatus.Active)
@@ -1255,23 +1489,23 @@ public sealed class RunService
                     _ => MessageDisposition.InvalidSignal
                 };
                 return PhysicalPressResult(RecordRejected(envelope, disposition,
-                    "Physical spoke presses are accepted only while the run is ACTIVE.", payloadJson), run, press.DeviceId);
+                    "Physical spoke input is accepted only while the run is ACTIVE.", payloadJson), run, deviceId);
             }
 
             var eventResult = run.Events.SingleOrDefault(eventItem =>
-                string.Equals(eventItem.DeviceId, press.DeviceId, StringComparison.OrdinalIgnoreCase));
-            if (eventResult is null || eventResult.Type != EventKind.Standard)
+                string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+            if (eventResult is null || !IsButtonEvent(eventResult.Type))
             {
                 return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.UnknownStation,
-                    "Physical spoke MAC is not assigned to a standard event in this run.", payloadJson), run, press.DeviceId);
+                    "Physical spoke MAC is not assigned to a button or keypad event in this run.", payloadJson), run, deviceId, messageId);
             }
 
             var device = _data.Devices.SingleOrDefault(deviceItem =>
-                string.Equals(deviceItem.DeviceId, press.DeviceId, StringComparison.OrdinalIgnoreCase));
+                string.Equals(deviceItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
             if (device is null)
             {
                 return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.UnknownStation,
-                    "Physical spoke MAC has no device record.", payloadJson), run, press.DeviceId);
+                    "Physical spoke MAC has no device record.", payloadJson), run, deviceId);
             }
             if (device.Availability != DeviceAvailability.Online)
             {
@@ -1293,29 +1527,41 @@ public sealed class RunService
             }
 
             var received = ReceiveCore(envelope, trustedVirtual: false);
-            return PhysicalPressResult(received, run, press.DeviceId);
+            return PhysicalPressResult(received, run, deviceId, messageId);
         }
     }
 
     // Time the press when the button was pushed, not when the laptop received it, so
     // radio retries and relay latency are not charged to the competitor. Bounded so a
     // press is never placed before the current active stretch or its event's last signal.
-    private long PhysicalPressElapsed(RunRecord run, MasterPhysicalPress press)
+    private long PhysicalPressElapsed(RunRecord run, string deviceId, uint ageMilliseconds)
     {
-        var age = Math.Min((long)press.AgeMilliseconds, MaximumPhysicalPressAgeMilliseconds);
+        var age = Math.Min((long)ageMilliseconds, MaximumPhysicalPressAgeMilliseconds);
         var elapsed = Math.Max(run.ActiveElapsedMs - age, _activeSegmentStartElapsedMs);
         var lastSignal = run.Events.SingleOrDefault(eventItem =>
-            string.Equals(eventItem.DeviceId, press.DeviceId, StringComparison.OrdinalIgnoreCase))?.LastSignalElapsedMs;
+            string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))?.LastSignalElapsedMs;
         return Math.Max(elapsed, lastSignal ?? 0);
     }
 
-    private static MasterPhysicalPressResult PhysicalPressResult(InputResult result, RunRecord? run, string deviceId)
+    // NEXT tells a keypad spoke its code was right but more are needed (a new message is up),
+    // so it signals success without finishing; ACTIVE after a code means it was wrong.
+    private static MasterPhysicalPressResult PhysicalPressResult(InputResult result, RunRecord? run, string deviceId,
+        string? messageId = null)
     {
         var state = "REJECTED";
-        if (result.Disposition is MessageDisposition.Accepted or MessageDisposition.Duplicate or MessageDisposition.AlreadyCompleted)
+        var eventResult = run?.Events.SingleOrDefault(eventItem =>
+            string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+        // A second button press on a running keypad event is refused (only the code finishes
+        // it), but the spoke must stay in its running state so the keypad remains usable.
+        var keypadStillRunning = result.Disposition == MessageDisposition.InvalidSignal &&
+            eventResult is { Type: EventKind.Keypad, Status: EventStatus.Active } && run?.Status == RunStatus.Active;
+        // A bonus press that did not count (wrong button, too late) leaves the button's own
+        // completed event as it was.
+        var bonusPressNotCounted = run?.BonusGame is not null && eventResult?.Status == EventStatus.Completed &&
+            result.Disposition is MessageDisposition.InvalidSignal or MessageDisposition.StaleTimestamp;
+        if (result.Disposition is MessageDisposition.Accepted or MessageDisposition.Duplicate or MessageDisposition.AlreadyCompleted ||
+            keypadStillRunning || bonusPressNotCounted)
         {
-            var eventResult = run?.Events.SingleOrDefault(eventItem =>
-                string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
             state = eventResult is null ? "REJECTED" : eventResult.Status switch
             {
                 EventStatus.Pending => "PENDING",
@@ -1323,6 +1569,11 @@ public sealed class RunService
                 EventStatus.Completed => "COMPLETED",
                 _ => "REJECTED"
             };
+            if (state == "ACTIVE" && messageId is not null &&
+                eventResult!.Keypad?.Challenges.Any(challenge => challenge.SolvedByMessageId == messageId) == true)
+            {
+                state = "NEXT";
+            }
         }
 
         return new MasterPhysicalPressResult(state, result.Disposition, result.Reason);
@@ -1415,6 +1666,7 @@ public sealed class RunService
             }
 
             RecomputeScores(run);
+            EndBonusGame(run, "operator", run.ActiveElapsedMs);
             MarkFinishedUnrecorded(run);
             run.FinishedAt = _clock.UtcNow;
             run.Revision++;
@@ -1582,12 +1834,21 @@ public sealed class RunService
     {
         lock (_gate)
         {
-            var run = RequireCurrent();
             RefreshActiveClock();
+            // A timed-out run leaves the current slot (so the next competitor can go) but stays
+            // unrecorded until the operator records it; until then it can still be discarded.
+            var run = _current ?? (_lastDisplayedRun is { Status: RunStatus.TimedOut, IsRecorded: false, IsDeleted: false } timedOut
+                ? timedOut
+                : throw new CommandException("There is no armed, active, or unrecorded timed-out run to discard."));
             var actionReason = string.IsNullOrWhiteSpace(reason) ? "Operator aborted run." : reason.Trim();
+            EndBonusGame(run, "operator", run.ActiveElapsedMs);
             run.Status = RunStatus.Aborted;
             run.Notes = actionReason;
-            run.FinishedAt = _clock.UtcNow;
+            // A timed-out run keeps the moment it timed out.
+            if (_current is not null || run.FinishedAt is null)
+            {
+                run.FinishedAt = _clock.UtcNow;
+            }
             RecomputeScores(run);
             run.Revision++;
             _lastDisplayedRun = run;
@@ -1755,6 +2016,23 @@ public sealed class RunService
                 return RecordRejected(envelope, MessageDisposition.Offline, "Station is offline; manual mode requires operator edits and does not accept simulated station packets.", payloadJson);
             }
 
+            // During the bonus round every button press is a bid for the lit target.
+            if (run.BonusGame is { Phase: not BonusGamePhase.Ended } && envelope.Type == "event-press")
+            {
+                var bonusDisposition = ApplyBonusPress(run, eventResult, envelope, out var bonusReason);
+                if (bonusDisposition != MessageDisposition.Accepted)
+                {
+                    return RecordRejected(envelope, bonusDisposition, bonusReason, payloadJson);
+                }
+
+                device.LastSeenAt = _clock.UtcNow;
+                device.LastError = null;
+                run.LastAcceptedInputElapsedMs = Math.Max(run.LastAcceptedInputElapsedMs, envelope.ElapsedMilliseconds);
+                run.Revision++;
+                UpdateDeviceLeds();
+                return RecordAccepted(envelope, run, bonusReason, payloadJson);
+            }
+
             if (eventResult.LastSignalElapsedMs is long lastSignal && envelope.ElapsedMilliseconds < lastSignal)
             {
                 return RecordRejected(envelope, MessageDisposition.StaleTimestamp, "Message arrived older than the last signal for this event.", payloadJson);
@@ -1770,10 +2048,17 @@ public sealed class RunService
             device.LastSeenAt = _clock.UtcNow;
             device.LastError = null;
             run.LastAcceptedInputElapsedMs = Math.Max(run.LastAcceptedInputElapsedMs, envelope.ElapsedMilliseconds);
-            if (run.AllEventsCompleted && run.Events.All(e => e.Type == EventKind.Standard))
+            if (run.AllEventsCompleted && run.Events.All(e => IsButtonEvent(e.Type)))
             {
-                MarkFinishedUnrecorded(run);
-                reason = "All events completed; run finished and is awaiting recording.";
+                if (TryStartBonusGame(run))
+                {
+                    reason = "All events completed with time remaining; the bonus speed round is starting.";
+                }
+                else
+                {
+                    MarkFinishedUnrecorded(run);
+                    reason = "All events completed; run finished and is awaiting recording.";
+                }
             }
             else if (run.AllEventsCompleted && run.Phase != RunPhase.Bonus)
             {
@@ -1784,6 +2069,216 @@ public sealed class RunService
             run.Revision++;
             UpdateDeviceLeds();
             return RecordAccepted(envelope, run, reason, payloadJson);
+        }
+    }
+
+    // ---------------- Bonus speed round ----------------
+    // When the last event finishes with time left, the clock keeps running and a speed round
+    // starts: buttons are polled while they flash an intro, then one button at a time is lit
+    // and must be pressed before its window closes. A miss ends the run there; running out
+    // of run time ends it as a timeout. Each hit is worth the edition's points per press,
+    // added when the round ends.
+    public const long BonusIntroMilliseconds = 1_500;
+    // The bonus round's row on scorecards and leaderboards, edited like an event with this id.
+    public const string BonusEventId = "bonus-round";
+    // Presses are timed when pressed but can arrive a little later over the radio; wait this
+    // long past a deadline before calling it a miss.
+    public const long BonusMissGraceMilliseconds = 300;
+
+    private bool TryStartBonusGame(RunRecord run)
+    {
+        if (run.Edition.BonusGame is not { Enabled: true } settings || run.Status != RunStatus.Active || run.BonusGame is not null ||
+            run.ActiveElapsedMs >= run.Edition.DurationLimitSeconds * 1000L)
+        {
+            return false;
+        }
+
+        run.Phase = RunPhase.Bonus;
+        run.BonusStartedElapsedMs = run.ActiveElapsedMs;
+        run.BonusGame = new BonusGameRecord
+        {
+            Phase = BonusGamePhase.Intro,
+            StartedElapsedMs = run.ActiveElapsedMs,
+            IntroEndsElapsedMs = run.ActiveElapsedMs + BonusIntroMilliseconds,
+            PointsPerPress = settings.PointsPerPress,
+            Sequence = 1
+        };
+        return true;
+    }
+
+    // Advances the bonus round on the run clock: lights the first target once the intro is
+    // over and ends the round on a miss. Called several times a second by the host; returns
+    // true when something changed that the buttons need to hear about.
+    public bool TickBonusGame()
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            var run = _current;
+            if (run is not { Status: RunStatus.Active, BonusGame: { Phase: not BonusGamePhase.Ended } bonus })
+            {
+                return false;
+            }
+
+            var now = run.ActiveElapsedMs;
+            if (bonus.Phase == BonusGamePhase.Intro)
+            {
+                if (now < bonus.IntroEndsElapsedMs)
+                {
+                    return false;
+                }
+
+                bonus.FirstTargetElapsedMs = now;
+                CueNextBonusTarget(run, now);
+                SoundCueRequested?.Invoke(SoundCue.BonusStart);
+                run.Revision++;
+                SaveCurrentRun(run);
+                return true;
+            }
+
+            if (bonus.TargetDeadlineElapsedMs is not long deadline || now <= deadline + BonusMissGraceMilliseconds)
+            {
+                return false;
+            }
+
+            // Missed: the run ends at the moment the window closed.
+            run.ActiveElapsedMs = Math.Max(deadline, run.LastAcceptedInputElapsedMs);
+            EndBonusGame(run, "miss", run.ActiveElapsedMs);
+            MarkFinishedUnrecorded(run);
+            run.FinishedAt = _clock.UtcNow;
+            run.Revision++;
+            _lastDisplayedRun = run;
+            UpdateDeviceLeds();
+            SaveCurrentRun(run);
+            return true;
+        }
+    }
+
+    // A button that answered the bonus poll during the intro; only answering buttons are lit.
+    public void ReceiveBonusPollReply(string runToken, string deviceId)
+    {
+        lock (_gate)
+        {
+            var run = _current;
+            if (run?.BonusGame is not { Phase: BonusGamePhase.Intro } bonus ||
+                !string.Equals(MasterProtocolCodec.GetGarageRunToken(run.Id), runToken, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var eventResult = run.Events.SingleOrDefault(e => string.Equals(e.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+            if (eventResult is not null && !bonus.RespondingDeviceIds.Contains(eventResult.DeviceId, StringComparer.OrdinalIgnoreCase))
+            {
+                bonus.RespondingDeviceIds.Add(eventResult.DeviceId);
+            }
+        }
+    }
+
+    private void CueNextBonusTarget(RunRecord run, long now)
+    {
+        var bonus = run.BonusGame!;
+        var settings = run.Edition.BonusGame ?? new BonusGameSettings();
+        var candidates = run.Events
+            .Where(e => bonus.RespondingDeviceIds.Count == 0 ||
+                bonus.RespondingDeviceIds.Contains(e.DeviceId, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+        if (candidates.Count > 1)
+        {
+            candidates.RemoveAll(e => e.EventId == bonus.TargetEventId);
+        }
+
+        var target = candidates[Random.Shared.Next(candidates.Count)];
+        bonus.Phase = BonusGamePhase.Target;
+        bonus.Sequence++;
+        bonus.TargetEventId = target.EventId;
+        bonus.TargetDeviceId = target.DeviceId;
+        bonus.TargetStartElapsedMs = now;
+        bonus.TargetWindowMs = settings.WindowForBonusElapsed(now - (bonus.FirstTargetElapsedMs ?? now));
+    }
+
+    private MessageDisposition ApplyBonusPress(RunRecord run, EventRecord eventResult, InputEnvelope envelope, out string reason)
+    {
+        var bonus = run.BonusGame!;
+        if (bonus.Phase != BonusGamePhase.Target)
+        {
+            reason = "The bonus round has not lit a button yet.";
+            return MessageDisposition.InvalidSignal;
+        }
+
+        if (!string.Equals(bonus.TargetEventId, eventResult.EventId, StringComparison.Ordinal))
+        {
+            reason = $"'{eventResult.Name}' is not the lit bonus button.";
+            return MessageDisposition.InvalidSignal;
+        }
+
+        var pressedAt = envelope.ElapsedMilliseconds;
+        if (pressedAt < bonus.TargetStartElapsedMs)
+        {
+            reason = "Press came before this bonus button was lit.";
+            return MessageDisposition.StaleTimestamp;
+        }
+
+        if (pressedAt > bonus.TargetDeadlineElapsedMs)
+        {
+            reason = "Press came after this bonus button's window closed.";
+            return MessageDisposition.InvalidSignal;
+        }
+
+        bonus.Hits++;
+        reason = $"Bonus hit {bonus.Hits} on '{eventResult.Name}'.";
+        CueNextBonusTarget(run, run.ActiveElapsedMs);
+        return MessageDisposition.Accepted;
+    }
+
+    private static void EndBonusGame(RunRecord run, string reason, long elapsedMs)
+    {
+        if (run.BonusGame is not { Phase: not BonusGamePhase.Ended } bonus)
+        {
+            return;
+        }
+
+        bonus.Phase = BonusGamePhase.Ended;
+        bonus.TargetEventId = null;
+        bonus.TargetDeviceId = null;
+        bonus.EndReason = reason;
+        bonus.EndedElapsedMs = elapsedMs;
+        bonus.AwardedPoints = bonus.Hits * bonus.PointsPerPress;
+    }
+
+    private void SaveCurrentRun(RunRecord run)
+    {
+        try
+        {
+            _store.SaveRuns([run]);
+        }
+        catch
+        {
+            ReloadInMemoryAfterPersistenceFailure();
+            throw;
+        }
+    }
+
+    public MasterBonusStatus GetMasterBonusStatus()
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            var run = _current;
+            var token = MasterProtocolCodec.GetGarageRunToken(run?.Id);
+            if (token is null || run is not { Status: RunStatus.Active, BonusGame: { Phase: not BonusGamePhase.Ended } bonus })
+            {
+                return new MasterBonusStatus(token ?? "-", 0, "OFF", null, 0);
+            }
+
+            if (bonus.Phase == BonusGamePhase.Intro)
+            {
+                return new MasterBonusStatus(token, bonus.Sequence, "INTRO", null,
+                    Math.Max(0, bonus.IntroEndsElapsedMs - run.ActiveElapsedMs));
+            }
+
+            var remaining = Math.Max(0, (bonus.TargetDeadlineElapsedMs ?? 0) - run.ActiveElapsedMs);
+            var physical = MasterProtocolCodec.IsValidDeviceId(bonus.TargetDeviceId) ? bonus.TargetDeviceId!.ToUpperInvariant() : null;
+            return new MasterBonusStatus(token, bonus.Sequence, "TARGET", physical, remaining);
         }
     }
 
@@ -2215,53 +2710,45 @@ public sealed class RunService
             {
                 eventResult.Status = EventStatus.Active;
                 eventResult.StartElapsedMs = envelope.ElapsedMilliseconds;
+                eventResult.Keypad = new KeypadProgress();
+                DrawKeypadChallenge(run, eventResult, envelope.ElapsedMilliseconds);
+                _keypadEntries.Remove(eventResult.EventId);
                 reason = "Keypad prompt started; a valid response is required.";
                 return MessageDisposition.Accepted;
             }
 
             if (envelope.Type == "keypad-incorrect" && eventResult.Status == EventStatus.Active)
             {
+                NoteKeypadWrong(run, eventResult);
                 reason = "Incorrect keypad response recorded; event remains active.";
                 return MessageDisposition.Accepted;
             }
 
-            if (envelope.Type == "keypad-response" && eventResult.Status == EventStatus.Active)
+            if (envelope.Type is "keypad-response" or "keypad-success" && eventResult.Status == EventStatus.Active)
             {
-                var answer = envelope.Payload.ValueKind == JsonValueKind.Object && envelope.Payload.TryGetProperty("answer", out var answerProperty)
-                    ? answerProperty.GetString()
-                    : null;
-                var expected = run.Edition.Events.Single(e => e.EventId == eventResult.EventId).Answer;
-                if (!string.Equals(answer?.Trim(), expected?.Trim(), StringComparison.OrdinalIgnoreCase))
+                var current = EnsureCurrentKeypadChallenge(run, eventResult, eventResult.StartElapsedMs ?? envelope.ElapsedMilliseconds);
+                if (envelope.Type == "keypad-response")
                 {
-                    reason = "Incorrect keypad response recorded; event remains active.";
-                    return MessageDisposition.Accepted;
+                    var answer = envelope.Payload.ValueKind == JsonValueKind.Object && envelope.Payload.TryGetProperty("answer", out var answerProperty) &&
+                        answerProperty.ValueKind == JsonValueKind.String
+                        ? answerProperty.GetString()
+                        : null;
+                    if (current is null || !KeypadAnswersMatch(answer, current.Answer))
+                    {
+                        NoteKeypadWrong(run, eventResult);
+                        reason = "Incorrect keypad response recorded; event remains active.";
+                        return MessageDisposition.Accepted;
+                    }
                 }
 
-                if (eventResult.StartElapsedMs is not long responseStart || envelope.ElapsedMilliseconds < responseStart)
-                {
-                    reason = "Keypad completion timestamp precedes its prompt start.";
-                    return MessageDisposition.StaleTimestamp;
-                }
-
-                eventResult.FinishElapsedMs = envelope.ElapsedMilliseconds;
-                eventResult.Status = EventStatus.Completed;
-                eventResult.Score = CalculateScore(eventResult, run.Edition);
-                reason = "Correct keypad response completed the event.";
-                return MessageDisposition.Accepted;
-            }
-
-            if (envelope.Type == "keypad-success" && eventResult.Status == EventStatus.Active)
-            {
                 if (eventResult.StartElapsedMs is not long start || envelope.ElapsedMilliseconds < start)
                 {
                     reason = "Keypad completion timestamp precedes its prompt start.";
                     return MessageDisposition.StaleTimestamp;
                 }
 
-                eventResult.FinishElapsedMs = envelope.ElapsedMilliseconds;
-                eventResult.Status = EventStatus.Completed;
-                eventResult.Score = CalculateScore(eventResult, run.Edition);
-                reason = "Keypad success completed the event.";
+                reason = SolveKeypadChallenge(run, eventResult, current, envelope,
+                    envelope.MessageId.StartsWith("virtual-keypad-override", StringComparison.Ordinal));
                 return MessageDisposition.Accepted;
             }
 
@@ -2302,6 +2789,115 @@ public sealed class RunService
 
         reason = "Arcade completion is rejected until all-emeralds start is received.";
         return MessageDisposition.InvalidSignal;
+    }
+
+    // '*' is the physical keypad's Enter key, so a configured code written as "D5*" matches
+    // the typed "D5". Letters compare case-insensitively.
+    private static bool KeypadAnswersMatch(string? answer, string? expected)
+    {
+        static string Normalize(string? value) => (value ?? "").Trim().TrimEnd('*').Trim();
+        var normalizedExpected = Normalize(expected);
+        return normalizedExpected.Length > 0 &&
+            string.Equals(Normalize(answer), normalizedExpected, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int RequiredKeypadSuccesses(RunRecord run, EventRecord eventResult) =>
+        Math.Max(1, run.Edition.Events.SingleOrDefault(e => e.EventId == eventResult.EventId)?.RequiredSuccesses ?? 1);
+
+    // The run's snapshot of the keypad answer file, or, when it had none, the event's fixed
+    // prompt/answer (older setups and tests).
+    private static IReadOnlyList<KeypadChallengeDefinition> KeypadPoolFor(RunRecord run, EventRecord eventResult)
+    {
+        if (run.Edition.KeypadChallenges is { Count: > 0 } pool)
+        {
+            return pool;
+        }
+
+        var definition = run.Edition.Events.SingleOrDefault(e => e.EventId == eventResult.EventId);
+        return string.IsNullOrWhiteSpace(definition?.Answer)
+            ? []
+            : [new KeypadChallengeDefinition { Prompt = definition.Prompt ?? "", Answer = definition.Answer }];
+    }
+
+    // Picks a random message no keypad event in this run has shown yet. Only if every
+    // message has been used does a repeat become possible (never the one just shown).
+    private KeypadAttemptRecord? DrawKeypadChallenge(RunRecord run, EventRecord eventResult, long elapsedMs)
+    {
+        var pool = KeypadPoolFor(run, eventResult);
+        if (pool.Count == 0)
+        {
+            eventResult.Prompt = null;
+            return null;
+        }
+
+        var progress = eventResult.Keypad ??= new KeypadProgress();
+        var shown = run.Events
+            .SelectMany(e => e.Keypad?.Challenges ?? [])
+            .Select(challenge => challenge.Prompt)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var candidates = pool.Where(challenge => !shown.Contains(challenge.Prompt)).ToList();
+        if (candidates.Count == 0)
+        {
+            var last = progress.Challenges.LastOrDefault()?.Prompt;
+            candidates = pool.Where(challenge => !string.Equals(challenge.Prompt, last, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (candidates.Count == 0) candidates = pool.ToList();
+        }
+
+        var chosen = candidates[Random.Shared.Next(candidates.Count)];
+        var attempt = new KeypadAttemptRecord { Prompt = chosen.Prompt, Answer = chosen.Answer, DrawnElapsedMs = elapsedMs };
+        progress.Challenges.Add(attempt);
+        eventResult.Prompt = attempt.Prompt;
+        SoundCueRequested?.Invoke(SoundCue.KeypadMessage);
+        return attempt;
+    }
+
+    private KeypadAttemptRecord? EnsureCurrentKeypadChallenge(RunRecord run, EventRecord eventResult, long elapsedMs) =>
+        eventResult.Keypad?.Current ?? DrawKeypadChallenge(run, eventResult, elapsedMs);
+
+    // Credits the message on screen. The event finishes once the required number is solved;
+    // otherwise the next message is drawn.
+    private string SolveKeypadChallenge(RunRecord run, EventRecord eventResult, KeypadAttemptRecord? current,
+        InputEnvelope envelope, bool operatorOverride)
+    {
+        var elapsed = envelope.ElapsedMilliseconds;
+        var progress = eventResult.Keypad ??= new KeypadProgress();
+        if (current is null)
+        {
+            // No message pool at all: record the credit so undo and the count still work.
+            current = new KeypadAttemptRecord { Prompt = "", Answer = "", DrawnElapsedMs = elapsed };
+            progress.Challenges.Add(current);
+        }
+
+        current.SolvedElapsedMs = elapsed;
+        current.SolvedByMessageId = envelope.MessageId;
+        var entry = KeypadEntryFor(run, eventResult);
+        entry.Entry = "";
+        entry.WrongAtMonotonicMs = null;
+        var solved = progress.SolvedCount;
+        var required = RequiredKeypadSuccesses(run, eventResult);
+        var who = operatorOverride ? "Operator credited" : "Correct code for";
+        if (solved >= required)
+        {
+            eventResult.FinishElapsedMs = elapsed;
+            eventResult.Status = EventStatus.Completed;
+            eventResult.Score = CalculateScore(eventResult, run.Edition);
+            _keypadEntries.Remove(eventResult.EventId);
+            return required == 1
+                ? $"{who} '{current.Prompt}'; the keypad event is complete."
+                : $"{who} '{current.Prompt}' ({solved} of {required}); the keypad event is complete.";
+        }
+
+        entry.CorrectAtMonotonicMs = _clock.MonotonicMilliseconds;
+        var next = DrawKeypadChallenge(run, eventResult, elapsed);
+        return $"{who} '{current.Prompt}' ({solved} of {required}); next message '{next?.Prompt}'.";
+    }
+
+    private void NoteKeypadWrong(RunRecord run, EventRecord eventResult)
+    {
+        var entry = KeypadEntryFor(run, eventResult);
+        entry.Entry = "";
+        entry.WrongAtMonotonicMs = _clock.MonotonicMilliseconds;
+        entry.CorrectAtMonotonicMs = null;
     }
 
     private InputResult RecordAccepted(InputEnvelope envelope, RunRecord run, string reason, string? payloadJson)
@@ -2418,6 +3014,7 @@ public sealed class RunService
         }
 
         _current.ActiveElapsedMs = _current.Edition.DurationLimitSeconds * 1000L;
+        EndBonusGame(_current, "timeout", _current.ActiveElapsedMs);
         _current.Status = RunStatus.TimedOut;
         _current.FinishedAt = _clock.UtcNow;
         RecomputeScores(_current);
@@ -2489,6 +3086,12 @@ public sealed class RunService
 
         foreach (var edit in request.Events)
         {
+            if (edit.EventId == BonusEventId)
+            {
+                ApplyBonusEdit(candidate, edit);
+                continue;
+            }
+
             var result = candidate.Events.SingleOrDefault(e => e.EventId == edit.EventId)
                 ?? throw new CommandException($"Event '{edit.EventId}' is not in this run's roster.");
             var start = edit.ClearStartElapsedMs ? null : edit.StartElapsedMs ?? result.StartElapsedMs;
@@ -2545,11 +3148,35 @@ public sealed class RunService
                 result.LastSignalElapsedMs = null;
             }
             result.Score = CalculateScore(result, candidate.Edition);
+            NormalizeKeypadProgress(candidate, result);
+        }
+    }
+
+    // Scorecard corrections change a keypad event's status directly. Keep its messages
+    // consistent: a reset event forgets them, and a running one always has one on screen.
+    private void NormalizeKeypadProgress(RunRecord run, EventRecord eventResult)
+    {
+        if (eventResult.Type != EventKind.Keypad)
+        {
+            return;
+        }
+
+        if (eventResult.Status == EventStatus.Pending)
+        {
+            eventResult.Keypad = null;
+            eventResult.Prompt = null;
+            _keypadEntries.Remove(eventResult.EventId);
+        }
+        else if (eventResult.Status == EventStatus.Active && run.Status is not (RunStatus.Completed or RunStatus.TimedOut
+                     or RunStatus.Aborted or RunStatus.Superseded))
+        {
+            EnsureCurrentKeypadChallenge(run, eventResult, eventResult.StartElapsedMs ?? run.ActiveElapsedMs);
         }
     }
 
     private void ValidateHistoricalCandidate(RunRecord candidate)
     {
+        ValidateBonusTimes(candidate);
         // Any unfinished status would make startup find a second current run and refuse to boot.
         if (candidate.Status is RunStatus.Active or RunStatus.Armed or RunStatus.Paused or RunStatus.Countdown or RunStatus.Finished)
         {
@@ -2584,6 +3211,86 @@ public sealed class RunService
     private static bool IsStoppedHistoricalStatus(RunStatus status) =>
         status is RunStatus.Finished or RunStatus.Completed or RunStatus.TimedOut or RunStatus.Aborted or RunStatus.Superseded;
 
+    // The bonus round is corrected like an event on the scorecard: its start and end times,
+    // its hits (points = hits x points per press), and a points override. Clearing it
+    // (status Pending) removes the round's result; entering times or hits for a run that
+    // never reached it records one.
+    private static void ApplyBonusEdit(RunRecord candidate, EventEditRequest edit)
+    {
+        if (candidate.BonusGame is { Phase: not BonusGamePhase.Ended })
+        {
+            throw new CommandException("The bonus round can be corrected once it has ended.");
+        }
+
+        if (edit.Status == EventStatus.Pending)
+        {
+            candidate.BonusGame = null;
+            return;
+        }
+
+        if (edit.ClearStartElapsedMs)
+        {
+            throw new CommandException("The bonus round needs a start time; use Clear to remove its result instead.");
+        }
+
+        var bonus = candidate.BonusGame;
+        var start = edit.StartElapsedMs ?? bonus?.StartedElapsedMs
+            ?? throw new CommandException("Enter the bonus round's start time.");
+        var finish = edit.ClearFinishElapsedMs ? null : edit.FinishElapsedMs ?? bonus?.EndedElapsedMs;
+        if (edit.DurationMs is long duration)
+        {
+            if (duration < 0)
+            {
+                throw new CommandException("The bonus round's duration must not be negative.");
+            }
+            finish = start + duration;
+        }
+        if (start < 0 || finish < start)
+        {
+            throw new CommandException("The bonus round's end must not be before its start.");
+        }
+        if (edit.Hits is < 0 or > BonusGameSettings.MaximumPointsPerPress)
+        {
+            throw new CommandException($"Bonus round hits must be a whole number from 0 to {BonusGameSettings.MaximumPointsPerPress:N0}.");
+        }
+        if (edit.ScoreOverride is < -MaximumManualPoints or > MaximumManualPoints)
+        {
+            throw new CommandException($"Bonus round points must be between -{MaximumManualPoints:N0} and {MaximumManualPoints:N0}.");
+        }
+
+        bonus ??= candidate.BonusGame = new BonusGameRecord
+        {
+            Phase = BonusGamePhase.Ended,
+            EndReason = "operator",
+            PointsPerPress = (candidate.Edition.BonusGame ?? new BonusGameSettings()).PointsPerPress
+        };
+        bonus.StartedElapsedMs = start;
+        bonus.IntroEndsElapsedMs = Math.Max(bonus.IntroEndsElapsedMs, start);
+        bonus.EndedElapsedMs = finish;
+        if (edit.Hits is int hits)
+        {
+            bonus.Hits = hits;
+        }
+        if (edit.ScoreOverride is int scoreOverride)
+        {
+            bonus.ScoreOverride = scoreOverride;
+        }
+        if (edit.ClearScoreOverride)
+        {
+            bonus.ScoreOverride = null;
+        }
+        bonus.AwardedPoints = bonus.Hits * bonus.PointsPerPress;
+    }
+
+    private static void ValidateBonusTimes(RunRecord candidate)
+    {
+        if (candidate.BonusGame is { Phase: BonusGamePhase.Ended } bonus &&
+            (bonus.StartedElapsedMs > candidate.ActiveElapsedMs || bonus.EndedElapsedMs > candidate.ActiveElapsedMs))
+        {
+            throw new CommandException("The bonus round's times must fall within the run's elapsed time.");
+        }
+    }
+
     private static void ExtendStoppedCorrectionTimeline(RunRecord candidate, EditRunRequest request)
     {
         if (request.ActiveElapsedMs is not null)
@@ -2604,6 +3311,9 @@ public sealed class RunService
         var latestCorrectedElapsed = candidate.Events
             .Where(result => timedEventIds.Contains(result.EventId))
             .SelectMany(result => new long?[] { result.StartElapsedMs, result.FinishElapsedMs })
+            .Concat(timedEventIds.Contains(BonusEventId) && candidate.BonusGame is { } bonus
+                ? new long?[] { bonus.StartedElapsedMs, bonus.EndedElapsedMs }
+                : [])
             .Where(timestamp => timestamp is not null)
             .Select(timestamp => timestamp!.Value)
             .DefaultIfEmpty(candidate.ActiveElapsedMs)
@@ -2619,6 +3329,7 @@ public sealed class RunService
 
     private void ValidateLiveCandidate(RunRecord candidate)
     {
+        ValidateBonusTimes(candidate);
         if (candidate.Status is not RunStatus.Armed and not RunStatus.Active and not RunStatus.Paused and not RunStatus.Finished)
         {
             throw new CommandException("A live correction may keep a run armed, active, paused, or finished; use the run controls to record or abort it.");
@@ -2649,9 +3360,14 @@ public sealed class RunService
             result.Score = CalculateScore(result, candidate.Edition);
         }
 
-        if (candidate.AllEventsCompleted && candidate.Events.All(e => e.Type == EventKind.Standard))
+        if (candidate.AllEventsCompleted && candidate.Events.All(e => IsButtonEvent(e.Type)))
         {
-            MarkFinishedUnrecorded(candidate);
+            // A correction made during the bonus round leaves the round running.
+            if (candidate.BonusGame is not { Phase: not BonusGamePhase.Ended } ||
+                candidate.Status is not (RunStatus.Active or RunStatus.Paused))
+            {
+                MarkFinishedUnrecorded(candidate);
+            }
         }
         else if (candidate.AllEventsCompleted)
         {
@@ -2660,6 +3376,9 @@ public sealed class RunService
         }
         else
         {
+            // Reopening an event ends a bonus round in progress (keeping its hits); the
+            // round does not start again when the event is finished once more.
+            EndBonusGame(candidate, "operator", candidate.ActiveElapsedMs);
             candidate.Phase = RunPhase.Normal;
             candidate.BonusStartedElapsedMs = null;
         }
@@ -2817,6 +3536,12 @@ public sealed class RunService
         {
             snapshot.DurationLimitSeconds = duration;
         }
+        if (snapshot.Events.Any(e => e.Type == EventKind.Keypad) && _keypadChallenges.Challenges.Count > 0)
+        {
+            snapshot.KeypadChallenges = _keypadChallenges.Challenges
+                .Select(challenge => new KeypadChallengeDefinition { Prompt = challenge.Prompt, Answer = challenge.Answer })
+                .ToList();
+        }
         return new RunRecord
         {
             Id = NewId("run"),
@@ -2836,7 +3561,8 @@ public sealed class RunService
                 Name = e.Name,
                 DeviceId = e.DeviceId,
                 Type = e.Type,
-                Prompt = e.Prompt,
+                // A keypad event's message is drawn when it starts.
+                Prompt = e.Type == EventKind.Keypad ? null : e.Prompt,
                 Status = EventStatus.Pending
             }).ToList()
         };
@@ -3047,15 +3773,20 @@ public sealed class RunService
         DecayEverySeconds = eventDefinition.DecayEverySeconds,
         GraceSeconds = eventDefinition.GraceSeconds,
         Prompt = eventDefinition.Prompt,
-        Answer = eventDefinition.Answer
+        Answer = eventDefinition.Answer,
+        RequiredSuccesses = eventDefinition.RequiredSuccesses
     };
 
-    private static EditionSetup ToSetup(EditionDefinition edition) => new()
+    private EditionSetup ToSetup(EditionDefinition edition) => new()
     {
         EditionId = edition.EditionId,
         Name = edition.Name,
         Events = edition.Events.Select(CloneEventDefinition).ToList(),
-        Scoring = edition.Scoring.Clone()
+        Scoring = edition.Scoring.Clone(),
+        BonusGame = (edition.BonusGame ?? new BonusGameSettings()).Clone(),
+        KeypadMessageCount = _keypadChallenges.Challenges.Count,
+        KeypadMessageSource = _keypadChallenges.Source,
+        KeypadMessageError = _keypadChallenges.Error
     };
 
     private static bool SameEventSetup(IReadOnlyList<EventDefinition> left, IReadOnlyList<EventDefinition> right) =>
@@ -3070,7 +3801,8 @@ public sealed class RunService
             pair.First.DecayEverySeconds == pair.Second.DecayEverySeconds &&
             pair.First.GraceSeconds == pair.Second.GraceSeconds &&
             string.Equals(pair.First.Prompt, pair.Second.Prompt, StringComparison.Ordinal) &&
-            string.Equals(pair.First.Answer, pair.Second.Answer, StringComparison.Ordinal));
+            string.Equals(pair.First.Answer, pair.Second.Answer, StringComparison.Ordinal) &&
+            pair.First.RequiredSuccesses == pair.Second.RequiredSuccesses);
 
     private static string RequireReason(string reason) => string.IsNullOrWhiteSpace(reason) ? throw new CommandException("A correction reason is required.") : reason.Trim();
     private static string Serialize<T>(T value) => JsonSerializer.Serialize(value, JsonDefaults.Options);

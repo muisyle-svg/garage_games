@@ -22,9 +22,13 @@ if (!File.Exists(editionPath))
 }
 
 var edition = EditionDefinition.FromJson(editionPath);
+// Keypad messages and their codes. A missing or invalid file is reported in Setup rather
+// than stopping the app; keypad events then fall back to operator overrides.
+var keypadAnswersPath = GetOption(args, "--keypad-answers") ?? Path.Combine(Path.GetDirectoryName(editionPath)!, "keypad-answers.csv");
+var keypadChallenges = KeypadChallengeSet.LoadOrReportError(keypadAnswersPath);
 var store = new RunStore(dataPath);
 var clock = new SimulationClock();
-var service = new RunService(store, edition, clock);
+var service = new RunService(store, edition, clock, keypadChallenges);
 var urls = GetOption(args, "--urls") ?? "http://127.0.0.1:5187";
 ValidateLoopbackUrls(urls);
 
@@ -46,9 +50,19 @@ builder.Services.AddSingleton(service);
 builder.Services.AddSingleton<PhysicalMasterSerialService>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<PhysicalMasterSerialService>());
 builder.Services.AddHostedService<RunCheckpointHostedService>();
+// Game sounds play through this computer's speakers, not a browser tab. --no-sound
+// silences them (for example, on a machine that is only testing).
+var soundsEnabled = OperatingSystem.IsWindows() && !args.Contains("--no-sound", StringComparer.OrdinalIgnoreCase);
+builder.Services.AddSingleton<ISoundPlayer>(provider => soundsEnabled
+    ? new WindowsSoundPlayer(Path.Combine(AppContext.BaseDirectory, "wwwroot", "sounds"),
+        provider.GetRequiredService<ILogger<WindowsSoundPlayer>>())
+    : SilentSoundPlayer.Instance);
+builder.Services.AddHostedService<RunTimingHostedService>();
 builder.WebHost.UseUrls(urls);
 
 var app = builder.Build();
+var soundPlayer = app.Services.GetRequiredService<ISoundPlayer>();
+service.SoundCueRequested += cue => soundPlayer.Play(cue);
 var webRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot");
 var staticAssetVersion = StaticAssetVersioning.ComputeVersion(webRootPath);
 var buildId = GetOption(args, "--build-id") ??
