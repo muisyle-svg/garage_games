@@ -126,7 +126,11 @@ public sealed class BonusGameSettings
     public const int MaximumPointsPerPress = 100_000;
     public const int MinimumWindowLimitMs = 500;
     public const int MaximumWindowLimitMs = 60_000;
+    public const string DefaultName = "Bonus round";
+    public const int MaximumNameLength = 60;
 
+    // What the round is called on the TV, scorecards, and leaderboards.
+    public string Name { get; set; } = DefaultName;
     public bool Enabled { get; set; } = true;
     public int PointsPerPress { get; set; } = 5;
     public int InitialWindowMs { get; set; } = 10_000;
@@ -136,6 +140,7 @@ public sealed class BonusGameSettings
 
     public BonusGameSettings Clone() => new()
     {
+        Name = DisplayName,
         Enabled = Enabled,
         PointsPerPress = PointsPerPress,
         InitialWindowMs = InitialWindowMs,
@@ -143,6 +148,14 @@ public sealed class BonusGameSettings
         StepEveryMs = StepEveryMs,
         MinimumWindowMs = MinimumWindowMs
     };
+
+    [JsonIgnore]
+    public string DisplayName => string.IsNullOrWhiteSpace(Name) ? DefaultName : Name.Trim();
+
+    // Two settings score runs the same way when they differ at most in name.
+    public bool SameScoringAs(BonusGameSettings other) =>
+        Enabled == other.Enabled && PointsPerPress == other.PointsPerPress && InitialWindowMs == other.InitialWindowMs &&
+        StepMs == other.StepMs && StepEveryMs == other.StepEveryMs && MinimumWindowMs == other.MinimumWindowMs;
 
     // The time allowed for a target chosen this far into the bonus round.
     public long WindowForBonusElapsed(long bonusElapsedMs)
@@ -153,6 +166,10 @@ public sealed class BonusGameSettings
 
     public void Validate(string source)
     {
+        if (Name is not null && Name.Trim().Length > MaximumNameLength)
+        {
+            throw new InvalidDataException($"The bonus round's name in '{source}' must be {MaximumNameLength} characters or fewer.");
+        }
         if (PointsPerPress is < 0 or > MaximumPointsPerPress ||
             InitialWindowMs is < MinimumWindowLimitMs or > MaximumWindowLimitMs ||
             MinimumWindowMs is < MinimumWindowLimitMs or > MaximumWindowLimitMs || MinimumWindowMs > InitialWindowMs ||
@@ -574,6 +591,10 @@ public sealed class OperatorSnapshot
     public DateTimeOffset? DeviceScanCheckedAt { get; set; }
     public RunRecord? CurrentRun { get; set; }
     public required List<EventSnapshot> Events { get; set; }
+    // The current edition's bonus round settings (its name labels scorecards and leaderboards).
+    public BonusGameSettings? BonusGame { get; set; }
+    // Who the TV shows as up next between runs, if anyone.
+    public PrimedCompetitor? Primed { get; set; }
     public required List<CompetitorRecord> Competitors { get; set; }
     public required List<QueueItemRecord> Queue { get; set; }
     public required List<DeviceRecord> Devices { get; set; }
@@ -599,9 +620,14 @@ public sealed class ScoreboardSnapshot
 
 public sealed record ScoreboardOnDeck(string Name, RunCategory Category);
 
+// A competitor primed as "up next" on the TV before their run is started.
+public sealed record PrimedCompetitor(string CompetitorId, RunCategory Category, int DurationLimitSeconds);
+
 public sealed class ScoreboardRun
 {
     public required string CompetitorName { get; set; }
+    // True when this is a primed competitor waiting to start, not a run.
+    public bool IsPrimed { get; set; }
     public RunCategory Category { get; set; }
     public RunStatus Status { get; set; }
     public RunPhase Phase { get; set; }
@@ -620,6 +646,7 @@ public sealed class ScoreboardRun
 
 public sealed class ScoreboardBonusGame
 {
+    public string Name { get; set; } = BonusGameSettings.DefaultName;
     public BonusGamePhase Phase { get; set; }
     public string? TargetEventId { get; set; }
     public string? TargetEventName { get; set; }
@@ -651,6 +678,8 @@ public sealed class ScoreboardEvent
     public string? Prompt { get; set; }
     public EventStatus Status { get; set; }
     public int AwardedPoints { get; set; }
+    // How long a finished event took (finish minus start).
+    public long? DurationMs { get; set; }
 }
 
 public sealed class LeaderboardRow

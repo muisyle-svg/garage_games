@@ -80,6 +80,9 @@ public sealed class RunService
     // What each running keypad event's player has typed so far, for the TV only. It is
     // display state: not persisted, and reset whenever another run takes over.
     private readonly Dictionary<string, KeypadEntryState> _keypadEntries = new(StringComparer.Ordinal);
+    // "Prime next competitor": between runs, the TV shows who is up next (full clock, no
+    // scores) instead of the previous run. Display only; cleared when a run is armed.
+    private PrimedCompetitor? _primed;
 
     public const long KeypadWrongDisplayMilliseconds = 2_000;
     private readonly KeypadChallengeSet _keypadChallenges;
@@ -219,9 +222,9 @@ public sealed class RunService
 
             // Bonus round points and timing score runs too, so they version the edition like
             // event scoring does.
+            // (Renaming the round alone does not.)
             var eventSetupChanged = !SameEventSetup(_edition.Events, candidate.Events) ||
-                !string.Equals(Serialize(_edition.BonusGame ?? new BonusGameSettings()),
-                    Serialize(candidate.BonusGame ?? new BonusGameSettings()), StringComparison.Ordinal);
+                !(_edition.BonusGame ?? new BonusGameSettings()).SameScoringAs(candidate.BonusGame ?? new BonusGameSettings());
             if (eventSetupChanged && string.Equals(candidate.EditionId, _edition.EditionId, StringComparison.Ordinal) &&
                 _data.Runs.Any(run => run.EditionId == _edition.EditionId && run.IsRecorded))
             {
@@ -327,6 +330,7 @@ public sealed class RunService
             _data.ShowExhibitionsOnLeaderboard = false;
             _current = null;
             _lastDisplayedRun = null;
+            _primed = null;
             RestartClockAnchor();
             UpdateDeviceLeds();
 
@@ -376,7 +380,7 @@ public sealed class RunService
                 throw new CommandException("This run has no bonus round result to clear.");
             }
             var eventName = isBonus
-                ? "Bonus round"
+                ? run.Edition.BonusGame?.DisplayName ?? BonusGameSettings.DefaultName
                 : (run.Events.SingleOrDefault(item => item.EventId == eventId)
                     ?? throw new CommandException("That event is not part of this run.")).Name;
             var reopenRun = !isBonus && isCurrent && run.Status == RunStatus.Finished &&
@@ -733,6 +737,8 @@ public sealed class RunService
                 DeviceScanCheckedAt = _data.DeviceScanCheckedAt,
                 CurrentRun = _current is null ? (_lastDisplayedRun is null ? null : Clone(_lastDisplayedRun)) : Clone(_current),
                 Events = _edition.ToSnapshot().Events,
+                BonusGame = (_edition.BonusGame ?? new BonusGameSettings()).Clone(),
+                Primed = _current is null ? _primed : null,
                 Competitors = _data.Competitors.Select(Clone).ToList(),
                 Queue = _data.Queue.OrderBy(q => q.Position).Select(Clone).ToList(),
                 Devices = _edition.Events
@@ -746,6 +752,21 @@ public sealed class RunService
                 Edits = _data.Edits.OrderByDescending(e => e.Id).Take(250).Select(Clone).ToList(),
                 Leaderboard = BuildLeaderboard()
             };
+        }
+    }
+
+    public PrimedCompetitor PrimeNextCompetitor(string competitorId, RunCategory category, int? durationLimitSeconds)
+    {
+        lock (_gate)
+        {
+            if (_current is not null)
+            {
+                throw new CommandException("Finish and record (or discard) the current run before showing who is up next.");
+            }
+            RequireActiveCompetitor(competitorId);
+            var duration = RequireRequestedRunDuration(durationLimitSeconds);
+            _primed = new PrimedCompetitor(competitorId, category, duration);
+            return _primed;
         }
     }
 
@@ -774,20 +795,44 @@ public sealed class RunService
                     // A keypad message is revealed only once its event has been started.
                     Prompt = e.Type == EventKind.Keypad && e.Status != EventStatus.Active ? null : e.Prompt,
                     Status = e.Status,
-                    AwardedPoints = e.Score
+                    AwardedPoints = e.Score,
+                    DurationMs = e.Status == EventStatus.Completed ? e.DurationMs : null
                 }).ToList(),
                 KeypadChallenge = BuildKeypadChallenge(displayedRun),
                 BonusGame = BuildScoreboardBonus(displayedRun)
             };
 
-            var onDeck = _data.Queue.OrderBy(q => q.Position).Take(4)
+            // Between runs, a primed competitor replaces the previous run: full clock, the
+            // edition's events all pending, no points.
+            var primed = _current is null ? _primed : null;
+            if (primed is not null)
+            {
+                current = new ScoreboardRun
+                {
+                    CompetitorName = competitorNames.GetValueOrDefault(primed.CompetitorId, "Unknown competitor"),
+                    Category = primed.Category,
+                    Status = RunStatus.Armed,
+                    Phase = RunPhase.Normal,
+                    IsPrimed = true,
+                    RemainingMilliseconds = primed.DurationLimitSeconds * 1000L,
+                    TotalEvents = _edition.Events.Count,
+                    Events = _edition.Events.Select(e => new ScoreboardEvent { Name = e.Name, Status = EventStatus.Pending }).ToList()
+                };
+            }
+
+            // The primed competitor is shown as competing, so not also as on deck.
+            var queue = _data.Queue.OrderBy(q => q.Position).ToList();
+            var primedEntry = primed is null ? null : queue.FirstOrDefault(item =>
+                item.CompetitorId == primed.CompetitorId && item.Category == primed.Category);
+            if (primedEntry is not null) queue.Remove(primedEntry);
+            var onDeck = queue.Take(4)
                 .Select(item => new ScoreboardOnDeck(
                     competitorNames.GetValueOrDefault(item.CompetitorId, "Unknown competitor"), item.Category))
                 .ToList();
             return new ScoreboardSnapshot
             {
                 EditionName = _edition.Name,
-                DurationLimitSeconds = displayedRun?.Edition.DurationLimitSeconds ?? _edition.DurationLimitSeconds,
+                DurationLimitSeconds = primed?.DurationLimitSeconds ?? displayedRun?.Edition.DurationLimitSeconds ?? _edition.DurationLimitSeconds,
                 SimulationMode = simulationMode,
                 ShowExhibitionsOnLeaderboard = _data.ShowExhibitionsOnLeaderboard,
                 CurrentRun = current,
@@ -810,6 +855,7 @@ public sealed class RunService
             : null;
         return new ScoreboardBonusGame
         {
+            Name = run.Edition.BonusGame?.DisplayName ?? BonusGameSettings.DefaultName,
             Phase = bonus.Phase,
             TargetEventId = target?.EventId,
             TargetEventName = target?.Name,
@@ -3531,6 +3577,8 @@ public sealed class RunService
 
     private RunRecord CreateRun(QueueItemRecord queueItem, bool manualOfflineOverride, int? durationLimitSeconds = null)
     {
+        // A real run replaces the primed "up next" view.
+        _primed = null;
         var snapshot = _edition.ToSnapshot();
         if (durationLimitSeconds is int duration)
         {

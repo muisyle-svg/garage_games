@@ -68,6 +68,8 @@ var tests = new (string Name, Action Run)[]
     ("the bonus round ends on timeout, on operator finish, and uses every tile when nothing answers", BonusRoundOtherEndings),
     ("bonus round settings save through setup, validate, and version recorded editions", BonusRoundSetup),
     ("the bonus round is corrected like an event: hits, points override, times, clear, and history", BonusRoundCorrections),
+    ("Up Next shows the next competitor on the TV between runs until a run is armed", UpNextOnTheTv),
+    ("the TV gets each finished event's elapsed time", ScoreboardEventDurations),
     ("schema version 1 databases upgrade once after a backup", SchemaVersion1UpgradesWithBackup),
     ("deleted runs leave history and standings, persist, and can be restored", DeletedRunsHideAndRestore),
     ("deleting a recorded redo restores the result it replaced", DeletingRedoRestoresOriginal),
@@ -2833,6 +2835,64 @@ static void BonusRoundCorrections()
     Assert.Equal(RunStatus.Completed, withBonus.Status);
 }
 
+static void ScoreboardEventDurations()
+{
+    using var h = NewHarness();
+    var run = h.ArmAndStart();
+    h.Clock.Advance(TimeSpan.FromSeconds(2));
+    h.Service.PressEvent(run.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromMilliseconds(34_600));
+    h.Service.PressEvent(run.Id, "event-01");
+    h.Service.PressEvent(run.Id, "event-04");
+    var events = h.Service.GetScoreboard().CurrentRun!.Events;
+    Assert.Equal<long?>(34_600L, events.Single(e => e.Name == "Event 1").DurationMs);
+    Assert.Equal<long?>(null, events.Single(e => e.Name == "Event 4").DurationMs); // Still running.
+    Assert.Equal<long?>(null, events.Single(e => e.Name == "Keypad").DurationMs); // Not started.
+}
+
+static void UpNextOnTheTv()
+{
+    using var h = NewHarness();
+    var first = h.ArmAndStart();
+    h.Send(first, "station-01", "event-press", "up-next-start", 0);
+    // Not while a run is in progress (or awaiting recording).
+    var next = h.AddCompetitor("Next Up");
+    Assert.Throws<CommandException>(() => h.Service.PrimeNextCompetitor(next.Id, RunCategory.Official, 240));
+    h.Service.Finish();
+    h.Service.Record();
+    Assert.Equal(h.CompetitorName, h.Service.GetScoreboard().CurrentRun!.CompetitorName);
+
+    h.Service.AddToQueue(next.Id, RunCategory.Official);
+    var third = h.AddCompetitor("Third");
+    h.Service.AddToQueue(third.Id, RunCategory.Official);
+    Assert.Throws<CommandException>(() => h.Service.PrimeNextCompetitor(next.Id, RunCategory.Official, null));
+    var primed = h.Service.PrimeNextCompetitor(next.Id, RunCategory.Official, 240);
+    Assert.Equal(240, primed.DurationLimitSeconds);
+    Assert.Equal(primed, h.Service.GetOperatorSnapshot().Primed);
+
+    // The TV shows them with the full clock, every event pending, and no points; the
+    // on-deck list moves past them.
+    var board = h.Service.GetScoreboard();
+    Assert.Equal("Next Up", board.CurrentRun!.CompetitorName);
+    Assert.True(board.CurrentRun.IsPrimed);
+    Assert.Equal(240_000L, board.CurrentRun.RemainingMilliseconds);
+    Assert.Equal(0, board.CurrentRun.AwardedPoints);
+    Assert.Equal(0, board.CurrentRun.CompletedEvents);
+    Assert.True(board.CurrentRun.Events.All(e => e.Status == EventStatus.Pending && e.AwardedPoints == 0));
+    Assert.Equal(240, board.DurationLimitSeconds);
+    Assert.Equal("Third", board.OnDeckName);
+
+    // Arming a run replaces it; after that run, the TV shows that run, not the old prime.
+    h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.First(item => item.CompetitorId == next.Id).Id);
+    Assert.True(!h.Service.GetScoreboard().CurrentRun!.IsPrimed);
+    Assert.Equal<PrimedCompetitor?>(null, h.Service.GetOperatorSnapshot().Primed);
+    h.StartRun();
+    h.Service.Finish();
+    h.Service.Record();
+    Assert.True(!h.Service.GetScoreboard().CurrentRun!.IsPrimed);
+    Assert.Equal("Next Up", h.Service.GetScoreboard().CurrentRun!.CompetitorName);
+}
+
 static void BonusRoundSetup()
 {
     using var h = new TestHarness(MakeBonusEdition(), NewPath());
@@ -2853,11 +2913,29 @@ static void BonusRoundSetup()
     invalid.BonusGame!.MinimumWindowMs = 7_000; // Longer than the starting window.
     Assert.Throws<CommandException>(() => h.Service.UpdateSetup(invalid));
 
+    // Renaming the round is not a scoring change: same edition, new name for new runs.
+    var renamed = h.Service.GetSetup();
+    Assert.Equal(BonusGameSettings.DefaultName, renamed.BonusGame!.Name);
+    renamed.BonusGame.Name = "  Lightning Round ";
+    var renamedSaved = h.Service.UpdateSetup(renamed);
+    Assert.Equal(setup.EditionId, renamedSaved.EditionId);
+    Assert.Equal("Lightning Round", renamedSaved.BonusGame!.Name);
+    Assert.Equal("Lightning Round", h.Service.GetOperatorSnapshot().BonusGame!.Name);
+    var tooLong = h.Service.GetSetup();
+    tooLong.BonusGame!.Name = new string('x', BonusGameSettings.MaximumNameLength + 1);
+    Assert.Throws<CommandException>(() => h.Service.UpdateSetup(tooLong));
+
     var changed = h.Service.GetSetup();
     changed.BonusGame!.PointsPerPress = 3;
     var versioned = h.Service.UpdateSetup(changed);
     Assert.True(versioned.EditionId != setup.EditionId, "changing bonus scoring after recorded runs versions the edition");
     Assert.Equal(12, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).Edition.BonusGame!.PointsPerPress);
+
+    // New runs carry the name to the TV.
+    h.Service.AddToQueue(h.CompetitorId, RunCategory.Exhibition);
+    var named = h.ArmAndStart(RunCategory.Exhibition);
+    FinishAllEvents(h, named);
+    Assert.Equal("Lightning Round", h.Service.GetScoreboard().CurrentRun!.BonusGame!.Name);
 }
 
 static void DeletedRunsHideAndRestore()

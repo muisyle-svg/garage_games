@@ -317,6 +317,16 @@ design does not use Google Sheet row IDs or Wi-Fi. Battery-powered spokes must
 keep their radio listening to receive a wireless start; deep sleep cannot
 receive that start signal.
 
+## Up Next on the TV
+
+Between runs the TV keeps showing the last run and its scores. To switch it to
+the next player before starting, select them (with the run type and length) and
+press **Up Next**, left of the start button. The TV then shows them under "Up
+next" with the full clock, every event pending, and no points, and moves the
+on-deck list past them. Nothing is armed or started; arming or starting a run
+replaces the Up Next view, and pressing Up Next again with someone else selected
+switches it. It is available once the previous run is recorded or discarded.
+
 ## Sounds
 
 Game sounds play from the app itself through this computer's default audio
@@ -369,7 +379,8 @@ them, adjust the times, or Clear it. Entering a start time and hits on a run tha
 never reached the bonus records one. The Leaderboards tab has a Bonus round board
 that ranks by points (ties share a rank; round length doesn't matter), with runs
 that never reached it listed as DNF. Set the round up in Setup under **Bonus
-speed round**: whether it plays, points per press, the starting seconds per press,
+speed round**: its name (shown on the TV, scorecards, and leaderboards; renaming it
+doesn't start a new edition version), whether it plays, points per press, the starting seconds per press,
 how much and how often that drops, and the minimum. The defaults match the
 standalone Speed game (10 s, dropping 1 s every 10 s, to 2 s) at 5 points per
 press. Changing them after runs are recorded starts a new edition version, like

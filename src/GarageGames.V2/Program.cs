@@ -255,6 +255,10 @@ app.MapPost("/api/run/countdown-finished", async (CountdownFinishedRequest reque
     await master.SendCurrentStatusAsync(cancellationToken);
     return Results.Ok(run);
 });
+// Shows the selected competitor as up next on the TV (full clock, no scores) without
+// arming or starting anything.
+app.MapPost("/api/run/prime", (StartCompetitorRunRequest request, RunService runs) =>
+    Results.Ok(runs.PrimeNextCompetitor(request.CompetitorId, request.Category, request.DurationLimitSeconds)));
 app.MapPost("/api/run/arm", async (StartCompetitorRunRequest request, RunService runs,
     PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
 {
