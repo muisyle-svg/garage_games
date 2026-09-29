@@ -89,6 +89,7 @@
     lastUpdated: $("last-updated"),
     refresh: $("refresh-button"),
     alert: $("alert-region"),
+    tabAlert: $("tab-alert-region"),
     tabs: [$("tab-scorekeeping"), $("tab-on-deck"), $("tab-history"), $("tab-leaderboards"), $("tab-setup")],
     tabPanels: [$("panel-scorekeeping"), $("panel-on-deck"), $("panel-history"), $("panel-leaderboards"), $("panel-setup")],
     caption: $("run-caption"),
@@ -136,6 +137,8 @@
     currentDiscard: $("discard-current-edits"),
     finish: $("finish-run-button"),
     record: $("record-run-button"),
+    recordActions: $("record-actions"),
+    reopen: $("reopen-run-button"),
     discard: $("discard-run-button"),
     countdown: $("run-countdown"),
     progress: $("event-progress"),
@@ -214,13 +217,24 @@
     return node;
   }
 
+  // Messages go in a fixed-size slot so they never shift the page: the scorekeeper desk's
+  // header on the Scorekeeping tab, and the space beside the tabs elsewhere.
+  function alertSlot() {
+    return (state.activeTab ?? 0) === 0 ? ui.alert : ui.tabAlert;
+  }
+
   function showAlert(message, kind = "error") {
     window.clearTimeout(state.alertTimer);
     ui.alert.replaceChildren();
+    ui.tabAlert.replaceChildren();
     const alert = make("div", `alert${kind === "success" ? " success" : ""}`, message);
     alert.setAttribute("role", kind === "success" ? "status" : "alert");
-    ui.alert.appendChild(alert);
-    state.alertTimer = window.setTimeout(() => ui.alert.replaceChildren(), 6500);
+    alert.title = String(message);
+    alertSlot().appendChild(alert);
+    state.alertTimer = window.setTimeout(() => {
+      ui.alert.replaceChildren();
+      ui.tabAlert.replaceChildren();
+    }, 6500);
   }
 
   async function request(path, options = {}) {
@@ -1641,12 +1655,16 @@
     const currentEditable = Boolean(current);
     ui.currentSave.disabled = state.busy || !currentDirty || !currentEditable;
     ui.currentSaveState.textContent = currentDirty ? "Unsaved edits" : "No unsaved edits";
-    ui.record.disabled = state.busy || !current || current.isRecorded || !["armed", "active", "paused", "finished", "timedOut"].includes(current.status);
-    ui.record.textContent = current?.isRecorded
-      ? "Already recorded"
-      : currentDirty ? "Save edits & record" : "Record result";
+    // Record (and Reopen) appear beside the run status only once the run is over.
+    const recordable = runActions.isRecordableRun(current);
+    const reopenable = runActions.canReopenRun(current);
+    ui.recordActions.hidden = !recordable && !reopenable;
+    ui.record.hidden = !recordable;
+    ui.record.disabled = state.busy || !recordable;
+    ui.reopen.hidden = !reopenable;
+    ui.reopen.disabled = state.busy || !reopenable;
+    ui.record.textContent = currentDirty ? "Save edits & record" : "Record result";
     ui.record.title = currentDirty ? "Saves your scorecard edits first, so the recorded result matches the scorecard." : "";
-
     const selected = (state.snapshot?.history || []).find((run) => run.id === state.selectedHistoryId);
     const historyDirty = selected && (hasDrafts(selected.id) || hasBonusDraft(selected.id));
     const historyEditable = Boolean(selected && !isLiveLock(selected));
@@ -1691,15 +1709,19 @@
         paused: "Run paused. Resume when the competitor is ready.",
         finished: (run.events || []).every((event) => event.status === "completed")
           ? "All events complete. Timer stopped · finished, not recorded."
-          : "Run finished early. Timer stopped · unfinished events remain; not recorded.",
+          : "Run finished early. Timer stopped · unfinished events remain; not recorded. Finished by mistake? Reopen it.",
         completed: "Run finished · recorded.",
-        timedOut: run.isRecorded ? "Time expired · incomplete result recorded." : "Time expired · incomplete result not recorded.",
+        timedOut: run.isRecorded
+          ? "Time expired · incomplete result recorded."
+          : "Time expired · not recorded yet. Record or discard this result before the next run.",
         aborted: "Run discarded · retained in history · not recorded or counted toward results.",
         superseded: "Run replaced by a newer result."
       }[run.status] || `Run status: ${titleCase(run.status)}.`;
       ui.banner.textContent = `${bonusBannerText(run) || copy} ${competitor} · ${label}`;
       ui.caption.textContent = `${competitor} · ${label} · ${titleCase(run.status)} · ${masterActions.formatRunDuration(runDurationSeconds(run))} run`;
     }
+    // The status line is capped at two lines so it never grows; the full text is on hover.
+    ui.banner.title = ui.banner.textContent;
     renderVirtualButtons(run);
   }
 
@@ -1724,6 +1746,7 @@
             ? "Start the run to enable event presses."
             : "No run is underway. Tap an assigned event tile to flash its physical button; press a physical spoke to highlight its matching tile.";
     ui.virtualNote.textContent = `${note} ${physicalSummary.text}`;
+    ui.virtualNote.title = ui.virtualNote.textContent;
     const draftSignature = run
       ? Array.from(state.drafts.get(run.id)?.entries() || [])
         .map(([eventId, draft]) => `${eventId}:${Array.from(draft.touched).map((field) => `${field}=${draft[field]}`).join(",")}`)
@@ -1787,7 +1810,9 @@
       metadata.append(stateLabel, action);
       button.append(name);
       const unsaved = Boolean(run && state.drafts.get(run.id)?.get(event.eventId)?.touched.size);
-      if (run && (event.status !== "pending" || unsaved)) button.append(virtualTileResult(run, event, unsaved));
+      // Every tile carries a result line, even before its event starts, so tiles keep one
+      // height and a start press never shifts the rows below.
+      button.append(virtualTileResult(run, event, unsaved));
       if (event.status === "completed") button.classList.add("is-complete");
       if (unsaved) button.classList.add("is-unsaved");
       button.append(metadata);
@@ -1920,12 +1945,17 @@
   // finished, a live running timer while in progress.
   function virtualTileResult(run, event, unsaved = false) {
     const result = make("span", "virtual-tile-result");
-    if (unsaved) {
+    if (run && unsaved) {
       // Unsaved edits show here so the operator sees them, clearly marked as not yet counted.
       const points = make("span", "virtual-tile-points");
-      points.append(String(displayedScore(run, event)), make("small", "", " pts · "), make("small", "virtual-tile-unsaved", "Unsaved"));
-      result.append(points);
+      points.append(String(displayedScore(run, event)), make("small", "", " pts"));
+      result.append(points, make("span", "virtual-tile-times virtual-tile-unsaved", "Unsaved"));
       result.classList.add("is-unsaved");
+      return result;
+    }
+    if (!run || event.status === "pending") {
+      result.append(make("span", "virtual-tile-points is-empty", "—"), make("span", "virtual-tile-times", "Not started"));
+      result.classList.add("is-pending");
       return result;
     }
     if (event.status === "completed") {
@@ -2491,7 +2521,14 @@
     const durationSeconds = selectedRunDurationSeconds();
     ui.competitor.disabled = state.busy || locked;
     ui.category.disabled = state.busy || locked;
-    ui.start.disabled = state.busy || state.masterBusy || !masterActions.canStartVirtual(state.master, run, selectedId) || (!locked && durationSeconds === null);
+    // An unrecorded timeout must be recorded or discarded before anyone else goes.
+    const waitingOnTimeout = runActions.blocksNextRun(run);
+    const waitingTitle = waitingOnTimeout
+      ? `Record or discard ${competitorName(run.competitorId)}'s timed-out run first.`
+      : "";
+    ui.start.disabled = state.busy || state.masterBusy || waitingOnTimeout ||
+      !masterActions.canStartVirtual(state.master, run, selectedId) || (!locked && durationSeconds === null);
+    ui.start.title = waitingTitle;
     ui.start.textContent = run?.status === "armed"
       ? "Start armed run"
       : `Start ${masterActions.formatRunDuration(durationSeconds || 300)} run`;
@@ -2502,10 +2539,13 @@
     const primedMatches = Boolean(primed && primed.competitorId === selectedId &&
       primed.category === ui.category.value && primed.durationLimitSeconds === durationSeconds);
     ui.prime.hidden = locked;
-    ui.prime.disabled = state.busy || !selectedId || durationSeconds === null || primedMatches;
+    ui.prime.disabled = state.busy || waitingOnTimeout || !selectedId || durationSeconds === null || primedMatches;
     ui.prime.textContent = primedMatches ? "Up Next · on the TV" : "Up Next";
+    ui.prime.title = waitingTitle || "Show the selected competitor on the TV as up next, with the full clock and no scores. Nothing starts.";
     ui.armPhysical.hidden = ui.start.hidden || !(state.master?.connected || run?.status === "armed");
-    ui.armPhysical.disabled = state.busy || state.masterBusy || !masterActions.canArmPhysical(state.master, run, selectedId) || (!locked && durationSeconds === null);
+    ui.armPhysical.disabled = state.busy || state.masterBusy || waitingOnTimeout ||
+      !masterActions.canArmPhysical(state.master, run, selectedId) || (!locked && durationSeconds === null);
+    ui.armPhysical.title = waitingTitle;
     ui.armPhysical.textContent = run?.status === "armed"
       ? "Waiting for physical Start"
       : `Arm ${masterActions.formatRunDuration(durationSeconds || 300)} run`;
@@ -2519,7 +2559,9 @@
       : undoneKeypadCode
         ? `Will undo: ${undoable.event.name} · code ${keypadProgress(run, undoable.event).solved}`
         : `Will undo: ${undoable.event.name} · ${String(undoable.event.status).toLowerCase() === "completed" ? "finish" : "start"} press`;
-    ui.finish.disabled = state.busy || !run || !["armed", "active", "paused"].includes(run.status);
+    ui.undoDetail.title = ui.undoDetail.textContent;
+    // An armed run hasn't started, so there is nothing to finish; it can only be discarded.
+    ui.finish.disabled = state.busy || !run || !["active", "paused"].includes(run.status);
     ui.discard.hidden = !runActions.isDiscardableRun(run);
     ui.discard.disabled = state.busy || !state.connected;
     ui.clearDatabaseButton.disabled = state.busy || !state.connected || ui.clearDatabaseConfirmation.value !== clearDatabasePhrase;
@@ -2582,6 +2624,9 @@
       tab.classList.toggle("is-selected", selected);
       ui.tabPanels[tabIndex].hidden = !selected;
     });
+    // A message still showing follows to the slot for the tab now in view.
+    const showing = ui.alert.firstElementChild || ui.tabAlert.firstElementChild;
+    if (showing && showing.parentElement !== alertSlot()) alertSlot().appendChild(showing);
     if (moveFocus) ui.tabs[index].focus();
   }
 
@@ -2953,11 +2998,12 @@
     const dirty = Boolean(run && (hasDrafts(run.id) || hasBonusDraft(run.id)));
     ui.unsavedBar.hidden = !dirty;
     ui.unsavedBar.classList.toggle("has-error", Boolean(dirty && state.currentSaveError));
-    ui.unsavedMessage.textContent = !dirty
-      ? ""
-      : state.currentSaveError
-        ? `Not saved: ${state.currentSaveError}`
-        : "Unsaved scorecard edits. The TV and results don't include them until you save.";
+    // The bar keeps its space while hidden, so its text stays set; long errors are cut to one
+    // line with the full text on hover.
+    ui.unsavedMessage.textContent = dirty && state.currentSaveError
+      ? `Not saved: ${state.currentSaveError}`
+      : "Unsaved edits · not on the TV or in results until saved.";
+    ui.unsavedMessage.title = ui.unsavedMessage.textContent;
     ui.unsavedSave.disabled = state.busy;
     ui.unsavedDiscard.disabled = state.busy;
     ui.currentDiscard.disabled = state.busy || !dirty;
@@ -3095,9 +3141,27 @@
       () => request("/api/run/undo-last-press", { method: "POST" }),
       "The last event-button press was undone."
     ));
-    ui.finish.addEventListener("click", () => performAction(
-      () => request("/api/run/finish", { method: "POST" }),
-      "Run finished · not recorded yet."
+    ui.finish.addEventListener("click", () => {
+      const run = state.snapshot?.currentRun;
+      if (!run || !["active", "paused"].includes(run.status)) return;
+      // Ending a run with time on the clock is rarely intended; the usual finish is a timeout.
+      const leftMs = runActions.remainingMs(run);
+      if (leftMs >= 1000) {
+        const left = masterActions.formatRunDuration(Math.floor(leftMs / 1000));
+        const confirmed = window.confirm(
+          `Finish ${competitorName(run.competitorId)}'s run with ${left} still on the clock?\n\n` +
+          "The clock stops and any unfinished events stay unfinished. Until the result is recorded, you can Reopen the run to continue."
+        );
+        if (!confirmed) return;
+      }
+      performAction(
+        () => request("/api/run/finish", { method: "POST" }),
+        "Run finished · not recorded yet."
+      );
+    });
+    ui.reopen.addEventListener("click", () => performAction(
+      () => request("/api/run/reopen", { method: "POST" }),
+      "Run reopened and paused with the clock where it stopped. Press Resume to continue."
     ));
     ui.discard.addEventListener("click", () => {
       const run = state.snapshot?.currentRun;

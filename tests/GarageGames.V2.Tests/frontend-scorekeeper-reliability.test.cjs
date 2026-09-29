@@ -30,6 +30,8 @@ function makeSaveHarness({ dirty = false, recorded = false } = {}) {
     currentSave: {},
     currentSaveState: {},
     record: {},
+    recordActions: {},
+    reopen: {},
     historySave: {},
     historySaveState: {}
   };
@@ -40,6 +42,7 @@ function makeSaveHarness({ dirty = false, recorded = false } = {}) {
     ui,
     hasDrafts,
     hasBonusDraft,
+    runActions: require("../../src/GarageGames.V2/wwwroot/mvp-scorekeeper-run-actions.js"),
     isLiveLock: () => true
   });
   return { state, ui, hasDrafts, hasBonusDraft, setSaveStates };
@@ -63,16 +66,44 @@ test("a timed-out run's unsaved edits can still be saved and recorded", () => {
   assert.equal(harness.ui.record.textContent, "Save edits & record");
 });
 
-test("Record is enabled for a clean finished run and remains disabled after recording", () => {
+test("Record is enabled for a clean finished run and goes away after recording", () => {
   const harness = makeSaveHarness();
   harness.setSaveStates();
   assert.equal(harness.ui.record.disabled, false);
+  assert.equal(harness.ui.record.hidden, false);
+  assert.equal(harness.ui.recordActions.hidden, false);
   assert.equal(harness.ui.record.textContent, "Record result");
 
   harness.state.snapshot.currentRun.isRecorded = true;
   harness.setSaveStates();
   assert.equal(harness.ui.record.disabled, true);
-  assert.equal(harness.ui.record.textContent, "Already recorded");
+  assert.equal(harness.ui.record.hidden, true);
+  assert.equal(harness.ui.recordActions.hidden, true);
+});
+
+test("Record is not offered for a run that is armed or still in progress", () => {
+  for (const status of ["armed", "countdown", "active", "paused"]) {
+    const harness = makeSaveHarness({ dirty: true });
+    harness.state.snapshot.currentRun.status = status;
+    harness.setSaveStates();
+    assert.equal(harness.ui.record.disabled, true, status);
+    assert.equal(harness.ui.record.hidden, true, status);
+    assert.equal(harness.ui.recordActions.hidden, true, status);
+    assert.equal(harness.ui.currentSave.disabled, false, `${status} edits still save`);
+  }
+});
+
+test("a finished run with time left offers Reopen beside Record", () => {
+  const harness = makeSaveHarness();
+  Object.assign(harness.state.snapshot.currentRun, {
+    activeElapsedMs: 30_000, edition: { durationLimitSeconds: 300 }, events: [{ status: "pending" }]
+  });
+  harness.setSaveStates();
+  assert.equal(harness.ui.reopen.hidden, false);
+  assert.equal(harness.ui.reopen.disabled, false);
+  harness.state.snapshot.currentRun.status = "timedOut";
+  harness.setSaveStates();
+  assert.equal(harness.ui.reopen.hidden, true);
 });
 
 test("record action saves unsaved edits first, then records the saved run", async () => {

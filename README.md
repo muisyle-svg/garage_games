@@ -120,7 +120,16 @@ precision. The simulator's custom clock advance also accepts M:SS or seconds
 and sends milliseconds to the backend. Completing all
 regular events freezes the timer and leaves the run marked finished but
 unrecorded until **Record result**. The operator can also finish a partial run
-and choose whether to record it. Event times and points remain editable before
+and choose whether to record it. Only a run that is over can be recorded:
+**Record result** appears beside the run status once the run has finished or timed
+out, never while it is armed or in progress, and recording never ends a run.
+Finishing with time still on the clock asks first, and until it is recorded a
+finished run can be **Reopened** (paused, with the clock where it stopped) unless
+every event is complete or the bonus round ended it. An unrecorded timed-out run
+holds the next run: Start and Up Next wait until it is recorded or discarded. A
+finish press within half a second of the event's start press is taken as a double
+press and ignored; the event keeps running (the operator's keypad override tap
+has the same guard). Event times and points remain editable before
 or after recording. When correcting a stopped or recorded run, missing event
 timestamps may be added anywhere within the run limit; the saved elapsed time
 extends through the latest corrected event. Points preview automatically from
@@ -129,7 +138,10 @@ clearing a points override restores automatic scoring. Run bonus scoring is
 also editable. Manual event points and the run bonus may be negative (a
 penalty) and subtract from the total. Scorecard edits count only once saved:
 until then the page marks them "Unsaved" (on the event tiles, the totals, and a
-notice above the event buttons) because the TV and results don't include them.
+notice in the undo row above the event buttons) because the TV and results don't include them.
+Messages, notices, and buttons that come and go on the scorekeeping tab use space
+reserved for them (a message slot beside "Current run", another beside the tabs on
+other tabs), so nothing you might be about to click moves when they appear.
 Edits stay editable and savable after the run finishes or times out, and
 **Save edits & record** saves them before recording. Saving applies to the run's
 latest state, so a button press or timeout while you type doesn't reject the

@@ -43,7 +43,8 @@ a { color: inherit; }
 .button-secondary { border-color: rgba(157, 198, 236, .28); background: rgba(157, 198, 236, .09); color: var(--blue); }
 .button-record { background: var(--amber); color: #302311; }
 .button-discard { border-color: rgba(240, 135, 121, .34); background: rgba(240, 135, 121, .1); color: #ffaaa0; }
-.run-controls .button-discard[hidden] { display: none !important; }
+/* Discard keeps its place while hidden, so Pause and Finish never slide sideways. */
+.run-controls .button-discard[hidden] { display: inline-flex !important; visibility: hidden; }
 .operator-tabs { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .8rem; padding: .28rem; border: 1px solid var(--line); border-radius: 11px; background: rgba(7, 15, 13, .3); }
 .operator-tab { min-height: 37px; padding: .55rem .9rem; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; font-size: .72rem; font-weight: 850; }
 .operator-tab:hover { background: rgba(255, 255, 255, .04); color: var(--ink); }
@@ -52,8 +53,17 @@ a { color: inherit; }
 .tab-panel[hidden] { display: none !important; }
 .tab-panel:focus { outline: none; }
 .mvp-main { width: min(1600px, 100%); margin: 0 auto; padding: 1.35rem clamp(1rem, 3.5vw, 3.5rem) 2rem; }
-.alert-region:empty { display: none; }
-.alert { margin: 0 0 1rem; padding: .8rem .95rem; border: 1px solid rgba(240, 135, 121, .35); border-radius: 11px; background: rgba(240, 135, 121, .1); color: #ffb5aa; font-size: .8rem; line-height: 1.4; }
+/* Messages live in fixed-size slots and never change the page's layout: long text is cut
+   off (the full text is on hover). */
+.message-slot { display: grid; min-width: 0; overflow: hidden; }
+.message-slot > * { grid-area: 1 / 1; min-width: 0; }
+.message-slot .alert-region { display: grid; }
+.message-slot .alert { display: -webkit-box; margin: 0; padding: .45rem .7rem; overflow: hidden; font-size: .72rem; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.desk-messages { flex: 1 1 14rem; align-self: stretch; height: 4.3rem; }
+.desk-messages .alert { align-self: stretch; }
+.tab-alert-region { flex: 1 1 16rem; align-self: stretch; height: 37px; margin-left: .4rem; }
+.tab-alert-region .alert { padding: .2rem .6rem; font-size: .66rem; -webkit-line-clamp: 2; }
+.alert { margin: 0 0 1rem;padding: .8rem .95rem; border: 1px solid rgba(240, 135, 121, .35); border-radius: 11px; background: rgba(240, 135, 121, .1); color: #ffb5aa; font-size: .8rem; line-height: 1.4; }
 .alert.success { border-color: rgba(104, 214, 164, .3); background: rgba(104, 214, 164, .08); color: #a1ebc7; }
 .run-panel, .sheet-card { min-width: 0; border: 1px solid var(--line); border-radius: 15px; background: linear-gradient(145deg, rgba(31, 49, 43, .96), rgba(22, 35, 31, .96)); box-shadow: 0 18px 55px rgba(0, 0, 0, .17); }
 .run-panel { padding: clamp(.9rem, 2vw, 1.35rem); }
@@ -137,7 +147,15 @@ select:disabled, input:disabled { opacity: .58; }
 .on-deck-actions { display: flex; align-items: center; gap: .2rem; }
 .on-deck-move { display: grid; width: 30px; min-width: 30px; min-height: 30px; place-items: center; padding: .2rem; font-size: .82rem; line-height: 1; }
 .on-deck-remove { min-height: 30px; padding: .38rem .58rem; font-size: .63rem; }
-.run-state-banner { margin-bottom: .85rem; padding: .72rem .85rem; border: 1px solid rgba(104, 214, 164, .2); border-radius: 9px; background: rgba(104, 214, 164, .055); color: #c4e7d3; font-size: .74rem; line-height: 1.4; }
+/* The status line is one box of fixed height; Record and Reopen appear inside it on the
+   right once the run is over, so nothing below moves. */
+.run-state-row { display: flex; align-items: center; gap: .55rem; min-height: 3.35rem; margin-bottom: .85rem; padding: .35rem .45rem .35rem .85rem; border: 1px solid rgba(104, 214, 164, .2); border-radius: 9px; background: rgba(104, 214, 164, .055); }
+.run-state-row:has(.run-state-banner.is-discarded) { border-color: rgba(244, 189, 96, .32); background: rgba(244, 189, 96, .08); }
+.run-state-row .run-state-banner, .run-state-row .run-state-banner.is-discarded { display: -webkit-box; flex: 1 1 auto; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; background: none; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.record-actions { display: flex; flex: 0 0 auto; align-items: center; gap: .45rem; }
+.record-actions[hidden], .record-actions .button[hidden] { display: none; }
+.record-actions .button { min-height: 2.5rem; }
+.run-state-banner { margin-bottom: .85rem;padding: .72rem .85rem; border: 1px solid rgba(104, 214, 164, .2); border-radius: 9px; background: rgba(104, 214, 164, .055); color: #c4e7d3; font-size: .74rem; line-height: 1.4; }
 .run-state-banner.is-discarded { border-color: rgba(244, 189, 96, .32); background: rgba(244, 189, 96, .08); color: #f5d69c; }
 .physical-readiness-panel { display: grid; gap: .55rem; margin: -.25rem 0 .75rem; padding: .65rem .8rem; border: 1px solid rgba(157, 198, 236, .3); border-radius: 10px; background: linear-gradient(110deg, rgba(157, 198, 236, .075), rgba(255, 255, 255, .018)); }
 .physical-readiness-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .45rem .8rem; }
@@ -157,7 +175,7 @@ select:disabled, input:disabled { opacity: .58; }
 .physical-readiness-item.status-not-responding .physical-readiness-label { color: #ffaaa0; }
 .physical-readiness-item.status-unverified .physical-readiness-label { color: #f5d69c; }
 .physical-readiness-empty { color: var(--muted); font-size: .64rem; }
-.countdown-audio-notice:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .55rem; margin: -.35rem 0 .75rem; padding: .6rem .8rem; border: 1px solid rgba(244, 189, 96, .28); border-radius: 9px; background: rgba(244, 189, 96, .07); color: #f5d69c; font-size: .7rem; line-height: 1.4; }
+.countdown-audio-notice:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .35rem .55rem; margin: 0; overflow: hidden; padding: .45rem .7rem;border: 1px solid rgba(244, 189, 96, .28); border-radius: 9px; background: rgba(244, 189, 96, .07); color: #f5d69c; font-size: .7rem; line-height: 1.4; }
 .countdown-audio-notice [hidden] { display: none !important; }
 .countdown-audio-notice .button { min-height: 32px; padding: .4rem .65rem; font-size: .66rem; }
 .scorekeeper-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: .8rem; align-items: start; }
@@ -200,16 +218,20 @@ select:disabled, input:disabled { opacity: .58; }
 @media (prefers-reduced-motion: reduce) { .virtual-button.is-bonus-target { animation: none; } }
 @keyframes started-event-flash { 50% { border-color: rgba(244, 189, 96, .28); background: rgba(244, 189, 96, .025); color: var(--amber); } }
 @keyframes physical-event-pulse { to { border-color: #cf9dff; background: rgba(173, 128, 255, .34); box-shadow: 0 0 0 3px rgba(173, 128, 255, .24); } }
-.virtual-note { margin: 0; padding: 0 .9rem .85rem; }
+/* Two lines reserved whatever the note says, so the scorecard below doesn't move. */
+.virtual-note { display: -webkit-box; box-sizing: content-box; min-height: 2.9em; margin: 0; padding: 0 .9rem .85rem; overflow: hidden; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 
 /* Run lifecycle buttons stay top-right; Discard sits apart from Record. */
 .run-controls { align-items: center; }
 .run-controls-divider { width: 1px; height: 26px; margin: 0 .35rem; background: var(--line); }
-.run-controls-divider:has(+ [hidden]) { display: none; }
+.run-controls-divider:has(+ [hidden]) { visibility: hidden; }
 
-/* Start lives with the event buttons it unlocks. */
+/* Start lives with the event buttons it unlocks, with Up Next beside it. The row keeps its
+   height while the buttons are hidden during a run. */
 .virtual-card-heading { flex-wrap: wrap; }
-.start-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .45rem; }
+.card-heading > .start-controls { display: flex; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: .45rem; min-height: 44px; }
+.start-controls .button { white-space: nowrap; }
+#prime-next-button { min-width: 9.6rem; }
 .start-controls .button[hidden] { display: none; }
 .button-start { min-height: 44px; padding: .65rem 1.25rem; font-size: .85rem; }
 
@@ -217,12 +239,17 @@ select:disabled, input:disabled { opacity: .58; }
 .undo-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .75rem; margin: 0 .95rem .9rem; padding: .5rem .6rem; border: 1px dashed rgba(244, 189, 96, .3); border-radius: 10px; background: rgba(244, 189, 96, .04); }
 .button-undo { border-color: rgba(244, 189, 96, .55); background: rgba(244, 189, 96, .12); color: var(--amber); font-size: .78rem; }
 .button-undo span { margin-right: .4rem; font-size: 1rem; line-height: 1; }
-.undo-detail { color: var(--muted); font-size: .7rem; }
+/* Fixed flex sizes, so a longer "Will undo" line never changes how the row wraps. */
+.undo-detail { flex: 1 1 11rem; min-width: 0; overflow: hidden; color: var(--muted); font-size: .7rem; text-overflow: ellipsis; white-space: nowrap; }
 .button-undo:not(:disabled) + .undo-detail { color: var(--ink); }
 
 /* Unsaved scorecard edits: shown on this page but not yet counted on the TV or in results. */
-.unsaved-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem .75rem; margin: 0 .95rem .9rem; padding: .55rem .7rem; border: 1px solid rgba(244, 189, 96, .6); border-radius: 10px; background: rgba(244, 189, 96, .12); color: #f5d69c; font-size: .74rem; font-weight: 750; }
-.unsaved-bar span { flex: 1 1 260px; }
+.unsaved-bar { display: flex; flex: 1 1 22rem; align-items: center; gap: .45rem; min-width: 0;padding: .3rem .35rem .3rem .65rem; border: 1px solid rgba(244, 189, 96, .6); border-radius: 8px; background: rgba(244, 189, 96, .12); color: #f5d69c; font-size: .7rem; font-weight: 750; }
+/* Hidden means invisible, not gone: the undo row keeps the same height either way. */
+.unsaved-bar[hidden] { display: flex !important; visibility: hidden; }
+.undo-bar .unsaved-bar { box-sizing: border-box; height: 38px; }
+.unsaved-bar span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.unsaved-bar .button { flex: 0 0 auto; min-height: 30px; padding: .3rem .6rem; font-size: .68rem; }
 .unsaved-bar.has-error { border-color: rgba(240, 135, 121, .7); background: rgba(240, 135, 121, .12); color: #ffb8ae; }
 .summary-total strong.is-unsaved, .scorecard-summary-total.is-unsaved { color: var(--amber); }
 .summary-total strong.is-unsaved::after, .scorecard-summary-total.is-unsaved::after { content: " (unsaved)"; font-size: .55em; font-weight: 800; }
@@ -243,8 +270,13 @@ select:disabled, input:disabled { opacity: .58; }
 .hardware-panel .physical-readiness-panel { margin: 0; }
 
 /* Event tiles carry each event's result: points, start → stop and duration, or a live timer. */
-.virtual-tile-result { display: grid; gap: .12rem; padding: .35rem .45rem; border-radius: 7px; background: rgba(0, 0, 0, .18); }
-.virtual-tile-points { color: var(--ink); font-size: 1.15rem; font-weight: 900; font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1.05; }
+/* One line (points left, times right) on every tile, started or not, so tiles never change height. */
+.virtual-tile-result { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: .45rem; padding: .3rem .45rem; border-radius: 7px; background: rgba(0, 0, 0, .18); }
+.virtual-tile-result.is-pending { background: rgba(0, 0, 0, .1); }
+.virtual-tile-result .virtual-tile-points { flex: 0 0 auto; white-space: nowrap; }
+.virtual-tile-result .virtual-tile-times { flex: 0 1 auto; min-width: 0; text-align: right; }
+.virtual-tile-result.is-unsaved .virtual-tile-times { color: var(--amber); font-weight: 850; }
+.virtual-tile-points { color: var(--ink); font-size: 1.05rem;font-weight: 900; font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1.05; }
 .virtual-tile-points small { color: var(--muted); font-size: .62rem; font-weight: 800; letter-spacing: 0; }
 .virtual-tile-points.is-empty { color: var(--dim); }
 .virtual-tile-result.is-complete .virtual-tile-points { color: var(--green); }
@@ -474,6 +506,10 @@ select:disabled, input:disabled { opacity: .58; }
 
 @media (max-width: 760px) {
   .mvp-header, .run-panel-top { align-items: flex-start; flex-direction: column; }
+  .run-panel-top { align-items: stretch; gap: .6rem; }
+  .desk-messages { flex: 0 0 auto; width: 100%; }
+  /* Start and Up Next keep a line of their own, used or not, so the tiles never jump. */
+  .virtual-card-heading > .start-controls { flex-basis: 100%; justify-content: flex-start; }
   .header-status { justify-content: flex-start; }
   .run-controls { width: 100%; justify-content: flex-start; }
   .on-deck-form { grid-template-columns: minmax(0, 1fr) minmax(135px, .6fr); }
@@ -504,6 +540,9 @@ select:disabled, input:disabled { opacity: .58; }
   .on-deck-actions { grid-column: 2; justify-self: end; }
   .summary-total { grid-column: 2; }
   .run-controls .button { flex: 1 1 auto; }
+  /* On a phone the Record buttons sit under the status text; room for them is kept. */
+  .run-state-row { flex-wrap: wrap; align-content: flex-start; min-height: 6.2rem; }
+  .run-state-row .run-state-banner { flex-basis: 100%; }
   .master-port-controls { flex-basis: 100%; }
   .master-port-controls label { flex: 1 0 100%; }
   .master-readout { flex-basis: 100%; }

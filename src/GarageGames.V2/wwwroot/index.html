@@ -23,14 +23,14 @@
   </header>
 
   <main class="mvp-main">
-    <div id="alert-region" class="alert-region" aria-live="polite"></div>
-
     <div class="operator-tabs" role="tablist" aria-label="Scorekeeper sections">
       <button id="tab-scorekeeping" class="operator-tab is-selected" type="button" role="tab" aria-selected="true" aria-controls="panel-scorekeeping" tabindex="0">Scorekeeping</button>
       <button id="tab-on-deck" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-on-deck" tabindex="-1">On deck</button>
       <button id="tab-history" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1">Run history</button>
       <button id="tab-leaderboards" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-leaderboards" tabindex="-1">Leaderboards</button>
       <button id="tab-setup" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-setup" tabindex="-1">Setup</button>
+      <!-- Messages on the other tabs use the spare room beside the tabs, so nothing shifts. -->
+      <div id="tab-alert-region" class="message-slot tab-alert-region" aria-live="polite"></div>
     </div>
 
     <section id="panel-scorekeeping" class="tab-panel" role="tabpanel" aria-labelledby="tab-scorekeeping" tabindex="0">
@@ -41,10 +41,17 @@
           <h1 id="run-heading">Current run</h1>
           <p id="run-caption" class="muted">Choose a competitor and set the run length before starting.</p>
         </div>
+        <!-- A fixed-size slot for messages, so they never push the buttons around. -->
+        <div class="message-slot desk-messages">
+          <div id="countdown-audio-notice" class="countdown-audio-notice" role="status" aria-live="polite" hidden>
+            <span id="countdown-audio-message"></span>
+            <button id="countdown-audio-retry" class="button button-secondary" type="button" hidden>Retry countdown audio</button>
+          </div>
+          <div id="alert-region" class="alert-region" aria-live="polite"></div>
+        </div>
         <div class="run-controls" role="group" aria-label="Run controls">
           <button id="pause-run-button" class="button button-secondary" type="button" disabled>Pause</button>
           <button id="finish-run-button" class="button button-secondary" type="button" disabled>Finish run</button>
-          <button id="record-run-button" class="button button-record" type="button" disabled>Record result</button>
           <span class="run-controls-divider" aria-hidden="true"></span>
           <button id="discard-run-button" class="button button-discard" type="button" hidden>Discard run</button>
         </div>
@@ -72,10 +79,14 @@
         <div class="summary-stat summary-total"><span>Total points</span><strong id="run-total">0</strong></div>
       </div>
 
-      <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
-      <div id="countdown-audio-notice" class="countdown-audio-notice" role="status" aria-live="polite" hidden>
-        <span id="countdown-audio-message"></span>
-        <button id="countdown-audio-retry" class="button button-secondary" type="button" hidden>Retry countdown audio</button>
+      <!-- The status line keeps one height; Record and Reopen appear inside it once the run is over. -->
+      <div class="run-state-row">
+        <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
+        <!-- Shown only once a run is over: recording never ends a run in progress. -->
+        <div id="record-actions" class="record-actions" role="group" aria-label="Record the finished run" hidden>
+          <button id="reopen-run-button" class="button button-secondary" type="button" hidden title="Finished by mistake? Bring the run back paused, with the clock where it stopped.">Reopen run</button>
+          <button id="record-run-button" class="button button-record" type="button" disabled>Record result</button>
+        </div>
       </div>
 
       <div class="scorekeeper-layout">
@@ -91,11 +102,12 @@
           <div class="undo-bar">
             <button id="undo-last-event-press" class="button button-undo" type="button" disabled><span aria-hidden="true">↶</span> Undo last press</button>
             <span id="undo-last-event-detail" class="undo-detail" aria-live="polite">No event press to undo.</span>
-          </div>
-          <div id="unsaved-edits-bar" class="unsaved-bar" role="status" hidden>
-            <span id="unsaved-edits-message">Unsaved scorecard edits. The TV and results don't include them until you save.</span>
-            <button id="unsaved-edits-save" class="button button-record" type="button">Save edits</button>
-            <button id="unsaved-edits-discard" class="button button-quiet" type="button">Discard</button>
+            <!-- Unsaved edits share the undo row and keep their space when hidden. -->
+            <div id="unsaved-edits-bar" class="unsaved-bar" role="status" hidden>
+              <span id="unsaved-edits-message">Unsaved edits · not on the TV or in results until saved.</span>
+              <button id="unsaved-edits-save" class="button button-record" type="button">Save edits</button>
+              <button id="unsaved-edits-discard" class="button button-quiet" type="button">Discard</button>
+            </div>
           </div>
           <div id="virtual-event-buttons" class="virtual-event-grid">
             <p class="empty-state">Start a run to enable the virtual buttons.</p>
