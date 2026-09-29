@@ -37,7 +37,21 @@
         </div>
       </div>
         <section class="scoreboard-events" aria-label="Events">
+          <p id="scoreboard-bonus-summary" class="tv-bonus-summary" hidden></p>
           <div id="scoreboard-events" class="tv-event-grid"><div class="tv-empty">Events will appear when a run is armed.</div></div>
+          <div id="scoreboard-bonus" class="tv-keypad-challenge tv-bonus" role="status" aria-live="polite" hidden>
+            <p class="tv-keypad-label">Bonus round</p>
+            <p id="scoreboard-bonus-stats" class="tv-bonus-stats"></p>
+            <p id="scoreboard-bonus-target" class="tv-keypad-prompt tv-bonus-target"></p>
+            <p id="scoreboard-bonus-time" class="tv-bonus-time"></p>
+            <div class="tv-bonus-bar" aria-hidden="true"><span id="scoreboard-bonus-bar-fill"></span></div>
+          </div>
+          <div id="scoreboard-keypad" class="tv-keypad-challenge" role="status" aria-live="polite" hidden>
+            <p id="scoreboard-keypad-event" class="tv-keypad-label">Keypad</p>
+            <div class="tv-keypad-progress" aria-label="Codes solved"><span id="scoreboard-keypad-pips" class="tv-keypad-pips"></span><span id="scoreboard-keypad-count" class="tv-keypad-count"></span></div>
+            <p id="scoreboard-keypad-prompt" class="tv-keypad-prompt"></p>
+            <div class="tv-keypad-entry"><span id="scoreboard-keypad-keys" class="tv-keypad-keys"></span><span id="scoreboard-keypad-hint" class="tv-keypad-hint">Enter the code, then press ✱</span></div>
+          </div>
         </section>
       </div>
         <aside class="scoreboard-side">

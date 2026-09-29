@@ -5,7 +5,8 @@
 })(typeof window !== "undefined" ? window : globalThis, () => {
   "use strict";
 
-  const discardableStatuses = new Set(["armed", "countdown", "active", "paused", "finished"]);
+  // A timed-out run stays discardable until it is recorded.
+  const discardableStatuses = new Set(["armed", "countdown", "active", "paused", "finished", "timedOut"]);
 
   function isDiscardableRun(run) {
     return Boolean(run && run.isRecorded !== true && discardableStatuses.has(run.status));

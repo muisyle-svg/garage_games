@@ -202,3 +202,19 @@ test("blank, invalid, and out-of-range countdown fields are rejected or kept bla
   assert.equal(elapsedMsFromRemainingSeconds(301, 300), null);
   assert.equal(elapsedMsFromRemainingSeconds("not a time", 300), null);
 });
+
+test("the TV bonus timer matches the lit button's firmware colors and blink", () => {
+  const look = require("../../src/GarageGames.V2/wwwroot/mvp-scorekeeper-time.js").buttonTargetLook;
+  // Plenty of time: green, slow 500 ms blink.
+  assert.deepEqual([look(10000).red, look(10000).green, look(10000).periodMs], [0, 255, 500]);
+  assert.deepEqual([look(8000).red, look(8000).green, look(8000).periodMs], [0, 255, 500]);
+  // Green blends to yellow between 8 s and 6 s, then yellow to red by 3 s.
+  assert.deepEqual([look(7000).red, look(7000).green], [127, 255]);
+  assert.deepEqual([look(6000).red, look(6000).green], [255, 255]);
+  assert.deepEqual([look(4500).red, look(4500).green], [255, 127]);
+  assert.deepEqual([look(2999).red, look(2999).green], [255, 0]);
+  // The blink quickens toward 65 ms, exactly as the spoke computes it.
+  assert.equal(look(4000).periodMs, 65 + Math.floor(4000 * 435 / 8000));
+  assert.equal(look(0).periodMs, 65);
+  assert.equal(look(-50).color, "rgb(255, 0, 0)");
+});

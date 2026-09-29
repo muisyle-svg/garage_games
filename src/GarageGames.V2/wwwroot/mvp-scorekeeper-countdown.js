@@ -81,6 +81,13 @@
     function play(runToPlay, elapsedMs) {
       if (!runToPlay || runId !== runToPlay || goDue || finishing) return false;
       stopAudio();
+      // Without createAudio the app plays the countdown through the computer's speakers;
+      // this page only keeps its Go timer as a backup.
+      if (!createAudio) {
+        playback = "computer";
+        notify("countdown");
+        return true;
+      }
       let currentAudio;
       try {
         currentAudio = createAudio();

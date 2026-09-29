@@ -4,6 +4,9 @@
   function buildEventLeaderboards(events, leaderboard, history) {
     const runsById = new Map((history || []).map((run) => [run.id, run]));
     return (events || []).map((event) => {
+      // Events rank by points, then the faster time. The bonus round ranks by points alone:
+      // a longer round is not a worse one.
+      const pointsOnly = event.type === "bonusRound";
       const rows = [];
       const dnfRows = [];
       for (const overallRow of leaderboard || []) {
@@ -43,6 +46,7 @@
         const categoryOrder = { playoff: 0, official: 1, exhibition: 2 };
         if (categoryOrder[a.category] !== categoryOrder[b.category]) return categoryOrder[a.category] - categoryOrder[b.category];
         if (a.points !== b.points) return b.points - a.points;
+        if (pointsOnly) return a.competitorName.localeCompare(b.competitorName);
         if (a.durationMs !== null && b.durationMs !== null && a.durationMs !== b.durationMs) {
           return a.durationMs - b.durationMs;
         }
@@ -60,7 +64,8 @@
           rank = 0;
         }
         categoryIndex++;
-        if (!previous || previous.category !== row.category || row.points !== previous.points || row.durationMs !== previous.durationMs) rank = categoryIndex;
+        if (!previous || previous.category !== row.category || row.points !== previous.points ||
+            (!pointsOnly && row.durationMs !== previous.durationMs)) rank = categoryIndex;
         row.rank = rank;
       });
       dnfRows.sort((a, b) => {

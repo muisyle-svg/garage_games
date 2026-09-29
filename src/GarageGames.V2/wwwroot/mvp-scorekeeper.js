@@ -186,6 +186,7 @@
     setupRetryLoad: $("setup-retry-load"),
     setupContent: $("setup-content"),
     setupEditionName: $("setup-edition-name"),
+    setupBonus: $("setup-bonus"),
     setupScanAll: $("setup-scan-all"),
     setupSave: $("setup-save"),
     setupSaveBottom: $("setup-save-bottom"),
@@ -242,14 +243,12 @@
     return payload;
   }
 
+  // The app plays the countdown voice through the computer's speakers and starts the run at
+  // Go itself, so neither depends on this tab being in front. This page shows the countdown
+  // and reports Go as a backup.
   const countdownCoordinator = window.GarageGamesCountdown.createCountdownCoordinator({
     readState: () => request("/api/run/countdown-state", { cache: "no-store" }),
     finish: (runId) => request("/api/run/countdown-finished", { method: "POST", body: JSON.stringify({ runId }) }),
-    createAudio: () => {
-      const audio = new Audio("/sounds/3-seconds-countdown-deep-voice-game.mp3");
-      audio.preload = "auto";
-      return audio;
-    },
     onChange: handleCountdownUpdate
   });
 
@@ -266,7 +265,7 @@
           : `Countdown audio is unavailable; the run will still start on schedule. ${update.error || ""}`.trim()
         : update.playback === "finishing"
           ? "Go · starting the run…"
-          : "Countdown playing. The timer starts just before the track ends.";
+          : "Countdown playing on this computer's speakers. The timer starts at Go.";
       const current = state.snapshot?.currentRun;
       if (current?.id === update.runId && current.status !== "countdown") {
         current.status = "countdown";
@@ -619,6 +618,36 @@
     });
   }
 
+  // A keypad event's button starts it and shows the message on the TV; typing the code on
+  // the button's keypad and pressing * finishes it.
+  // Messages and codes come from the keypad answer file; Setup chooses how many a player
+  // must answer to pass.
+  function setupKeypadFields(event) {
+    const wrap = make("div", "setup-event-keypad-row");
+    const countLabel = make("label", "setup-event-name setup-event-keypad-count");
+    countLabel.append(make("span", "", "Codes to pass"));
+    const count = make("input");
+    count.type = "number";
+    count.min = "1";
+    count.max = "20";
+    count.step = "1";
+    count.inputMode = "numeric";
+    count.value = event.requiredSuccesses ?? 1;
+    count.dataset.setupField = "requiredSuccesses";
+    count.dataset.setupEventId = event.eventId;
+    count.setAttribute("aria-label", `${event.name}: number of correct codes needed to pass`);
+    countLabel.appendChild(count);
+
+    const pool = state.setupDraft?.keypadMessages || { count: 0, source: "", error: "" };
+    const poolNote = pool.error
+      ? `Keypad answer file problem: ${pool.error} Until it is fixed, finish this event with the scorekeeper tile.`
+      : `${pool.count} messages from ${pool.source ? pool.source.split(/[\\/]/).pop() : "the keypad answer file"}. Each start and each correct code draws a message not yet shown this run; its code is the message's row letter then column number (## for the ## row).`;
+    const note = make("p", `setup-event-keypad-help${pool.error ? " is-error" : ""}`, poolNote);
+    wrap.append(countLabel, note,
+      make("p", "setup-event-keypad-help", "Pressing the button starts the event and shows a message on the TV. The player types its code and presses * — a wrong code flashes the button red; a right one shows the next message until enough are done."));
+    return wrap;
+  }
+
   function renderSetupEvents() {
     ui.setupEventList.replaceChildren();
     const events = state.setupDraft?.events || [];
@@ -659,8 +688,21 @@
         setupScoringField(event, "graceSeconds", "Initial grace seconds", 0, 86_400)
       );
 
-      const kind = make("div", "setup-event-kind");
-      kind.append(make("span", "", "Event type"), make("strong", "", ({ standard: "Standard", keypad: "Keypad", magneticArcade: "Magnetic arcade" })[event.type] || event.type));
+      const kind = make("label", "setup-event-kind");
+      kind.append(make("span", "", "Event type"));
+      const kindSelect = make("select");
+      const kindOptions = [["standard", "Regular"], ["keypad", "Keypad code"]];
+      if (!kindOptions.some(([value]) => value === event.type)) kindOptions.push([event.type, event.type === "magneticArcade" ? "Magnetic arcade" : titleCase(event.type)]);
+      kindOptions.forEach(([value, label]) => {
+        const option = make("option", "", label);
+        option.value = value;
+        kindSelect.appendChild(option);
+      });
+      kindSelect.value = event.type;
+      kindSelect.dataset.setupField = "type";
+      kindSelect.dataset.setupEventId = event.eventId;
+      kindSelect.setAttribute("aria-label", `${event.name} event type`);
+      kind.appendChild(kindSelect);
       const remove = make("button", "button button-quiet setup-event-remove", "Remove");
       remove.type = "button";
       remove.dataset.setupAction = "remove";
@@ -704,7 +746,9 @@
       deviceRow.append(assignmentLabel, unassign, readiness);
 
       const internalId = make("p", "setup-event-id", `Event ID · ${event.eventId}`);
-      row.append(top, scoring, deviceRow, internalId);
+      row.append(top, scoring, deviceRow);
+      if (event.type === "keypad") row.appendChild(setupKeypadFields(event));
+      row.appendChild(internalId);
       ui.setupEventList.appendChild(row);
     });
     renderSetupSelection();
@@ -755,6 +799,7 @@
       return;
     }
     if (document.activeElement !== ui.setupEditionName) ui.setupEditionName.value = state.setupDraft.name;
+    renderSetupBonus();
     renderSetupEvents();
     renderSetupDiscovery();
     renderSetupControls();
@@ -773,6 +818,26 @@
     if (state.snapshot) renderVirtualButtons(state.snapshot.currentRun);
   }
 
+  function renderSetupBonus() {
+    const bonus = state.setupDraft?.bonusGame;
+    if (!ui.setupBonus || !bonus) return;
+    ui.setupBonus.querySelectorAll("input[data-bonus-field]").forEach((input) => {
+      if (document.activeElement === input) return;
+      if (input.type === "checkbox") input.checked = bonus.enabled;
+      else input.value = bonus[input.dataset.bonusField] ?? "";
+      if (input.type !== "checkbox") input.disabled = !bonus.enabled;
+    });
+  }
+
+  function onSetupBonusInput(event) {
+    const input = event.target.closest("input[data-bonus-field]");
+    const bonus = state.setupDraft?.bonusGame;
+    if (!input || !bonus) return;
+    bonus[input.dataset.bonusField] = input.type === "checkbox" ? input.checked : input.value;
+    if (input.type === "checkbox") renderSetupBonus();
+    markSetupChanged();
+  }
+
   function onSetupInput(event) {
     if (!state.setupDraft) return;
     if (event.target === ui.setupEditionName) {
@@ -780,12 +845,21 @@
       markSetupChanged();
       return;
     }
-    const input = event.target.closest("input[data-setup-field]");
+    const input = event.target.closest("input[data-setup-field], select[data-setup-field]");
     if (!input) return;
     const target = setupEvent(input.dataset.setupEventId);
     if (!target) return;
     if (input.dataset.setupField === "name") target.name = input.value;
     else if (input.dataset.setupField === "assignment") target.assignmentValue = input.value;
+    else if (input.dataset.setupField === "requiredSuccesses") target.requiredSuccesses = input.value;
+    else if (input.dataset.setupField === "type") {
+      if (target.type === input.value) return;
+      target.type = input.value;
+      markSetupChanged();
+      // The keypad message/code fields appear or disappear with the type.
+      renderSetupEvents();
+      return;
+    }
     else if (["basePoints", "minimumPoints", "decayPoints", "decayEverySeconds", "graceSeconds"].includes(input.dataset.setupField)) {
       setupTools.updateEventScoring(target, input.dataset.setupField, input.value);
       const row = input.closest(".setup-event-row");
@@ -1079,6 +1153,58 @@
     return (state.snapshot?.events || []).map(emptyEvent);
   }
 
+  // The bonus speed round appears on scorecards, run history, and leaderboards as one more
+  // event row (id "bonus-round"): start and end times, hits, and points (hits x points per
+  // press unless overridden). The app stores it on the run rather than in its event list.
+  const BONUS_EVENT_ID = "bonus-round";
+  const BONUS_EVENT_DEFINITION = Object.freeze({ eventId: BONUS_EVENT_ID, name: "Bonus round", type: "bonusRound" });
+
+  // The edition's events plus the bonus round when it is played (or some run has a result).
+  function leaderboardEventDefinitions(snapshot) {
+    const events = snapshot?.events || [];
+    const bonusInUse = (snapshot?.history || []).some((run) => run.bonusGame) ||
+      Boolean(snapshot?.currentRun?.edition?.bonusGame?.enabled) || Boolean(state.setupDraft?.bonusGame?.enabled);
+    return bonusInUse ? [...events, BONUS_EVENT_DEFINITION] : events;
+  }
+
+  function isBonusScorecardEvent(event) {
+    return event?.eventId === BONUS_EVENT_ID;
+  }
+
+  function bonusScorecardEvent(run) {
+    if (!run) return null;
+    const bonus = run.bonusGame;
+    if (!bonus && !run.edition?.bonusGame?.enabled) return null;
+    const ended = String(bonus?.phase || "").toLowerCase() === "ended";
+    const perPress = Number(bonus?.pointsPerPress ?? run.edition?.bonusGame?.pointsPerPress ?? 0);
+    const hits = Number(bonus?.hits || 0);
+    return {
+      ...BONUS_EVENT_DEFINITION,
+      status: !bonus ? "pending" : ended ? "completed" : "active",
+      running: Boolean(bonus) && !ended,
+      startElapsedMs: bonus ? bonus.startedElapsedMs ?? null : null,
+      finishElapsedMs: ended ? bonus.endedElapsedMs ?? null : null,
+      hits,
+      pointsPerPress: perPress,
+      score: ended ? Number(bonus.awardedPoints ?? hits * perPress) : 0,
+      scoreOverride: bonus?.scoreOverride ?? null
+    };
+  }
+
+  function scorecardEvents(run, events = runEvents(run)) {
+    const bonus = bonusScorecardEvent(run);
+    return bonus ? [...events, bonus] : events;
+  }
+
+  function bonusDraftHits(run, event) {
+    const draft = state.drafts.get(run.id)?.get(event.eventId);
+    if (draft?.touched.has("hits")) {
+      const typed = Number(draft.hits);
+      return draft.hits !== "" && Number.isInteger(typed) && typed >= 0 ? typed : 0;
+    }
+    return Number(event.hits || 0);
+  }
+
   function currentEditionEvents(run) {
     const configured = state.snapshot?.events || [];
     if (!run) return configured.map(emptyEvent);
@@ -1173,6 +1299,7 @@
     const draft = state.drafts.get(run.id)?.get(event.eventId);
     if (field === "score") return eventScoreDraftView(run, event).inputValue;
     if (draft?.touched.has(field)) return draft[field];
+    if (field === "hits") return String(event.hits ?? 0);
     if (field === "start" || field === "finish") {
       const elapsed = field === "start" ? event.startElapsedMs : event.finishElapsedMs;
       const remaining = scorekeeperTime.remainingSecondsFromElapsedMs(elapsed, runDurationSeconds(run));
@@ -1198,7 +1325,7 @@
       }
       return;
     }
-    const event = runEvents(run).find((item) => item.eventId === row.dataset.eventId);
+    const event = scorecardEvents(run).find((item) => item.eventId === row.dataset.eventId);
     const durationSeconds = runDurationSeconds(run);
     const startMs = event
       ? eventElapsedMsForDraft(run, event, "start")
@@ -1210,9 +1337,12 @@
     if (startMs !== null && finishMs !== null) duration = finishMs - startMs;
     else if (startMs !== null && run?.status === "active") duration = currentElapsedMs(run) - startMs;
     if (durationCell) durationCell.textContent = formatDuration(duration);
-    const derivedStatus = startMs !== null && finishMs !== null ? "completed" : startMs !== null ? "active" : "pending";
+    const derivedStatus = event?.running ? "active"
+      : startMs !== null && finishMs !== null ? "completed" : startMs !== null ? "active" : "pending";
     if (statusCell) {
-      statusCell.textContent = derivedStatus === "completed" ? "Complete" : derivedStatus === "active" ? "In progress" : "Pending";
+      statusCell.textContent = derivedStatus === "completed" ? "Complete"
+        : derivedStatus === "active" ? "In progress"
+          : isBonusScorecardEvent(event) ? "Not reached" : "Pending";
       statusCell.className = `event-status ${derivedStatus}`;
     }
   }
@@ -1254,6 +1384,21 @@
   function eventScoreDraftView(run, event) {
     const draft = state.drafts.get(run.id)?.get(event.eventId);
     const scoreTouched = Boolean(draft?.touched.has("score"));
+    if (isBonusScorecardEvent(event)) {
+      // Bonus points come from hits, not time; they count once the round has ended.
+      const hitsTouched = Boolean(draft?.touched.has("hits"));
+      const override = event.scoreOverride;
+      const fromHits = bonusDraftHits(run, event) * event.pointsPerPress;
+      const clearingOverride = scoreTouched && draft.score === "";
+      return scorekeeperTime.eventScoreDraftView({
+        scoreTouched,
+        scoreValue: draft?.score,
+        timingTouched: hitsTouched,
+        // A manual override stays in place when hits change, as it does in the app.
+        previewScore: clearingOverride ? fromHits : override ?? fromHits,
+        persistedScore: event.status === "completed" ? override ?? event.score ?? 0 : 0
+      });
+    }
     const timingTouched = Boolean(draft?.touched.has("start") || draft?.touched.has("finish"));
     const needsPreview = timingTouched || (scoreTouched && draft.score === "");
     return scorekeeperTime.eventScoreDraftView({
@@ -1288,7 +1433,8 @@
 
   function tableTotal(run) {
     if (!run) return 0;
-    return runEvents(run).reduce((sum, event) => sum + displayedScore(run, event), displayedBonus(run));
+    // The bonus speed round is one of the rows; its points count once the round has ended.
+    return scorecardEvents(run).reduce((sum, event) => sum + displayedScore(run, event), displayedBonus(run));
   }
 
   function updateTableTotal(kind, run) {
@@ -1340,13 +1486,37 @@
     return input;
   }
 
-  function renderScoreTable(run, tbody, kind, editable, events = runEvents(run)) {
+  function buildHitsInput(run, event, editable) {
+    const input = make("input", "score-input hits-input");
+    input.type = "number";
+    input.min = "0";
+    input.step = "1";
+    input.inputMode = "numeric";
+    input.setAttribute("aria-label", `Bonus round hits (${event.pointsPerPress} points each)`);
+    input.title = `Hits · ${event.pointsPerPress} points each`;
+    input.dataset.field = "hits";
+    input.dataset.eventId = event.eventId;
+    input.dataset.runId = run?.id || "";
+    input.value = run ? displayedValue(run, event, "hits") : "";
+    input.disabled = !editable;
+    return input;
+  }
+
+  function renderScoreTable(run, tbody, kind, editable, events = scorecardEvents(run)) {
     tbody.replaceChildren();
     events.forEach((event, index) => {
-      const row = make("tr", "score-row");
+      const bonusRow = isBonusScorecardEvent(event);
+      // The bonus round is corrected once it has ended (the app refuses edits mid-round).
+      const rowEditable = editable && !(bonusRow && event.running);
+      const row = make("tr", `score-row${bonusRow ? " bonus-score-row" : ""}`);
       const nameCell = make("td", "event-name-cell");
-      const indexBadge = make("span", "event-index", String(index + 1).padStart(2, "0"));
+      const indexBadge = make("span", "event-index", bonusRow ? "★" : String(index + 1).padStart(2, "0"));
       nameCell.append(indexBadge, document.createTextNode(event.name));
+      if (bonusRow) {
+        const hits = make("label", "bonus-hits-field");
+        hits.append(buildHitsInput(run, event, rowEditable), make("span", "", ` hits × ${event.pointsPerPress}`));
+        nameCell.appendChild(hits);
+      }
       const startCell = make("td");
       const finishCell = make("td");
       const durationCell = make("td", "duration-cell", "—");
@@ -1355,10 +1525,10 @@
       const actionsCell = make("td", "event-actions-cell");
       durationCell.dataset.eventId = event.eventId;
       statusCell.dataset.eventId = event.eventId;
-      startCell.appendChild(buildTimeInput(run, event, "start", editable));
-      finishCell.appendChild(buildTimeInput(run, event, "finish", editable));
-      pointsCell.appendChild(buildScoreInput(run, event, editable));
-      if (run) {
+      startCell.appendChild(buildTimeInput(run, event, "start", rowEditable));
+      finishCell.appendChild(buildTimeInput(run, event, "finish", rowEditable));
+      pointsCell.appendChild(buildScoreInput(run, event, rowEditable));
+      if (run && (!bonusRow || (run.bonusGame && !event.running))) {
         const clearButton = make("button", "button button-quiet event-clear-button", "Clear");
         clearButton.type = "button";
         clearButton.dataset.clearEvent = "true";
@@ -1378,18 +1548,48 @@
   }
 
   function undoableEventPress(run) {
-    if (!run || !["active", "paused", "finished", "timedOut"].includes(run.status)) return null;
+    // Presses can't be undone once a bonus round has started (the app refuses).
+    if (!run || run.bonusGame || !["active", "paused", "finished", "timedOut"].includes(run.status)) return null;
     const eventsByDevice = new Map((run.events || [])
-      .filter((event) => String(event.type || "standard").toLowerCase() === "standard")
+      .filter((event) => isUndoableEventType(event))
       .map((event) => [String(event.deviceId || "").toUpperCase(), event]));
     return (state.snapshot?.messages || [])
-      .filter((message) => message.runId === run.id && message.type === "event-press" && String(message.disposition).toLowerCase() === "accepted")
+      .filter((message) => message.runId === run.id && String(message.disposition).toLowerCase() === "accepted")
       .map((message) => ({ message, event: eventsByDevice.get(String(message.deviceId || "").toUpperCase()) }))
-      .filter(({ message, event }) => event && event.lastSignalElapsedMs === message.elapsedMilliseconds && (
-        String(event.status).toLowerCase() === "completed" && event.finishElapsedMs === message.elapsedMilliseconds ||
-        String(event.status).toLowerCase() === "active" && event.startElapsedMs === message.elapsedMilliseconds && event.finishElapsedMs == null
-      ))
+      .filter(({ message, event }) => event && isUndoablePress(event, message))
       .sort((left, right) => Number(right.message.id) - Number(left.message.id))[0] || null;
+  }
+
+  function keypadProgress(run, event) {
+    const challenges = event.keypad?.challenges || [];
+    const definition = (run?.edition?.events || []).find((item) => item.eventId === event.eventId);
+    return {
+      solved: challenges.filter((challenge) => challenge.solvedElapsedMs != null).length,
+      required: Math.max(1, Number(definition?.requiredSuccesses) || 1)
+    };
+  }
+
+  function isUndoableEventType(event) {
+    return ["standard", "keypad"].includes(String(event.type || "standard").toLowerCase());
+  }
+
+  // Mirrors RunService.IsUndoablePress: the start press while running, or the finishing
+  // press once complete. Keypad events step back their last solved code (the correct code or
+  // operator credit that solved it) before their start; wrong codes are never undone.
+  function isUndoablePress(event, message) {
+    const status = String(event.status).toLowerCase();
+    const elapsed = message.elapsedMilliseconds;
+    if (String(event.type || "").toLowerCase() === "keypad") {
+      const solved = (event.keypad?.challenges || []).filter((challenge) => challenge.solvedElapsedMs != null);
+      const lastSolved = solved[solved.length - 1];
+      if (lastSolved) return ["active", "completed"].includes(status) && lastSolved.solvedByMessageId === message.messageId;
+      return status === "active" && message.type === "event-press" && event.startElapsedMs === elapsed && event.finishElapsedMs == null;
+    }
+    if (status === "completed") {
+      return message.type === "event-press" && event.finishElapsedMs === elapsed && event.lastSignalElapsedMs === elapsed;
+    }
+    return status === "active" && message.type === "event-press" && event.startElapsedMs === elapsed &&
+      event.finishElapsedMs == null && event.lastSignalElapsedMs === elapsed;
   }
 
   function captureFocus() {
@@ -1450,7 +1650,7 @@
     const key = run ? `${run.id}:${run.revision}:${run.status}` : `no-run:${eventRosterSignature()}`;
     if (key !== state.currentTableKey) {
       const focus = captureFocus();
-      renderScoreTable(run, ui.currentBody, "current", Boolean(run), currentEditionEvents(run));
+      renderScoreTable(run, ui.currentBody, "current", Boolean(run), scorecardEvents(run, currentEditionEvents(run)));
       state.currentTableKey = key;
       restoreFocus(focus);
     } else {
@@ -1485,7 +1685,7 @@
         aborted: "Run discarded · retained in history · not recorded or counted toward results.",
         superseded: "Run replaced by a newer result."
       }[run.status] || `Run status: ${titleCase(run.status)}.`;
-      ui.banner.textContent = `${copy} ${competitor} · ${label}`;
+      ui.banner.textContent = `${bonusBannerText(run) || copy} ${competitor} · ${label}`;
       ui.caption.textContent = `${competitor} · ${label} · ${titleCase(run.status)} · ${masterActions.formatRunDuration(runDurationSeconds(run))} run`;
     }
     renderVirtualButtons(run);
@@ -1500,6 +1700,8 @@
     renderPhysicalReadiness(events);
     const note = !run
       ? "No run is underway. Tap an assigned event tile to flash its physical button; press a physical spoke to highlight its matching tile."
+      : isBonusRunning(run)
+        ? "Bonus speed round: the lit button's tile is highlighted. Tap it if the player presses that button and it doesn't register; other tiles don't count."
       : run.status === "active"
         ? "Times count down from the run limit. Virtual presses remain available even when physical hardware is unassigned or unverified. Press once to start an event and again to finish it."
         : run.status === "countdown"
@@ -1520,6 +1722,7 @@
     ui.virtualButtons.replaceChildren();
     const canPress = Boolean(run && run.status === "active" && !state.busy);
     const identificationMode = !run || !["armed", "countdown", "active", "paused"].includes(run.status);
+    const bonusRunning = isBonusRunning(run);
     events.forEach((event, index) => {
       const button = make("button", "virtual-button");
       button.type = "button";
@@ -1528,7 +1731,7 @@
       const canIdentify = Boolean(deviceId && state.master?.connected && state.master?.mode === "IDLE" && !state.masterBusy);
       button.dataset.eventId = event.eventId;
       button.dataset.deviceId = deviceId || "";
-      button.disabled = state.busy || (identificationMode ? !canIdentify : !canPress || event.status === "completed");
+      button.disabled = state.busy || (identificationMode ? !canIdentify : !canPress || (event.status === "completed" && !bonusRunning));
       if (identificationMode) button.classList.add("is-identification-mode");
       if (run?.status === "active" && event.status === "active") button.classList.add("is-started");
       if (deviceId && deviceId === state.buttonHighlightDeviceId && Date.now() < state.buttonHighlightUntil) button.classList.add("is-physical-press");
@@ -1545,6 +1748,11 @@
           : !state.master?.connected ? "Connect the master to identify"
             : state.master?.mode !== "IDLE" ? "Master must be in Garage Games idle mode"
               : "Identify physical button";
+      } else if (event.status === "active" && run?.status === "active" && event.type === "keypad") {
+        const progress = keypadProgress(run, event);
+        actionHint = progress.required > 1
+          ? `Code ${progress.solved + 1} of ${progress.required} · tap to credit it`
+          : "Waiting for code · tap to override";
       } else if (event.status === "active" && run?.status === "active") {
         const remainingMs = Math.max(0, runDurationSeconds(run) * 1000 - currentElapsedMs(run));
         actionHint = `Stop · ${formatSeconds(remainingMs)} left`;
@@ -1554,6 +1762,7 @@
         actionHint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
       }
       if (!identificationMode && useVirtual && event.status !== "completed") actionHint = `Use virtual · ${actionHint}`;
+      if (bonusRunning) actionHint = "Bonus round";
       button.setAttribute("aria-label", identificationMode
         ? `${event.name}: ${actionHint}.`
         : `${event.name}: physical button ${status.label}. ${actionHint}. Press to ${actionLabel}.`);
@@ -1582,11 +1791,82 @@
       ui.virtualButtons.appendChild(tile);
     });
     state.virtualKey = key;
+    renderBonusLive();
+  }
+
+  // ---- Bonus speed round (live) ----
+  const BONUS_END_TEXT = { miss: "missed a button", timeout: "time ran out", operator: "ended by the scorekeeper" };
+
+  function bonusGamePoints(run) {
+    const bonus = run?.bonusGame;
+    if (!bonus || String(bonus.phase).toLowerCase() !== "ended") return 0;
+    return Number(bonus.scoreOverride ?? bonus.awardedPoints ?? 0);
+  }
+
+  function bonusBannerText(run) {
+    const bonus = run?.bonusGame;
+    if (!bonus) return "";
+    const hits = Number(bonus.hits || 0);
+    const hitText = `${hits} hit${hits === 1 ? "" : "s"}`;
+    if (String(bonus.phase).toLowerCase() !== "ended") {
+      return run.status === "paused"
+        ? `Bonus round paused · ${hitText} so far. Resume when the competitor is ready.`
+        : `Bonus speed round in progress · ${hitText} so far · ${Number(bonus.pointsPerPress || 0)} points each.`;
+    }
+    const recorded = run.isRecorded ? "recorded" : "not recorded";
+    return `Bonus round over (${BONUS_END_TEXT[bonus.endReason] || "ended"}) · ${hitText} · +${bonusGamePoints(run)} points · ${recorded}.`;
+  }
+
+  function isBonusRunning(run) {
+    return Boolean(run?.bonusGame && String(run.bonusGame.phase).toLowerCase() !== "ended" &&
+      ["active", "paused"].includes(run.status));
+  }
+
+  // The full snapshot refreshes every 2 s; during the bonus round the light scoreboard feed is
+  // polled several times a second so the lit tile and its time stay current.
+  async function pollBonusLive() {
+    const run = state.snapshot?.currentRun;
+    if (!isBonusRunning(run) || state.bonusPollInFlight) {
+      if (!isBonusRunning(run) && state.bonusLive) {
+        state.bonusLive = null;
+        renderBonusLive();
+      }
+      return;
+    }
+    state.bonusPollInFlight = true;
+    try {
+      const board = await request("/api/scoreboard", { cache: "no-store" });
+      const bonus = board?.currentRun?.bonusGame || null;
+      state.bonusLive = bonus ? { ...bonus, receivedAt: performance.now(), running: board.currentRun.status === "active" } : null;
+      renderBonusLive();
+      // The round ended (a miss or the time ran out): fetch the finished run right away.
+      if (!bonus || String(bonus.phase).toLowerCase() === "ended") void loadSnapshot(true);
+    } catch {
+      // The next poll retries; the 2-second snapshot also keeps the page current.
+    } finally {
+      state.bonusPollInFlight = false;
+    }
+  }
+
+  function renderBonusLive() {
+    const live = state.bonusLive;
+    const phase = String(live?.phase || "").toLowerCase();
+    ui.virtualButtons.querySelectorAll(".virtual-button").forEach((button) => {
+      const isTarget = phase === "target" && button.dataset.eventId === live.targetEventId;
+      button.classList.toggle("is-bonus-target", isTarget);
+      const hint = button.querySelector(".virtual-action-hint");
+      if (!hint || !isBonusRunning(state.snapshot?.currentRun)) return;
+      if (phase === "intro") hint.textContent = "Bonus round · get ready";
+      else if (isTarget) {
+        const remaining = Math.max(0, Number(live.targetRemainingMs || 0) - (live.running ? performance.now() - live.receivedAt : 0));
+        hint.textContent = `LIT · ${(remaining / 1000).toFixed(1)} s · ${live.hits} hit${live.hits === 1 ? "" : "s"}`;
+      } else hint.textContent = "Bonus round";
+    });
   }
 
   function canUndoEventOnTile(run, event) {
-    return Boolean(run && !run.isRecorded && ["active", "paused", "finished", "timedOut"].includes(run.status) &&
-      String(event.type || "standard").toLowerCase() === "standard" &&
+    return Boolean(run && !run.isRecorded && !run.bonusGame && ["active", "paused", "finished", "timedOut"].includes(run.status) &&
+      isUndoableEventType(event) &&
       (event.status === "active" || event.status === "completed"));
   }
 
@@ -1905,8 +2185,8 @@
     const { row: overallRow, run } = selected;
     ui.playerLeaderboardCaption.textContent = `Official result · ${overallRow.points} total points · ${shortDate(run.recordedAt || run.finishedAt || run.createdAt)}`;
     ui.playerLeaderboardTotal.textContent = String(overallRow.points);
-    const eventResults = new Map((run.events || []).map((event) => [event.eventId, event]));
-    const configuredEvents = state.snapshot?.events || [];
+    const eventResults = new Map(scorecardEvents(run).map((event) => [event.eventId, event]));
+    const configuredEvents = leaderboardEventDefinitions(state.snapshot);
     if (!configuredEvents.length) {
       appendEmptyTableRow(ui.playerLeaderboardBody, 5, "No events are configured for this edition.");
       return;
@@ -2007,7 +2287,11 @@
       state.playerLeaderboardKey = playerKey;
     }
 
-    const boards = leaderboardTools.buildEventLeaderboards(snapshot.events || [], leaderboardRows, snapshot.history || []);
+    // The bonus round ranks like an event, from each run's bonus result.
+    const boards = leaderboardTools.buildEventLeaderboards(
+      leaderboardEventDefinitions(snapshot),
+      leaderboardRows,
+      (snapshot.history || []).map((run) => ({ ...run, events: scorecardEvents(run) })));
     const eventKey = JSON.stringify(boards);
     if (eventKey !== state.eventLeaderboardsKey) {
       renderEventLeaderboards(boards);
@@ -2193,9 +2477,12 @@
     ui.pause.textContent = run?.status === "paused" ? "Resume" : "Pause";
     const undoable = undoableEventPress(run);
     ui.undoPress.disabled = state.busy || !undoable;
-    ui.undoDetail.textContent = undoable
-      ? `Will undo: ${undoable.event.name} · ${String(undoable.event.status).toLowerCase() === "completed" ? "finish" : "start"} press`
-      : "No event press to undo.";
+    const undoneKeypadCode = undoable && undoable.message.type !== "event-press";
+    ui.undoDetail.textContent = !undoable
+      ? "No event press to undo."
+      : undoneKeypadCode
+        ? `Will undo: ${undoable.event.name} · code ${keypadProgress(run, undoable.event).solved}`
+        : `Will undo: ${undoable.event.name} · ${String(undoable.event.status).toLowerCase() === "completed" ? "finish" : "start"} press`;
     ui.finish.disabled = state.busy || !run || !["armed", "active", "paused"].includes(run.status);
     ui.discard.hidden = !runActions.isDiscardableRun(run);
     ui.discard.disabled = state.busy || !state.connected;
@@ -2400,9 +2687,20 @@
   }
 
   async function pressEvent(run, event) {
+    if (isBonusRunning(run)) {
+      // A bonus tap counts only on the lit button; report what the app decided.
+      await performAction(async () => {
+        const result = await request(`/api/runs/${encodeURIComponent(run.id)}/events/${encodeURIComponent(event.eventId)}/press`, { method: "POST" });
+        if (String(result?.disposition || "").toLowerCase() !== "accepted") throw new Error(result?.reason || "That bonus press did not count.");
+      }, `Bonus hit on ${event.name}.`);
+      void pollBonusLive();
+      return;
+    }
     await performAction(
       () => request(`/api/runs/${encodeURIComponent(run.id)}/events/${encodeURIComponent(event.eventId)}/press`, { method: "POST" }),
-      event.status === "active" ? `${event.name} finished.` : `${event.name} started.`
+      event.status === "active"
+        ? event.type === "keypad" ? `${event.name} finished by operator override.` : `${event.name} finished.`
+        : `${event.name} started.`
     );
   }
 
@@ -2469,8 +2767,8 @@
     if (row && run) {
       rowTiming(row, run);
       const draft = state.drafts.get(runId)?.get(eventId);
-      if ((field === "start" || field === "finish") && !draft?.touched.has("score")) {
-        const eventResult = runEvents(run).find((item) => item.eventId === eventId);
+      if ((field === "start" || field === "finish" || field === "hits") && !draft?.touched.has("score")) {
+        const eventResult = scorecardEvents(run).find((item) => item.eventId === eventId);
         const scoreInput = row.querySelector('input[data-field="score"]');
         if (eventResult && scoreInput) {
           const value = displayedValue(run, eventResult, "score");
@@ -2527,11 +2825,17 @@
             } else {
               const score = Number(value);
               if (!Number.isInteger(score) || Math.abs(score) > MAXIMUM_MANUAL_POINTS) {
-                const name = runEvents(run).find((item) => item.eventId === eventId)?.name || "an event";
+                const name = scorecardEvents(run).find((item) => item.eventId === eventId)?.name || "an event";
                 throw new Error(`Points for ${name} must be a whole number (negative for a penalty), or blank for automatic points.`);
               }
               edit.scoreOverride = score;
             }
+          } else if (field === "hits") {
+            const hits = Number(value);
+            if (value === "" || !Number.isInteger(hits) || hits < 0 || hits > 100_000) {
+              throw new Error("Bonus round hits must be a whole number from 0 to 100,000.");
+            }
+            edit.hits = hits;
           }
         }
         events.push(edit);
@@ -2685,6 +2989,8 @@
     ui.refresh.addEventListener("click", () => loadSnapshot(false));
     ui.setupRetryLoad.addEventListener("click", () => loadSetup());
     ui.setupEditionName.addEventListener("input", onSetupInput);
+    ui.setupBonus?.addEventListener("input", onSetupBonusInput);
+    ui.setupBonus?.addEventListener("change", onSetupBonusInput);
     ui.setupEventList.addEventListener("input", onSetupInput);
     ui.setupEventList.addEventListener("focusin", (event) => {
       const input = event.target.closest("[data-setup-event-id]");
@@ -2898,4 +3204,6 @@
   // browser cue aligned with that hardware countdown instead of adding 250ms skew.
   window.setInterval(() => countdownCoordinator.poll(), 50);
   window.setInterval(tickClock, 200);
+  window.setInterval(() => void pollBonusLive(), 250);
+  window.setInterval(renderBonusLive, 100);
 })();

@@ -109,7 +109,32 @@
     };
   }
 
+  // The spoke firmware's Speed/bonus target look (applyTargetColorsForRemaining), so screens
+  // can match a lit button: green with 8 s or more left, blending to yellow by 6 s and to red
+  // by 3 s; the blink period (each on or off half) shrinks from 500 ms to 65 ms over the last 8 s.
+  const TARGET_LOOK = Object.freeze({ greenMs: 8000, yellowMs: 6000, redMs: 3000, slowMs: 500, fastMs: 65 });
+
+  function buttonTargetLook(remainingMs) {
+    const remaining = Math.max(0, Number(remainingMs) || 0);
+    let red = 255;
+    let green = 0;
+    if (remaining >= TARGET_LOOK.greenMs) {
+      red = 0;
+      green = 255;
+    } else if (remaining >= TARGET_LOOK.yellowMs) {
+      red = Math.floor(255 * (TARGET_LOOK.greenMs - remaining) / (TARGET_LOOK.greenMs - TARGET_LOOK.yellowMs));
+      green = 255;
+    } else if (remaining >= TARGET_LOOK.redMs) {
+      green = Math.floor(255 - 255 * (TARGET_LOOK.yellowMs - remaining) / (TARGET_LOOK.yellowMs - TARGET_LOOK.redMs));
+    }
+    const blinkTime = Math.min(remaining, TARGET_LOOK.greenMs);
+    const periodMs = Math.max(TARGET_LOOK.fastMs,
+      TARGET_LOOK.fastMs + Math.floor(blinkTime * (TARGET_LOOK.slowMs - TARGET_LOOK.fastMs) / TARGET_LOOK.greenMs));
+    return { red, green, color: `rgb(${red}, ${green}, 0)`, periodMs };
+  }
+
   const api = Object.freeze({
+    buttonTargetLook,
     parseClockTimeToSeconds,
     formatClockMs,
     millisecondsFromClockTime,

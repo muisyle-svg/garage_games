@@ -143,3 +143,23 @@ test("exhibition rows preserve server-assigned incremental names", () => {
   assert.deepEqual(rows.map((row) => row.displayName), ["Alex (Exhibition 2)", "Alex (Exhibition 1)"]);
   assert.ok(rows.every((row) => row.category === "exhibition"));
 });
+
+test("the bonus round ranks by points alone and lists runs that never reached it as DNF", () => {
+  const bonus = { eventId: "bonus-round", name: "Bonus round", type: "bonusRound" };
+  const leaderboard = [
+    { runId: "a", category: "official", competitorName: "Avery", points: 100 },
+    { runId: "b", category: "official", competitorName: "Blake", points: 90 },
+    { runId: "c", category: "official", competitorName: "Casey", points: 80 }
+  ];
+  const result = (id, points, durationMs) => ({
+    id, category: "official", competitorId: id,
+    events: [{ eventId: "bonus-round", status: "completed", score: points, startElapsedMs: 0, finishElapsedMs: durationMs }]
+  });
+  const history = [result("a", 20, 30000), result("b", 20, 5000), { id: "c", category: "official", competitorId: "c", events: [] }];
+  const [board] = require("../../src/GarageGames.V2/wwwroot/mvp-leaderboards.js").buildEventLeaderboards([bonus], leaderboard, history);
+  assert.deepEqual(board.rows.map((row) => [row.competitorName, row.rank, row.status]), [
+    ["Avery", 1, "completed"],
+    ["Blake", 1, "completed"], // Same points share the rank; the shorter round is not ahead.
+    ["Casey", null, "dnf"]
+  ]);
+});
