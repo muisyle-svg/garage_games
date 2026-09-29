@@ -28,10 +28,10 @@ manually attached XIAO ESP32-C3 over USB serial. A short physical button press
 starts a competitor after the operator explicitly arms that competitor in the
 app. The current `GG1` serial protocol runs at 115200 baud; a five-second master
 button hold enters the existing Speed game when no Garage run is active or
-paused. Regular Garage events can now receive physical spoke presses over
-ESP-NOW; keypad and magnetic special events and bonus rounds remain future
-work. The app runs locally and has no Google Sheets or other network-service
-dependency.
+paused. Regular and keypad Garage events can receive physical spoke presses
+over ESP-NOW (see "Keypad events" below); magnetic special events and bonus
+rounds remain future work. The app runs locally and has no Google Sheets or
+other network-service dependency.
 
 The combined Garage Games/Speed Button master and spoke sketches are in
 `firmware\garage_games_master` and `firmware\garage_games_spoke`.
@@ -312,7 +312,110 @@ arrival, capped at 10 seconds and never earlier than the start of the current
 active stretch. Spoke press sequences start from a random value each session,
 so a spoke that reboots mid-run cannot reuse a sequence the app already
 recorded. Flash the master and spokes together: an older master rejects the
-new press format. Future work includes keypad and magnetic special-event messages. This
+new press format. Future work includes magnetic special-event messages. This
 design does not use Google Sheet row IDs or Wi-Fi. Battery-powered spokes must
 keep their radio listening to receive a wireless start; deep sleep cannot
 receive that start signal.
+
+## Sounds
+
+Game sounds play from the app itself through this computer's default audio
+output (the TV, when it is the connected display and speaker), not from a browser
+tab, so they play on time whichever window or tab is in front and need no click
+to enable. The app also starts each run at Go on its own; the scorekeeper page
+only shows the countdown and reports Go as a backup.
+
+| Sound | When | File |
+| --- | --- | --- |
+| Countdown voice | A run's countdown starts | `wwwroot/sounds/3-seconds-countdown-deep-voice-game.mp3` |
+| Keypad chime | A keypad message appears on the TV | `wwwroot/sounds/keypad-message.wav` |
+| Bonus chime | The bonus round's first button lights | `wwwroot/sounds/bonus-start.wav` |
+
+Replace a file (same name, WAV or MP3) to change a sound; add a `SoundCue` in
+`SoundService.cs` with its file to add one. Set the volume with Windows' volume
+mixer. Start the app with `--no-sound` to silence it. If a sound cannot play,
+the app logs a warning and the game carries on.
+
+## Bonus speed round
+
+When the last event is finished and time remains, the clock keeps running and a
+bonus round begins:
+
+1. For 1.5 seconds every button flashes a quick red-yellow-green intro while the
+   master polls them. Buttons that answer are the ones that can light up; if none
+   answer (for example, no master is connected), every event's tile can be lit
+   and the scorekeeper plays it virtually.
+2. The bonus chime plays from the computer and the first button lights with the
+   Speed game's look (green through yellow to red, blinking faster as its time
+   runs out). The TV shows the lit event's name and its time left, with the
+   hits and points so far; the time and its bar take the lit button's color and
+   blink with it. The scorekeeper highlights that event's tile.
+3. Pressing the lit button in time (or tapping its highlighted tile) scores a hit
+   and lights a different button. Presses are timed when pressed, with a short
+   allowance for the radio. Other buttons and tiles don't count.
+4. A missed button ends the run where its window closed; running out of run time
+   ends it as a timeout. Either way the points (hits x points per press) are added
+   to the run total, shown on the TV and scorekeeper, and counted once recorded.
+
+Pausing freezes the lit button's time. The scorekeeper's Finish (or Discard) ends
+the round too. Presses can't be undone once a bonus round has started; correct
+event times on the scorecard instead.
+
+The bonus round counts as an event on the scorecard, in run history, and on the
+leaderboards. Its **Bonus round** row shows its start and end times, duration,
+hits, and points. Once the round has ended it can be corrected like an event:
+change the hits (points follow at the points per press), type points to override
+them, adjust the times, or Clear it. Entering a start time and hits on a run that
+never reached the bonus records one. The Leaderboards tab has a Bonus round board
+that ranks by points (ties share a rank; round length doesn't matter), with runs
+that never reached it listed as DNF. Set the round up in Setup under **Bonus
+speed round**: whether it plays, points per press, the starting seconds per press,
+how much and how often that drops, and the minimum. The defaults match the
+standalone Speed game (10 s, dropping 1 s every 10 s, to 2 s) at 5 points per
+press. Changing them after runs are recorded starts a new edition version, like
+changing event scoring. The standalone Speed game on the master (five-second hold)
+is unchanged and still runs on its own. Flash the master and spokes together for
+the bonus round.
+
+## Keypad events
+
+Keypad messages and their codes come from `config/keypad-answers.csv`, a grid
+laid out like the keypad: the header row holds column labels (`1`-`16`), the
+first column holds row labels (`A`-`D`), and each cell's text is a message whose
+code is its row letter then column number (`rocket pepper 1819` in row A,
+column 2 answers `A2`). Every message in the row labelled `##` answers `##`.
+Blank rows and cells are ignored; each message must appear only once. Edit the
+file (for example in Excel, saved as CSV) and restart the app; Setup shows how
+many messages loaded or what is wrong with the file. Each run keeps a copy of
+the list it started with. Start the app with `--keypad-answers <path>` to use a
+different file.
+
+In Setup, set an event's type to **Keypad code**, choose **Codes to pass**, and
+assign the special button's MAC to that event as usual. During a run:
+
+- Pressing the button starts the event like any other and shows a randomly
+  drawn message large on the TV, over the event grid, with a short chime; the
+  clock and points stay visible. The TV also shows how many codes are solved
+  out of how many are needed.
+- The player types the code on the button's keypad and presses `*` to enter it.
+  The TV shows the keys as they are typed. A wrong code flashes the button red
+  three times, shows "Wrong code" on the TV, and clears the entry for another
+  try. A right code flashes the button green and draws the next message (with
+  another chime) until enough are solved; the last one finishes the event.
+- No message is shown twice in the same run.
+- A second press of the physical button does not advance a keypad event. The
+  operator can credit the message on screen by tapping the event tile again (an
+  override, recorded as such in the raw messages); with one code to pass, that
+  finishes the event.
+- The message also disappears when the run finishes or times out.
+- Undo steps back one code at a time: the tile's ↶ or **Undo last press** takes
+  back the latest solved code (its message returns to the TV and any message
+  drawn after it is dropped), and finally the start. Wrong codes are never
+  undone; they stay in the raw messages.
+
+
+Codes are checked by the app, not the button, and every submitted code is
+recorded along with which messages each run drew. The typed-so-far entry shown
+on the TV is display-only and is not saved. The spoke sketch detects the keypad
+automatically, so the same `garage_games_spoke` sketch runs on every button;
+flash the master and spokes together when updating to this protocol.
