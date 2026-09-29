@@ -120,3 +120,20 @@ test("the Garage bonus round is relayed by the master and lit on spokes, apart f
   assert.match(master, /void selectAndCueNextTarget|bool selectAndCueNextTarget/);
   assert.match(spoke, /void updateTargetVisual\(\)/);
 });
+
+test("bonus heartbeats let the app swap dead buttons, and a new run forgets the last round", () => {
+  assert.match(spoke, /GBHB:3:%s:%lu/, "spokes beat through the bonus round with the target they show");
+  assert.match(spoke, /bonusNextBeatMs = now;/, "a newly lit spoke reports at once (its READY)");
+  assert.match(master, /GG1 BONUSBEAT %lu %s %s %lu/, "the master relays heartbeats to the app");
+  assert.match(master, /handleBonusBeat\(packet\)/);
+  assert.match(spoke, /void resetBonusMemory\(\)/);
+  const newSession = spoke.match(/if \(!sameSession\) \{[\s\S]*?\n  \}/);
+  assert.ok(newSession && /resetBonusMemory\(\);/.test(newSession[0]), "a new run clears bonus memory");
+});
+
+test("presses for a paused or just-timed-out run still reach the app, which checks their age", () => {
+  const relays = master.match(/const bool runStillAnswering = [^;]+;/g) || [];
+  assert.equal(relays.length, 2, "both the press and keypad relays");
+  relays.forEach((relay) => assert.match(relay, /GARAGE_STATUS_PAUSED[\s\S]*GARAGE_STATUS_TIMED_OUT/));
+  assert.match(master, /Serial\.setRxBufferSize\(HOST_RX_BUFFER_BYTES\);/, "the master's serial buffer holds a full status burst");
+});

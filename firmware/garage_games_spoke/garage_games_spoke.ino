@@ -80,6 +80,9 @@ constexpr uint32_t KEYPAD_KEY_BLIP_MS = 90;
 constexpr uint32_t KEYPAD_WRONG_FLASH_PERIOD_MS = 170;
 constexpr uint8_t KEYPAD_WRONG_FLASHES = 3;
 constexpr uint32_t KEYPAD_I2C_FREQUENCY_HZ = 100000;
+constexpr uint16_t KEYPAD_I2C_TIMEOUT_MS = 10;
+// After a failed scan, wait this long before trying the keypad again.
+constexpr uint32_t KEYPAD_FAILURE_BACKOFF_MS = 250;
 
 #define BTN_PIN D2
 #define LED_R   D3
@@ -332,6 +335,7 @@ uint8_t keypadAddress = 0;
 bool keypadScanning = false;
 uint32_t lastKeypadScanMs = 0;
 uint32_t lastKeypadErrorLogMs = 0;
+uint32_t keypadRetryAtMs = 0;
 char keypadEntry[KEYPAD_ENTRY_MAX_LENGTH + 1] = {};
 uint8_t keypadEntryLength = 0;
 // While set, keypad LED feedback owns the LED and the normal garage visual waits.
@@ -354,6 +358,11 @@ constexpr uint32_t BONUS_INTRO_STEP_MS = 110;
 constexpr uint8_t BONUS_INTRO_STEPS = 8;
 constexpr uint32_t BONUS_HELLO_MAX_DELAY_MS = 300;
 constexpr uint32_t BONUS_HIT_FLASH_MS = 250;
+// Heartbeats through the round (like the Speed game's HB), carrying the target this button is
+// showing. The app lights only buttons still beating and swaps a lit one that goes silent;
+// a beat with the new target is the READY that starts its window.
+constexpr uint32_t BONUS_BEAT_MS = 600;
+constexpr uint32_t BONUS_BEAT_JITTER_MS = 200;
 
 BonusPhase bonusPhase = BONUS_PHASE_OFF;
 uint32_t bonusSequence = 0;
@@ -371,6 +380,24 @@ uint32_t bonusPressedSequence = 0;
 uint32_t bonusHitFlashUntilMs = 0;
 bool bonusVisualOwnsLed = false;
 bool bonusLedDark = false;
+uint32_t bonusNextBeatMs = 0;
+
+// The app numbers each bonus round from 1 (the intro) upward, so what a button remembers
+// about a round (the target it was hit on, the intro it played) must be forgotten when a new
+// round starts. Otherwise a button hit as, say, target 4 in one run stayed dark and ignored
+// presses whenever it was target 4 again, and later rounds skipped the intro poll.
+void resetBonusMemory() {
+  bonusPhase = BONUS_PHASE_OFF;
+  bonusSequence = 0;
+  bonusTargetIsMe = false;
+  bonusIntroSequence = 0;
+  bonusIntroRunning = false;
+  bonusHelloPending = false;
+  bonusShownTargetSequence = 0;
+  bonusPressedSequence = 0;
+  bonusHitFlashUntilMs = 0;
+  bonusNextBeatMs = 0;
+}
 
 bool isGarageTerminalState(GarageModeState state) {
   return state == GARAGE_MODE_FINISHED || state == GARAGE_MODE_TIMED_OUT;
@@ -681,6 +708,7 @@ void handleGarageMode(const RxPacket& packet) {
     garageEventRevision = 0;
     garageTerminalAtMs = 0;
     garageTerminalTimerStarted = false;
+    resetBonusMemory();
   }
   if (isGarageTerminalState(newState) &&
       (!sameSession || !isGarageTerminalState(garageModeState))) {
@@ -773,6 +801,8 @@ void handleBonusState(const RxPacket& packet) {
     return;
   }
   if (phaseText[0] != 'I' && phaseText[0] != 'T') return;
+  // Numbers only climb within a round; going back means a fresh round in the same run.
+  if (sequence < bonusSequence) resetBonusMemory();
 
   uint8_t targetMac[6];
   const bool targetIsMe = phaseText[0] == 'T' && strcmp(macText, "-") != 0 &&
@@ -853,6 +883,15 @@ void updateBonusRound() {
     if (length > 0 && (size_t)length < sizeof(message)) sendBroadcast(message);
   }
 
+  if ((int32_t)(now - bonusNextBeatMs) >= 0) {
+    const uint32_t shown = bonusTargetPressable(now) && bonusShownTargetSequence == bonusSequence
+        ? bonusSequence : 0;
+    char beat[40];
+    const int length = snprintf(beat, sizeof(beat), "GBHB:3:%s:%lu", garageToken, (unsigned long)shown);
+    if (length > 0 && (size_t)length < sizeof(beat)) sendBroadcast(beat);
+    bonusNextBeatMs = now + BONUS_BEAT_MS + (esp_random() % (BONUS_BEAT_JITTER_MS + 1));
+  }
+
   if (bonusIntroRunning) {
     if ((int32_t)(now - bonusIntroNextMs) < 0) return;
     // Red, yellow, green, dark, twice: a quick "get ready" across every button.
@@ -876,6 +915,7 @@ void updateBonusRound() {
     if (bonusShownTargetSequence != bonusSequence) {
       bonusShownTargetSequence = bonusSequence;
       startBlink(false, true, false, TARGET_BLINK_SLOW_MS);
+      bonusNextBeatMs = now;  // Tell the app right away that the target is showing.
     }
     applyTargetColorsForRemaining(remainingMs);
     bonusLedDark = false;
@@ -1395,6 +1435,9 @@ bool writeMcpPortLatch(uint8_t port, uint8_t value) {
 // keypad disabled and the spoke behaves as before.
 void setupKeypad() {
   Wire.begin(KEYPAD_SDA, KEYPAD_SCL, KEYPAD_I2C_FREQUENCY_HZ);
+  // A keypad cable that works loose can hold the bus; keep each failed transfer short so the
+  // button and radio stay responsive.
+  Wire.setTimeOut(KEYPAD_I2C_TIMEOUT_MS);
   for (uint8_t address = 0x20; address <= 0x27; ++address) {
     Wire.beginTransmission(address);
     if (Wire.endTransmission() == 0) {
@@ -1602,8 +1645,14 @@ void updateKeypad() {
     return;
   }
   if ((uint32_t)(now - lastKeypadScanMs) < KEYPAD_SCAN_INTERVAL_MS) return;
+  if (keypadRetryAtMs != 0 && (int32_t)(now - keypadRetryAtMs) < 0) return;
   lastKeypadScanMs = now;
-  if (!scanKeypadMatrix(true) && (uint32_t)(now - lastKeypadErrorLogMs) >= 1000) {
+  if (scanKeypadMatrix(true)) {
+    keypadRetryAtMs = 0;
+    return;
+  }
+  keypadRetryAtMs = now + KEYPAD_FAILURE_BACKOFF_MS;
+  if ((uint32_t)(now - lastKeypadErrorLogMs) >= 1000) {
     lastKeypadErrorLogMs = now;
     Serial.println("[KEYPAD] I2C read failed; check keypad power and wiring");
   }

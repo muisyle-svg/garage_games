@@ -57,6 +57,17 @@ spokes stay dark. A spoke that hears nothing for 1.5 s returns to its normal
 Garage lights. None of this touches the standalone Speed game, which still
 starts with the master's five-second hold.
 
+Throughout the round each spoke also sends a heartbeat `GBHB:3:<token>:<shownSeq>`
+every 600-800 ms (and at once when it lights), where `shownSeq` is the target it
+is showing or 0; the master relays it as `GG1 BONUSBEAT <boot> <token> <mac> <seq>`.
+Like the Speed game's HB and READY, the app lights only spokes still beating,
+starts a lit spoke's window when its beat confirms the target, and swaps a lit
+spoke that never confirms or goes silent. A spoke forgets its bonus state when a
+new Garage session (run token) starts. The master relays `GPRESS` and keypad
+submissions for the current run while it is `PAUSED` or `TIMED_OUT` too, so a
+press made just before the clock stopped still reaches the app, which judges it by
+its age. The master's USB receive buffer is 1 KB.
+
 ## Special button and keypad wiring test
 
 For the special button prototype, flash

@@ -99,7 +99,13 @@ constexpr uint32_t GARAGE_BROADCAST_INTERVAL_MS = 250;
 constexpr uint32_t GARAGE_COUNTDOWN_BROADCAST_INTERVAL_MS = 75;
 constexpr uint8_t HOST_SCAN_MAX_RESPONDERS = 64;
 constexpr size_t HOST_SCAN_ID_MAX_LENGTH = 32;
-constexpr uint8_t HOST_RX_BYTES_PER_LOOP = 32;
+// The app sends a status burst plus one line per button. The default 256-byte USB receive
+// buffer overflowed with four buttons and dropped the last button's line, so the buffer is
+// larger and each loop reads more of it.
+constexpr uint16_t HOST_RX_BYTES_PER_LOOP = 128;
+constexpr size_t HOST_RX_BUFFER_BYTES = 1024;
+// Output to the app (presses, heartbeats) queues here; a short app hiccup never stalls the loop.
+constexpr size_t HOST_TX_BUFFER_BYTES = 2048;
 constexpr size_t HOST_RX_LINE_CAPACITY = 80;
 constexpr uint32_t CONTROL_REPEAT_GAP_MS = 25;
 constexpr uint8_t HIGH_SCORE_RESET_TAPS = 5;
@@ -1136,6 +1142,29 @@ void updateBonusBroadcast() {
   }
 }
 
+// GBHB:3:<token>:<shownSeq> is a spoke's bonus-round heartbeat (shownSeq is the target it is
+// lit for, or 0). The app uses them to light only live buttons and to swap a lit button that
+// goes silent, like the Speed game.
+void handleBonusBeat(const RxPacket& packet) {
+  static const char prefix[] = "GBHB:3:";
+  if (packet.len <= sizeof(prefix) - 1 || memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, sizeof(prefix) - 1) != 0 ||
+      !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0 ||
+      bonusPhase == BONUS_OFF) return;
+  const char* cursor = packet.data + sizeof(prefix) - 1;
+  const char* packetEnd = packet.data + packet.len;
+  char tokenText[17];
+  char sequenceText[11];
+  uint32_t shownSequence = 0;
+  if (!readPacketField(cursor, packetEnd, tokenText, sizeof(tokenText)) ||
+      !readPacketField(cursor, packetEnd, sequenceText, sizeof(sequenceText)) || cursor != packetEnd ||
+      strcmp(tokenText, garageToken) != 0 || !parseUint32Token(sequenceText, shownSequence)) return;
+  char macText[13];
+  macToHex(packet.source, macText, sizeof(macText));
+  Serial.printf("GG1 BONUSBEAT %lu %s %s %lu\n", (unsigned long)bootToken, garageToken, macText,
+                (unsigned long)shownSequence);
+}
+
 // GBHELLO:3:<token>:<seq> answers the intro poll; the spoke is identified by its MAC.
 void handleBonusHello(const RxPacket& packet) {
   static const char prefix[] = "GBHELLO:3:";
@@ -1220,7 +1249,7 @@ void processHostSerialLine(const char* line) {
 }
 
 void updateHostSerialInput() {
-  uint8_t bytesRead = 0;
+  uint16_t bytesRead = 0;
   while (Serial.available() > 0 && bytesRead < HOST_RX_BYTES_PER_LOOP) {
     int incoming = Serial.read();
     if (incoming < 0) break;
@@ -1915,8 +1944,12 @@ void handleGaragePress(const RxPacket& packet) {
       !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0) return;
 
   uint32_t now = millis();
-  if (gameState != IDLE || garageStatus != GARAGE_STATUS_ACTIVE ||
-      hostStatus != HOST_STATUS_ACTIVE || !hostStatusFresh(now) ||
+  // Input for the current run is relayed while it is paused or just timed out too: a press
+  // (or code) made before the clock stopped can arrive a moment after, and the app decides
+  // from its age whether it still counts.
+  const bool runStillAnswering = garageStatus == GARAGE_STATUS_ACTIVE ||
+      garageStatus == GARAGE_STATUS_PAUSED || garageStatus == GARAGE_STATUS_TIMED_OUT;
+  if (gameState != IDLE || !runStillAnswering || !hostStatusFresh(now) ||
       !garageStatusFresh(now) || strcmp(parsedToken, garageToken) != 0 ||
       (int32_t)(now - packet.receivedAtMs) < 0 ||
       (uint32_t)(now - packet.receivedAtMs) > HOST_STATUS_STALE_MS) return;
@@ -1996,8 +2029,12 @@ void handleGarageKeypad(const RxPacket& packet) {
       !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0) return;
 
   uint32_t now = millis();
-  if (gameState != IDLE || garageStatus != GARAGE_STATUS_ACTIVE ||
-      hostStatus != HOST_STATUS_ACTIVE || !hostStatusFresh(now) ||
+  // Input for the current run is relayed while it is paused or just timed out too: a press
+  // (or code) made before the clock stopped can arrive a moment after, and the app decides
+  // from its age whether it still counts.
+  const bool runStillAnswering = garageStatus == GARAGE_STATUS_ACTIVE ||
+      garageStatus == GARAGE_STATUS_PAUSED || garageStatus == GARAGE_STATUS_TIMED_OUT;
+  if (gameState != IDLE || !runStillAnswering || !hostStatusFresh(now) ||
       !garageStatusFresh(now) || strcmp(parsedToken, garageToken) != 0 ||
       (int32_t)(now - packet.receivedAtMs) < 0 ||
       (uint32_t)(now - packet.receivedAtMs) > HOST_STATUS_STALE_MS) return;
@@ -2029,6 +2066,10 @@ void processRx() {
     }
     if (strncmp(packet.data, "GBHELLO:", 8) == 0) {
       handleBonusHello(packet);
+      continue;
+    }
+    if (strncmp(packet.data, "GBHB:", 5) == 0) {
+      handleBonusBeat(packet);
       continue;
     }
     unsigned int version = 0;
@@ -2206,7 +2247,12 @@ void restartAfterRadioFailure(const char* stage, esp_err_t error) {
 }
 
 void setup() {
+  Serial.setRxBufferSize(HOST_RX_BUFFER_BYTES);
+  Serial.setTxBufferSize(HOST_TX_BUFFER_BYTES);
   Serial.begin(115200);
+  // If the app stops reading (closed, reconnecting, busy), drop output instead of stalling
+  // the loop that relays presses and runs the radio.
+  Serial.setTxTimeoutMs(0);
   delay(150);
   bootToken = esp_random();
   if (bootToken == 0) bootToken = 1;
