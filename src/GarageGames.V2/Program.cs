@@ -216,7 +216,7 @@ app.MapGet("/api/scoreboard", (RunService runs) => Results.Ok(runs.GetScoreboard
 app.MapGet("/api/setup", (RunService runs) => Results.Ok(runs.GetSetup()));
 app.MapPut("/api/setup", (EditionSetup request, RunService runs) => Results.Ok(runs.UpdateSetup(request)));
 app.MapGet("/api/run/countdown-state", (RunService runs) => Results.Ok(runs.GetCountdownState()));
-app.MapGet("/api/export", (RunService runs) => Results.Json(runs.GetOperatorSnapshot(simulationMode), JsonDefaults.Options));
+app.MapGet("/api/export", (RunService runs) => Results.Json(runs.GetOperatorSnapshot(simulationMode, forExport: true), JsonDefaults.Options));
 app.MapPost("/api/competitors", (AddCompetitorRequest request, RunService runs) =>
     Results.Ok(runs.AddCompetitor(request.Name)));
 app.MapPut("/api/competitors/{competitorId}", (string competitorId, RenameCompetitorRequest request, RunService runs) =>
@@ -422,6 +422,11 @@ app.MapPost("/api/simulator/advance-clock", (AdvanceClockRequest request) =>
     return Results.Ok(new { advancedMilliseconds = request.Milliseconds });
 });
 
+// Keep the PC from sleeping while the app runs (sleep drops the master's USB connection).
+if (!args.Contains("--allow-sleep", StringComparer.OrdinalIgnoreCase))
+{
+    KeepAwake.Request();
+}
 app.Run();
 
 static string? GetOption(string[] arguments, string name)

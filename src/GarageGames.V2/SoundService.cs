@@ -14,7 +14,9 @@ public enum SoundCue
     // A keypad message has appeared on the TV.
     KeypadMessage,
     // The bonus speed round's first button lights.
-    BonusStart
+    BonusStart,
+    // A wrong code was entered on a keypad.
+    KeypadWrong
 }
 
 public interface ISoundPlayer
@@ -39,7 +41,8 @@ public sealed class WindowsSoundPlayer : ISoundPlayer, IDisposable
     {
         [SoundCue.Countdown] = "3-seconds-countdown-deep-voice-game.mp3",
         [SoundCue.KeypadMessage] = "keypad-message.wav",
-        [SoundCue.BonusStart] = "bonus-start.wav"
+        [SoundCue.BonusStart] = "bonus-start.wav",
+        [SoundCue.KeypadWrong] = "keypad-wrong.wav"
     };
 
     private readonly string _soundsDirectory;

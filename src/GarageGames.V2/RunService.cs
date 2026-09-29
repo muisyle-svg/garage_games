@@ -77,6 +77,10 @@ public sealed class RunService
     // Active elapsed time when the current run last became Active; aged physical
     // presses are never back-dated into a pause or before the run started.
     private long _activeSegmentStartElapsedMs;
+    // When the run clock last stopped (pause or timeout), so a physical press that was made
+    // before then but arrived after can still be placed at its press time.
+    private string? _frozenRunId;
+    private long _frozenAtMonotonicMs;
     // What each running keypad event's player has typed so far, for the TV only. It is
     // display state: not persisted, and reset whenever another run takes over.
     private readonly Dictionary<string, KeypadEntryState> _keypadEntries = new(StringComparer.Ordinal);
@@ -720,8 +724,29 @@ public sealed class RunService
         return token is null ? new MasterGarageStatus("-", "NONE") : new MasterGarageStatus(token, state);
     }
 
-    public OperatorSnapshot GetOperatorSnapshot(bool simulationMode = true)
+    // The scorekeeper polls this every couple of seconds for the whole event, so by default it
+    // leaves out what the page never uses and that grows with every run: each saved run's copy
+    // of the keypad message list and each edit's full before/after copies of its run. The
+    // export (forExport) keeps everything.
+    public OperatorSnapshot GetOperatorSnapshot(bool simulationMode = true, bool forExport = false)
     {
+        RunRecord Listed(RunRecord run)
+        {
+            var copy = Clone(run);
+            if (!forExport) copy.Edition.KeypadChallenges = null;
+            return copy;
+        }
+        EditRecord ListedEdit(EditRecord edit)
+        {
+            var copy = Clone(edit);
+            if (!forExport)
+            {
+                copy.BeforeJson = "";
+                copy.AfterJson = "";
+            }
+            return copy;
+        }
+
         lock (_gate)
         {
             RefreshActiveClock();
@@ -746,10 +771,10 @@ public sealed class RunService
                         string.Equals(device.DeviceId, eventDefinition.DeviceId, StringComparison.OrdinalIgnoreCase)))
                     .Select(Clone)
                     .ToList(),
-                History = _data.Runs.Where(r => !r.IsDeleted).OrderByDescending(r => r.CreatedAt).Select(Clone).ToList(),
-                DeletedRuns = _data.Runs.Where(r => r.IsDeleted).OrderByDescending(r => r.DeletedAt).Select(Clone).ToList(),
+                History = _data.Runs.Where(r => !r.IsDeleted).OrderByDescending(r => r.CreatedAt).Select(Listed).ToList(),
+                DeletedRuns = _data.Runs.Where(r => r.IsDeleted).OrderByDescending(r => r.DeletedAt).Select(Listed).ToList(),
                 Messages = _data.Messages.OrderByDescending(m => m.Id).Take(250).Select(Clone).ToList(),
-                Edits = _data.Edits.OrderByDescending(e => e.Id).Take(250).Select(Clone).ToList(),
+                Edits = _data.Edits.OrderByDescending(e => e.Id).Take(250).Select(ListedEdit).ToList(),
                 Leaderboard = BuildLeaderboard()
             };
         }
@@ -1523,7 +1548,30 @@ public sealed class RunService
                     tokenRun, deviceId);
             }
 
+            // Pressed while the run was still going, but arrived after it paused or timed out:
+            // count it at its press time.
+            var frozenRun = tokenRun is { Status: RunStatus.Paused } paused && paused.Id == _current?.Id
+                ? paused
+                : tokenRun is { Status: RunStatus.TimedOut, IsRecorded: false, IsDeleted: false } timedOut &&
+                  timedOut.Id == _lastDisplayedRun?.Id && _current is null
+                    ? timedOut
+                    : null;
+            if (frozenRun is not null && LatePressElapsed(frozenRun, deviceId, ageMilliseconds) is long lateElapsed &&
+                frozenRun.Events.SingleOrDefault(eventItem =>
+                    string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase)) is { } lateEvent &&
+                IsButtonEvent(lateEvent.Type))
+            {
+                envelope.ElapsedMilliseconds = lateElapsed;
+                var late = ReceiveCore(envelope, trustedVirtual: true, lateRun: frozenRun);
+                return PhysicalPressResult(late, frozenRun, deviceId, messageId);
+            }
+
             var currentToken = MasterProtocolCodec.GetGarageRunToken(run?.Id);
+            if (frozenRun is { Status: RunStatus.TimedOut })
+            {
+                return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.TimedOut,
+                    "Pressed after the run's time ran out.", payloadJson), frozenRun, deviceId);
+            }
             if (run is null || !string.Equals(currentToken, runToken, StringComparison.Ordinal))
             {
                 return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.WrongRun,
@@ -1579,6 +1627,35 @@ public sealed class RunService
             var received = ReceiveCore(envelope, trustedVirtual: false);
             return PhysicalPressResult(received, run, deviceId, messageId);
         }
+    }
+
+    private void NoteClockFrozen(RunRecord run, long overshootMs = 0)
+    {
+        _frozenRunId = run.Id;
+        _frozenAtMonotonicMs = _clock.MonotonicMilliseconds - overshootMs;
+    }
+
+    // A press that reaches the app after its run paused or timed out still counts if the
+    // button says it was pushed before the clock stopped (radio retries can take a few hundred
+    // milliseconds, and most runs end at the buzzer). Returns the press's run time, or null.
+    private long? LatePressElapsed(RunRecord run, string deviceId, uint ageMilliseconds)
+    {
+        if (run.Status is not (RunStatus.Paused or RunStatus.TimedOut) || _frozenRunId != run.Id)
+        {
+            return null;
+        }
+
+        var sinceFrozen = _clock.MonotonicMilliseconds - _frozenAtMonotonicMs;
+        var age = Math.Min((long)ageMilliseconds, MaximumPhysicalPressAgeMilliseconds);
+        if (age <= sinceFrozen)
+        {
+            return null;
+        }
+
+        var elapsed = Math.Max(0, run.ActiveElapsedMs - (age - sinceFrozen));
+        var lastSignal = run.Events.SingleOrDefault(eventItem =>
+            string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))?.LastSignalElapsedMs;
+        return Math.Max(elapsed, lastSignal ?? 0);
     }
 
     // Time the press when the button was pushed, not when the laptop received it, so
@@ -1645,6 +1722,7 @@ public sealed class RunService
             run.PausedFromPhase = run.Phase.ToString();
             run.Status = RunStatus.Paused;
             run.Revision++;
+            NoteClockFrozen(run);
             RestartClockAnchor();
             UpdateDeviceLeds();
             try
@@ -1683,6 +1761,14 @@ public sealed class RunService
             run.PausedFromPhase = null;
             run.Status = RunStatus.Active;
             run.Revision++;
+            // Bonus heartbeats stop while paused; give every button a fresh start on resume.
+            var resumedAt = _clock.MonotonicMilliseconds;
+            foreach (var deviceId in _bonusBeatAtMonotonicMs.Keys.ToList())
+            {
+                _bonusBeatAtMonotonicMs[deviceId] = resumedAt;
+            }
+            _bonusCuedAtMonotonicMs = resumedAt;
+            _bonusTargetLostSinceMonotonicMs = null;
             RestartClockAnchor();
             UpdateDeviceLeds();
             try
@@ -2024,7 +2110,9 @@ public sealed class RunService
 
     public InputResult Receive(InputEnvelope envelope) => ReceiveCore(envelope, trustedVirtual: false);
 
-    private InputResult ReceiveCore(InputEnvelope envelope, bool trustedVirtual)
+    // lateRun: a physical press made while this run was still active that arrived after it
+    // paused or timed out; its elapsed time is already the press time, before the freeze.
+    private InputResult ReceiveCore(InputEnvelope envelope, bool trustedVirtual, RunRecord? lateRun = null)
     {
         lock (_gate)
         {
@@ -2041,7 +2129,7 @@ public sealed class RunService
                 return RecordRejected(envelope, MessageDisposition.Duplicate, "Message id was already recorded; retransmission was ignored.", payloadJson);
             }
 
-            var run = _current;
+            var run = lateRun ?? _current;
             if (run is null || !string.Equals(envelope.RunId, run.Id, StringComparison.Ordinal) ||
                 !string.Equals(envelope.SessionId, run.Id, StringComparison.Ordinal))
             {
@@ -2055,12 +2143,12 @@ public sealed class RunService
             }
 
             RefreshActiveClock();
-            if (run.Status == RunStatus.Paused)
+            if (lateRun is null && run.Status == RunStatus.Paused)
             {
                 return RecordRejected(envelope, MessageDisposition.Paused, "Gameplay input is ignored while paused.", payloadJson);
             }
 
-            if (run.Status == RunStatus.TimedOut)
+            if (lateRun is null && run.Status == RunStatus.TimedOut)
             {
                 return RecordRejected(envelope, MessageDisposition.TimedOut, "The active-time deadline has elapsed.", payloadJson);
             }
@@ -2079,7 +2167,7 @@ public sealed class RunService
                 return RecordAccepted(envelope, run, "Master started run countdown.", payloadJson);
             }
 
-            if (run.Status != RunStatus.Active)
+            if (lateRun is null && run.Status != RunStatus.Active)
             {
                 return RecordRejected(envelope, MessageDisposition.InvalidSignal, "The run is not accepting gameplay input.", payloadJson);
             }
@@ -2155,7 +2243,12 @@ public sealed class RunService
             device.LastSeenAt = _clock.UtcNow;
             device.LastError = null;
             run.LastAcceptedInputElapsedMs = Math.Max(run.LastAcceptedInputElapsedMs, envelope.ElapsedMilliseconds);
-            if (run.AllEventsCompleted && run.Events.All(e => IsButtonEvent(e.Type)))
+            if (run.Status == RunStatus.TimedOut)
+            {
+                // A late press counts toward a timed-out run, which stays timed out.
+                reason += " (pressed before time ran out; arrived just after)";
+            }
+            else if (run.AllEventsCompleted && run.Events.All(e => IsButtonEvent(e.Type)))
             {
                 if (TryStartBonusGame(run))
                 {
@@ -2167,7 +2260,7 @@ public sealed class RunService
                     reason = "All events completed; run finished and is awaiting recording.";
                 }
             }
-            else if (run.AllEventsCompleted && run.Phase != RunPhase.Bonus)
+            else if (run.AllEventsCompleted && run.Phase != RunPhase.Bonus && run.Status != RunStatus.TimedOut)
             {
                 run.Phase = RunPhase.Bonus;
                 run.BonusStartedElapsedMs = run.ActiveElapsedMs;
@@ -2189,8 +2282,9 @@ public sealed class RunService
     // The bonus round's row on scorecards and leaderboards, edited like an event with this id.
     public const string BonusEventId = "bonus-round";
     // Presses are timed when pressed but can arrive a little later over the radio; wait this
-    // long past a deadline before calling it a miss.
-    public const long BonusMissGraceMilliseconds = 300;
+    // long past a deadline before calling it a miss. Buttons resend a press every 250 ms, so
+    // this covers two lost packets in a row.
+    public const long BonusMissGraceMilliseconds = 650;
     // No event can really be finished this fast, so a finish press this soon after the start
     // press is a double press (or a bounce) and is ignored; the event keeps running.
     public const long FinishPressLockoutMilliseconds = 500;
@@ -2205,13 +2299,18 @@ public sealed class RunService
 
         run.Phase = RunPhase.Bonus;
         run.BonusStartedElapsedMs = run.ActiveElapsedMs;
+        _bonusBeatAtMonotonicMs.Clear();
+        _bonusTargetLostSinceMonotonicMs = null;
         run.BonusGame = new BonusGameRecord
         {
             Phase = BonusGamePhase.Intro,
             StartedElapsedMs = run.ActiveElapsedMs,
             IntroEndsElapsedMs = run.ActiveElapsedMs + BonusIntroMilliseconds,
             PointsPerPress = settings.PointsPerPress,
-            Sequence = 1
+            // Each round's numbers start from a fresh random base. Buttons remember the number
+            // they were last hit on (and the intro they played); when every round restarted at
+            // 1, a button could mistake a new target for one it had already hit and stay dark.
+            Sequence = Random.Shared.Next(1_000, 1_000_000_000)
         };
         return true;
     }
@@ -2239,11 +2338,47 @@ public sealed class RunService
                 }
 
                 bonus.FirstTargetElapsedMs = now;
-                CueNextBonusTarget(run, now);
+                if (!CueNextBonusTarget(run, now))
+                {
+                    EndBonusRoundAndRun(run, "no-buttons", now);
+                    return true;
+                }
                 SoundCueRequested?.Invoke(SoundCue.BonusStart);
                 run.Revision++;
                 SaveCurrentRun(run);
                 return true;
+            }
+
+            // Like the Speed game: a button that dies (its power switch, a flat battery) is a
+            // hardware problem, not a player miss. A lit button that never shows the target,
+            // or goes silent, is swapped for another one without penalty.
+            var monotonicNow = _clock.MonotonicMilliseconds;
+            var target = bonus.TargetDeviceId;
+            if (bonus.TargetAwaitingReady)
+            {
+                // The window doesn't run until the button confirms it is lit.
+                bonus.TargetStartElapsedMs = now;
+                if (monotonicNow - _bonusCuedAtMonotonicMs >= BonusReadyTimeoutMilliseconds)
+                {
+                    return ReplaceBonusTarget(run, now);
+                }
+                return false;
+            }
+
+            if (target is not null && IsBonusBeatCapable(target))
+            {
+                if (!IsBonusButtonAlive(target, BonusTargetAliveMilliseconds))
+                {
+                    _bonusTargetLostSinceMonotonicMs ??= monotonicNow;
+                    if (monotonicNow - _bonusTargetLostSinceMonotonicMs >= BonusTargetLostGraceMilliseconds)
+                    {
+                        return ReplaceBonusTarget(run, now);
+                    }
+                }
+                else
+                {
+                    _bonusTargetLostSinceMonotonicMs = null;
+                }
             }
 
             if (bonus.TargetDeadlineElapsedMs is not long deadline || now <= deadline + BonusMissGraceMilliseconds)
@@ -2251,16 +2386,90 @@ public sealed class RunService
                 return false;
             }
 
+            if (target is not null && IsBonusBeatCapable(target) && !IsBonusButtonAlive(target, BonusTargetAliveMilliseconds))
+            {
+                // It disappeared right at the deadline: not the player's miss.
+                return ReplaceBonusTarget(run, now);
+            }
+
             // Missed: the run ends at the moment the window closed.
-            run.ActiveElapsedMs = Math.Max(deadline, run.LastAcceptedInputElapsedMs);
-            EndBonusGame(run, "miss", run.ActiveElapsedMs);
-            MarkFinishedUnrecorded(run);
-            run.FinishedAt = _clock.UtcNow;
-            run.Revision++;
-            _lastDisplayedRun = run;
-            UpdateDeviceLeds();
-            SaveCurrentRun(run);
+            EndBonusRoundAndRun(run, "miss", Math.Max(deadline, run.LastAcceptedInputElapsedMs));
             return true;
+        }
+    }
+
+    private void EndBonusRoundAndRun(RunRecord run, string reason, long endedElapsedMs)
+    {
+        run.ActiveElapsedMs = endedElapsedMs;
+        EndBonusGame(run, reason, run.ActiveElapsedMs);
+        MarkFinishedUnrecorded(run);
+        run.FinishedAt = _clock.UtcNow;
+        run.Revision++;
+        _lastDisplayedRun = run;
+        UpdateDeviceLeds();
+        SaveCurrentRun(run);
+    }
+
+    // Lights a different button in place of one that stopped answering. If no button is left
+    // answering, the round ends ("no-buttons") rather than counting a miss.
+    private bool ReplaceBonusTarget(RunRecord run, long now)
+    {
+        var bonus = run.BonusGame!;
+        bonus.TargetsReplaced++;
+        if (!CueNextBonusTarget(run, now, excludeCurrent: true))
+        {
+            EndBonusRoundAndRun(run, "no-buttons", now);
+            return true;
+        }
+        run.Revision++;
+        SaveCurrentRun(run);
+        return true;
+    }
+
+    // Bonus-round heartbeats: buttons send them all round (with the target they're showing).
+    // Only buttons that have sent one are held to them, so older button firmware and the
+    // virtual tiles keep working as before.
+    private readonly Dictionary<string, long> _bonusBeatAtMonotonicMs = new(StringComparer.OrdinalIgnoreCase);
+    private long _bonusCuedAtMonotonicMs;
+    private long? _bonusTargetLostSinceMonotonicMs;
+    public const long BonusButtonAliveMilliseconds = 3_500;
+    public const long BonusTargetAliveMilliseconds = 1_800;
+    public const long BonusReadyTimeoutMilliseconds = 1_500;
+    public const long BonusTargetLostGraceMilliseconds = 1_000;
+
+    private bool IsBonusBeatCapable(string deviceId) => _bonusBeatAtMonotonicMs.ContainsKey(deviceId);
+
+    private bool IsBonusButtonAlive(string deviceId, long withinMs) =>
+        _bonusBeatAtMonotonicMs.TryGetValue(deviceId, out var at) && _clock.MonotonicMilliseconds - at <= withinMs;
+
+    // A bonus heartbeat from a button, with the target sequence it is showing (0 if none).
+    // Returns true when the buttons need a fresh status (the lit button confirmed it).
+    public bool ReceiveBonusBeat(string runToken, string deviceId, uint shownSequence)
+    {
+        lock (_gate)
+        {
+            RefreshActiveClock();
+            var run = _current;
+            if (run is not { Status: RunStatus.Active, BonusGame: { Phase: not BonusGamePhase.Ended } bonus } ||
+                !string.Equals(MasterProtocolCodec.GetGarageRunToken(run.Id), runToken, StringComparison.Ordinal) ||
+                run.Events.All(e => !string.Equals(e.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            _bonusBeatAtMonotonicMs[deviceId] = _clock.MonotonicMilliseconds;
+            if (bonus is { Phase: BonusGamePhase.Target, TargetAwaitingReady: true } &&
+                string.Equals(bonus.TargetDeviceId, deviceId, StringComparison.OrdinalIgnoreCase) &&
+                shownSequence == (uint)bonus.Sequence)
+            {
+                bonus.TargetAwaitingReady = false;
+                bonus.TargetStartElapsedMs = run.ActiveElapsedMs;
+                _bonusTargetLostSinceMonotonicMs = null;
+                run.Revision++;
+                SaveCurrentRun(run);
+                return true;
+            }
+            return false;
         }
     }
 
@@ -2284,17 +2493,25 @@ public sealed class RunService
         }
     }
 
-    private void CueNextBonusTarget(RunRecord run, long now)
+    // Lights the next button. Buttons that send bonus heartbeats are picked only while they're
+    // still answering, and wait for the button to confirm before the window runs. Returns false
+    // if no button can be lit.
+    private bool CueNextBonusTarget(RunRecord run, long now, bool excludeCurrent = false)
     {
         var bonus = run.BonusGame!;
         var settings = run.Edition.BonusGame ?? new BonusGameSettings();
         var candidates = run.Events
             .Where(e => bonus.RespondingDeviceIds.Count == 0 ||
                 bonus.RespondingDeviceIds.Contains(e.DeviceId, StringComparer.OrdinalIgnoreCase))
+            .Where(e => !IsBonusBeatCapable(e.DeviceId) || IsBonusButtonAlive(e.DeviceId, BonusButtonAliveMilliseconds))
             .ToList();
-        if (candidates.Count > 1)
+        if (excludeCurrent || candidates.Count > 1)
         {
             candidates.RemoveAll(e => e.EventId == bonus.TargetEventId);
+        }
+        if (candidates.Count == 0)
+        {
+            return false;
         }
 
         var target = candidates[Random.Shared.Next(candidates.Count)];
@@ -2304,6 +2521,10 @@ public sealed class RunService
         bonus.TargetDeviceId = target.DeviceId;
         bonus.TargetStartElapsedMs = now;
         bonus.TargetWindowMs = settings.WindowForBonusElapsed(now - (bonus.FirstTargetElapsedMs ?? now));
+        bonus.TargetAwaitingReady = IsBonusBeatCapable(target.DeviceId);
+        _bonusCuedAtMonotonicMs = _clock.MonotonicMilliseconds;
+        _bonusTargetLostSinceMonotonicMs = null;
+        return true;
     }
 
     private MessageDisposition ApplyBonusPress(RunRecord run, EventRecord eventResult, InputEnvelope envelope, out string reason)
@@ -2321,14 +2542,16 @@ public sealed class RunService
             return MessageDisposition.InvalidSignal;
         }
 
+        // A press on a lit button that hasn't confirmed yet proves it is showing the target;
+        // its window hadn't started, so the time checks don't apply.
         var pressedAt = envelope.ElapsedMilliseconds;
-        if (pressedAt < bonus.TargetStartElapsedMs)
+        if (!bonus.TargetAwaitingReady && pressedAt < bonus.TargetStartElapsedMs)
         {
             reason = "Press came before this bonus button was lit.";
             return MessageDisposition.StaleTimestamp;
         }
 
-        if (pressedAt > bonus.TargetDeadlineElapsedMs)
+        if (!bonus.TargetAwaitingReady && pressedAt > bonus.TargetDeadlineElapsedMs)
         {
             reason = "Press came after this bonus button's window closed.";
             return MessageDisposition.InvalidSignal;
@@ -2336,7 +2559,15 @@ public sealed class RunService
 
         bonus.Hits++;
         reason = $"Bonus hit {bonus.Hits} on '{eventResult.Name}'.";
-        CueNextBonusTarget(run, run.ActiveElapsedMs);
+        if (!CueNextBonusTarget(run, run.ActiveElapsedMs))
+        {
+            // Nothing left to light: the hit counts and the round ends.
+            EndBonusGame(run, "no-buttons", run.ActiveElapsedMs);
+            MarkFinishedUnrecorded(run);
+            run.FinishedAt = _clock.UtcNow;
+            _lastDisplayedRun = run;
+            reason += " No other button is answering, so the round is over.";
+        }
         return MessageDisposition.Accepted;
     }
 
@@ -3019,6 +3250,7 @@ public sealed class RunService
         entry.Entry = "";
         entry.WrongAtMonotonicMs = _clock.MonotonicMilliseconds;
         entry.CorrectAtMonotonicMs = null;
+        SoundCueRequested?.Invoke(SoundCue.KeypadWrong);
     }
 
     private InputResult RecordAccepted(InputEnvelope envelope, RunRecord run, string reason, string? payloadJson)
@@ -3134,7 +3366,11 @@ public sealed class RunService
             return;
         }
 
-        _current.ActiveElapsedMs = _current.Edition.DurationLimitSeconds * 1000L;
+        var limitMs = _current.Edition.DurationLimitSeconds * 1000L;
+        // The clock is noticed past the limit on the next tick; the run really ended that much earlier.
+        var overshootMs = Math.Max(0, _current.ActiveElapsedMs - limitMs);
+        _current.ActiveElapsedMs = limitMs;
+        NoteClockFrozen(_current, overshootMs);
         EndBonusGame(_current, "timeout", _current.ActiveElapsedMs);
         _current.Status = RunStatus.TimedOut;
         _current.FinishedAt = _clock.UtcNow;

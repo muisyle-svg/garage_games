@@ -394,9 +394,14 @@ public sealed class BonusGameRecord
     public string? TargetDeviceId { get; set; }
     public long? TargetStartElapsedMs { get; set; }
     public long? TargetWindowMs { get; set; }
+    // The lit button hasn't confirmed it is showing the target yet (buttons with bonus
+    // heartbeats only). Its window doesn't run until it does, like the Speed game's READY.
+    public bool TargetAwaitingReady { get; set; }
+    // Times a lit button went silent (or never showed the target) and another was lit instead.
+    public int TargetsReplaced { get; set; }
     public int Hits { get; set; }
     public int PointsPerPress { get; set; }
-    // "miss", "timeout", or "operator"; set when the round ends.
+    // "miss", "timeout", "operator", or "no-buttons" (every live button dropped); set when the round ends.
     public string? EndReason { get; set; }
     public long? EndedElapsedMs { get; set; }
     // Hits x points per press, set when the round ends (and recalculated by corrections).
