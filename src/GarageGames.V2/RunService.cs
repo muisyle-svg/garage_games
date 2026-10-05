@@ -108,6 +108,18 @@ public sealed class RunService
     // only their finish signal differs.
     private static bool IsButtonEvent(EventKind kind) => kind is EventKind.Standard or EventKind.Keypad;
 
+    // Events that are started and finished during a run and count toward "every event done"
+    // (which ends the run or starts the bonus speed round). A magnetic arcade (Chaos Heist)
+    // event counts here, but it has no button to light, so it is never a bonus target.
+    private static bool IsTimedEvent(EventKind kind) => IsButtonEvent(kind) || kind == EventKind.MagneticArcade;
+
+    // Arcade signals (all emeralds placed / 20th ring) belong only to a magnetic arcade event;
+    // every other physical input belongs only to a button or keypad event.
+    private static bool AcceptsPhysicalInput(EventKind kind, string inputType) =>
+        inputType.StartsWith("arcade-", StringComparison.Ordinal)
+            ? kind == EventKind.MagneticArcade
+            : IsButtonEvent(kind);
+
     private KeypadEntryState KeypadEntryFor(RunRecord run, EventRecord eventResult)
     {
         foreach (var stale in _keypadEntries.Where(pair => pair.Value.RunId != run.Id).Select(pair => pair.Key).ToList())
@@ -388,7 +400,7 @@ public sealed class RunService
                 : (run.Events.SingleOrDefault(item => item.EventId == eventId)
                     ?? throw new CommandException("That event is not part of this run.")).Name;
             var reopenRun = !isBonus && isCurrent && run.Status == RunStatus.Finished &&
-                run.Events.All(item => IsButtonEvent(item.Type));
+                run.Events.All(item => IsTimedEvent(item.Type));
             var request = new EditRunRequest
             {
                 ExpectedRevision = expectedRevision,
@@ -526,7 +538,7 @@ public sealed class RunService
             _keypadEntries.Remove(candidateEvent.EventId);
 
             var reopenRun = candidate.Status == RunStatus.Finished &&
-                run.Events.All(item => IsButtonEvent(item.Type));
+                run.Events.All(item => IsTimedEvent(item.Type));
             if (reopenRun)
             {
                 candidate.Status = RunStatus.Active;
@@ -662,7 +674,8 @@ public sealed class RunService
         }
 
         var events = run.Events
-            .Where(eventResult => IsButtonEvent(eventResult.Type) && MasterProtocolCodec.IsValidDeviceId(eventResult.DeviceId))
+            .Where(eventResult => (IsButtonEvent(eventResult.Type) || eventResult.Type == EventKind.MagneticArcade) &&
+                MasterProtocolCodec.IsValidDeviceId(eventResult.DeviceId))
             .OrderBy(eventResult => eventResult.DeviceId, StringComparer.OrdinalIgnoreCase)
             .Select(eventResult => new MasterGarageEventStatus(token, run.Revision, eventResult.DeviceId,
                 eventResult.Status switch
@@ -1174,14 +1187,19 @@ public sealed class RunService
             // Players finish a keypad event only with its code; the operator's second tap is
             // the override for a stuck player or a broken keypad.
             var keypadOverride = eventResult is { Type: EventKind.Keypad, Status: EventStatus.Active };
+            // An arcade station's tile is the operator's fallback for its emerald and ring
+            // signals (a broken sensor or radio): the first tap starts it, the second finishes it.
+            var arcadeType = eventResult.Type == EventKind.MagneticArcade
+                ? eventResult.Status == EventStatus.Pending ? "arcade-start" : "arcade-finish"
+                : null;
             using var payload = JsonDocument.Parse("{}");
             return ReceiveCore(new InputEnvelope
             {
-                MessageId = NewId(keypadOverride ? "virtual-keypad-override" : "virtual-press"),
+                MessageId = NewId(keypadOverride ? "virtual-keypad-override" : arcadeType is null ? "virtual-press" : "virtual-arcade"),
                 SessionId = run.Id,
                 RunId = run.Id,
                 DeviceId = eventResult.DeviceId,
-                Type = keypadOverride ? "keypad-success" : "event-press",
+                Type = arcadeType ?? (keypadOverride ? "keypad-success" : "event-press"),
                 ElapsedMilliseconds = run.ActiveElapsedMs,
                 Payload = payload.RootElement.Clone()
             }, trustedVirtual: true);
@@ -1507,6 +1525,26 @@ public sealed class RunService
         }
     }
 
+    // The Chaos Heist station sends "S" once all seven emeralds are placed and "F" on the
+    // 20th ring. Both go through the same session, run-token, duplicate, pause, and late-press
+    // checks as a button press, and the reply carries the event state back to the station.
+    public MasterPhysicalPressResult ReceivePhysicalArcadeInput(MasterArcadeInput input, bool sessionAllowed)
+    {
+        lock (_gate)
+        {
+            return ReceivePhysicalSpokeInput(input.BootToken, input.RunToken, input.DeviceId, input.Sequence,
+                input.AgeMilliseconds, MasterProtocolCodec.GetArcadeMessageId(input.RunToken, input.DeviceId, input.Sequence),
+                input.Finish ? "arcade-finish" : "arcade-start", new
+                {
+                    bootToken = input.BootToken,
+                    token = input.RunToken,
+                    mac = input.DeviceId,
+                    sequence = input.Sequence,
+                    signal = input.Finish ? "finish" : "start"
+                }, sessionAllowed);
+        }
+    }
+
     private MasterPhysicalPressResult ReceivePhysicalSpokeInput(string bootToken, string runToken, string deviceId,
         uint sequence, uint ageMilliseconds, string messageId, string type, object payload, bool sessionAllowed)
     {
@@ -1559,7 +1597,7 @@ public sealed class RunService
             if (frozenRun is not null && LatePressElapsed(frozenRun, deviceId, ageMilliseconds) is long lateElapsed &&
                 frozenRun.Events.SingleOrDefault(eventItem =>
                     string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase)) is { } lateEvent &&
-                IsButtonEvent(lateEvent.Type))
+                AcceptsPhysicalInput(lateEvent.Type, type))
             {
                 envelope.ElapsedMilliseconds = lateElapsed;
                 var late = ReceiveCore(envelope, trustedVirtual: true, lateRun: frozenRun);
@@ -1592,10 +1630,12 @@ public sealed class RunService
 
             var eventResult = run.Events.SingleOrDefault(eventItem =>
                 string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
-            if (eventResult is null || !IsButtonEvent(eventResult.Type))
+            if (eventResult is null || !AcceptsPhysicalInput(eventResult.Type, type))
             {
                 return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.UnknownStation,
-                    "Physical spoke MAC is not assigned to a button or keypad event in this run.", payloadJson), run, deviceId, messageId);
+                    type.StartsWith("arcade-", StringComparison.Ordinal)
+                        ? "Arcade station MAC is not assigned to a magnetic arcade event in this run."
+                        : "Physical spoke MAC is not assigned to a button or keypad event in this run.", payloadJson), run, deviceId, messageId);
             }
 
             var device = _data.Devices.SingleOrDefault(deviceItem =>
@@ -2248,7 +2288,7 @@ public sealed class RunService
                 // A late press counts toward a timed-out run, which stays timed out.
                 reason += " (pressed before time ran out; arrived just after)";
             }
-            else if (run.AllEventsCompleted && run.Events.All(e => IsButtonEvent(e.Type)))
+            else if (run.AllEventsCompleted && run.Events.All(e => IsTimedEvent(e.Type)))
             {
                 if (TryStartBonusGame(run))
                 {
@@ -2501,6 +2541,7 @@ public sealed class RunService
         var bonus = run.BonusGame!;
         var settings = run.Edition.BonusGame ?? new BonusGameSettings();
         var candidates = run.Events
+            .Where(e => IsButtonEvent(e.Type))
             .Where(e => bonus.RespondingDeviceIds.Count == 0 ||
                 bonus.RespondingDeviceIds.Contains(e.DeviceId, StringComparer.OrdinalIgnoreCase))
             .Where(e => !IsBonusBeatCapable(e.DeviceId) || IsBonusButtonAlive(e.DeviceId, BonusButtonAliveMilliseconds))
@@ -3717,7 +3758,7 @@ public sealed class RunService
             result.Score = CalculateScore(result, candidate.Edition);
         }
 
-        if (candidate.AllEventsCompleted && candidate.Events.All(e => IsButtonEvent(e.Type)))
+        if (candidate.AllEventsCompleted && candidate.Events.All(e => IsTimedEvent(e.Type)))
         {
             // A correction made during the bonus round leaves the round running.
             if (candidate.BonusGame is not { Phase: not BonusGamePhase.Ended } ||

@@ -90,6 +90,12 @@ public sealed record MasterButtonTestPress(string BootToken, string DeviceId, ui
 public sealed record MasterKeypadInput(string BootToken, string RunToken, string DeviceId, uint Sequence,
     bool Submit, string Entry, uint AgeMilliseconds = 0);
 
+// A magnetic arcade station (the Chaos Heist emerald shrine) reports its two gameplay
+// signals through the master: Finish = false when all seven emeralds are placed, true when
+// the 20th ring is entered. Both are acknowledged with the same GG1 RESULT line as presses.
+public sealed record MasterArcadeInput(string BootToken, string RunToken, string DeviceId, uint Sequence,
+    bool Finish, uint AgeMilliseconds = 0);
+
 public sealed record MasterPhysicalPressResult(string State, MessageDisposition Disposition, string Reason);
 
 public sealed record MasterScanReply(string ScanId, string Kind, string? DeviceId, int? Count);
@@ -132,6 +138,9 @@ public static class MasterProtocolCodec
 
     public static string GetKeypadSubmitMessageId(string runToken, string deviceId, uint sequence) =>
         $"spoke-keypad:{runToken}:{deviceId}:{sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+    public static string GetArcadeMessageId(string runToken, string deviceId, uint sequence) =>
+        $"spoke-arcade:{runToken}:{deviceId}:{sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
     public static string? GetGarageRunToken(string? runId)
     {
@@ -196,6 +205,9 @@ public static class MasterProtocolCodec
     }
 
     public static string FormatKeypadResult(MasterKeypadInput input, string state) =>
+        $"GG1 RESULT {input.RunToken} {input.DeviceId} {input.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)} {state}";
+
+    public static string FormatArcadeResult(MasterArcadeInput input, string state) =>
         $"GG1 RESULT {input.RunToken} {input.DeviceId} {input.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)} {state}";
 
     public static string FormatButtonTest(MasterButtonTestPress press) =>
@@ -272,6 +284,28 @@ public static class MasterProtocolCodec
         }
 
         input = new MasterKeypadInput(parts[2], parts[3], parts[4], sequence, parts[6] == "S", entry, ageMilliseconds);
+        return true;
+    }
+
+    // GG1 ARCADE <bootToken> <runToken> <mac> <sequence> <S|F> <ageMs>
+    public static bool TryParseArcadeInput(string line, out MasterArcadeInput input)
+    {
+        input = null!;
+        if (line.Length > MaximumLineLength)
+        {
+            return false;
+        }
+
+        var parts = line.Split(' ');
+        if (parts.Length != 8 || parts[0] != "GG1" || parts[1] != "ARCADE" ||
+            !IsValidBootToken(parts[2]) || !IsUpperHex(parts[3], 16) || !IsUpperHex(parts[4], 12) ||
+            !TryParseDecimalUInt(parts[5], out var sequence) || sequence == 0 ||
+            parts[6] is not ("S" or "F") || !TryParseDecimalUInt(parts[7], out var ageMilliseconds))
+        {
+            return false;
+        }
+
+        input = new MasterArcadeInput(parts[2], parts[3], parts[4], sequence, parts[6] == "F", ageMilliseconds);
         return true;
     }
 
@@ -407,7 +441,21 @@ public sealed class MasterProtocolState
     public bool ProcessLine(string line, Func<string, ulong, bool, InputResult> receiveStart,
         Func<MasterPhysicalPress, bool, MasterPhysicalPressResult>? receivePhysicalPress,
         Func<MasterKeypadInput, bool, MasterPhysicalPressResult?>? receiveKeypad)
+        => ProcessLine(line, receiveStart, receivePhysicalPress, receiveKeypad, null);
+
+    public bool ProcessLine(string line, Func<string, ulong, bool, InputResult> receiveStart,
+        Func<MasterPhysicalPress, bool, MasterPhysicalPressResult>? receivePhysicalPress,
+        Func<MasterKeypadInput, bool, MasterPhysicalPressResult?>? receiveKeypad,
+        Func<MasterArcadeInput, bool, MasterPhysicalPressResult>? receiveArcade)
     {
+        if (MasterProtocolCodec.TryParseArcadeInput(line, out var arcade))
+        {
+            LastMessage = line;
+            var sessionAllowed = string.Equals(BootToken, arcade.BootToken, StringComparison.Ordinal) && Mode == MasterMode.Idle;
+            receiveArcade?.Invoke(arcade, sessionAllowed);
+            return true;
+        }
+
         if (MasterProtocolCodec.TryParseKeypadInput(line, out var keypad))
         {
             LastMessage = line;

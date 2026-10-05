@@ -30,7 +30,8 @@ app. The current `GG1` serial protocol runs at 115200 baud; a five-second master
 button hold enters the existing Speed game when no Garage run is active or
 paused. Regular and keypad Garage events can receive physical spoke presses
 over ESP-NOW (see "Keypad events" below); magnetic special events and bonus
-rounds remain future work. The app runs locally and has no Google Sheets or
+rounds remain future work, except the Chaos Heist arcade event (see "Chaos Heist
+arcade event" below). The app runs locally and has no Google Sheets or
 other network-service dependency.
 
 The combined Garage Games/Speed Button master and spoke sketches are in
@@ -349,8 +350,8 @@ arrival, capped at 10 seconds and never earlier than the start of the current
 active stretch. Spoke press sequences start from a random value each session,
 so a spoke that reboots mid-run cannot reuse a sequence the app already
 recorded. Flash the master and spokes together: an older master rejects the
-new press format. Future work includes magnetic special-event messages. This
-design does not use Google Sheet row IDs or Wi-Fi. Battery-powered spokes must
+new press format. Magnetic arcade (Chaos Heist) messages are described under
+"Chaos Heist arcade event". This design does not use Google Sheet row IDs or Wi-Fi. Battery-powered spokes must
 keep their radio listening to receive a wireless start; deep sleep cannot
 receive that start signal.
 
@@ -480,3 +481,56 @@ recorded along with which messages each run drew. The typed-so-far entry shown
 on the TV is display-only and is not saved. The spoke sketch detects the keypad
 automatically, so the same `garage_games_spoke` sketch runs on every button;
 flash the master and spokes together when updating to this protocol.
+
+## Chaos Heist arcade event
+
+The Chaos Heist emerald shrine (repository `magnetic-arcade-sensor`) can be one
+of the run's events. The seven Chaos Emerald sensors and the coin slot take the
+place of a start/stop button. Seven emeralds in place starts the event's timer,
+and the 20th ring finishes it. The app owns the timing and scoring exactly as
+it does for any button event. The shrine runs on its own Windows PC with the
+ChaosHeist app; the two computers are not networked. Everything travels through
+the master over ESP-NOW channel 1:
+
+- The shrine's ESP32 listens to the master's run broadcasts (`GARAGE:3:...`)
+  and its own event state (`GSTATE:3:...`), and relays them to ChaosHeist over
+  USB.
+- When ChaosHeist sees the seventh emerald (after a confirmed empty shrine for
+  this run) or the 20th ring, the ESP32 sends `GARC:3:<runToken>:<seq>:<S|F>:<ageMs>`
+  and repeats it every 250 ms until answered, for up to about 6 seconds.
+- The master relays it as `GG1 ARCADE <bootToken> <runToken> <mac> <seq> <S|F> <ageMs>`
+  only for the current run while it is active, paused, or just timed out. The
+  app records it as `arcade-start` or `arcade-finish` through the same checks as
+  a physical press: master handshake, run token, station MAC and event type,
+  duplicate message ID, pause, timeout, and late-arrival timing by age. It
+  answers with the usual `GG1 RESULT ... <PENDING|ACTIVE|COMPLETED|REJECTED>`,
+  which the master forwards to the station.
+- A repeated or duplicate start never restarts the timer, a finish before the
+  start is rejected, and extra finishes are ignored. A signal sent while the
+  run is armed, counting down, or paused is turned down; the competitor then
+  lifts and replaces one emerald once the run is going. A 20th ring that lands
+  just before a pause or the buzzer still counts by its age.
+
+Setup:
+
+1. Flash the updated `firmware/garage_games_master` sketch to the master.
+   Button spokes don't need reflashing; the arcade messages are additions to
+   the existing protocol.
+2. Flash the updated `ChaosHeistController` sketch from the ChaosHeist folder
+   to the shrine's XIAO (board `XIAO_ESP32C3`, **USB CDC On Boot: Enabled**).
+   Wiring is unchanged.
+3. In **Setup**, add an event (for example "Chaos Heist") and set its type to
+   **Chaos Heist (emeralds + rings)**. To assign the shrine's MAC, click
+   **Assign** on that event and press **Send ID to Garage Games** in the
+   ChaosHeist control panel, or type the MAC shown in that panel. Save setup.
+   The shrine must be on and in range; with no run underway, it answers
+   **Scan devices** like a button.
+4. On the shrine's PC, start ChaosHeist and press **Garage Games Mode**.
+
+During a run the event's tile works as an operator fallback, as it does for a
+keypad event. The first tap starts the event and the second finishes it, so a
+failed sensor or radio never blocks a run. The Chaos Heist event counts toward
+"every event done": finishing it (with all the others) starts the bonus speed
+round when the bonus round is enabled in Setup, or finishes the run when it is
+not. The shrine has no button to light, so the speed round only ever targets
+the regular and keypad buttons, and its tile never counts as a bonus hit.

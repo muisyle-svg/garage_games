@@ -866,7 +866,7 @@
       const kind = make("label", "setup-event-kind");
       kind.append(make("span", "", "Event type"));
       const kindSelect = make("select");
-      const kindOptions = [["standard", "Regular"], ["keypad", "Keypad code"]];
+      const kindOptions = [["standard", "Regular"], ["keypad", "Keypad code"], ["magneticArcade", "Chaos Heist (emeralds + rings)"]];
       if (!kindOptions.some(([value]) => value === event.type)) kindOptions.push([event.type, event.type === "magneticArcade" ? "Magnetic arcade" : titleCase(event.type)]);
       kindOptions.forEach(([value, label]) => {
         const option = make("option", "", label);

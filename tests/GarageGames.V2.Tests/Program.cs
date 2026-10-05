@@ -62,6 +62,10 @@ var tests = new (string Name, Action Run)[]
     ("corrections cannot create unfinished history or count paused time", CorrectionsCannotCorruptRunLifecycle),
     ("physical press age back-dates presses within the current active stretch", PhysicalPressAgeBackdatesWithinActiveTime),
     ("keypad protocol lines parse strictly and '*' is never part of an entry", KeypadProtocolParsing),
+    ("arcade station lines parse strictly and answer with the shared RESULT line", ArcadeProtocolParsing),
+    ("the Chaos Heist arcade station starts on emeralds, finishes on rings, once each, via the master", PhysicalArcadeStationFlow),
+    ("arcade signals respect pause and late arrival, and the tile is an operator fallback", ArcadePauseLateAndVirtualFallback),
+    ("an arcade event counts toward the bonus round but is never a bonus target", ArcadeEventStartsBonusButIsNeverATarget),
     ("physical keypad spoke starts, rejects wrong codes, shows typing on the TV, and finishes on the code", PhysicalKeypadCodeFlow),
     ("operator tap overrides a running keypad event and keypad runs auto-finish", KeypadOperatorOverrideAndAutoFinish),
     ("keypad events undo their code finish and their start like regular events", KeypadEventUndo),
@@ -2369,6 +2373,231 @@ static void KeypadProtocolParsing()
     Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 9 S D5", out _));
     Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 9 S  0", out _));
     Assert.Equal($"GG1 RESULT {token} 001122334455 7 ACTIVE", MasterProtocolCodec.FormatKeypadResult(submit, "ACTIVE"));
+}
+
+static EditionDefinition MakeArcadeSpokeEdition() => new()
+{
+    EditionId = "arcade-spoke-test-edition",
+    Name = "Arcade spoke test edition",
+    DurationLimitSeconds = 60,
+    Scoring = new ScoringRule(),
+    BonusGame = new BonusGameSettings { Enabled = false },
+    Events =
+    [
+        new EventDefinition { EventId = "regular", Name = "Regular", DeviceId = "AABBCCDDEEFF", Type = EventKind.Standard },
+        new EventDefinition { EventId = "chaos", Name = "Chaos Heist", DeviceId = "001122334455", Type = EventKind.MagneticArcade }
+    ]
+};
+
+static void ArcadeProtocolParsing()
+{
+    const string token = "0123456789ABCDEF";
+    Assert.True(MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 7 S 40", out var start));
+    Assert.True(!start.Finish);
+    Assert.Equal(7u, start.Sequence);
+    Assert.Equal(40u, start.AgeMilliseconds);
+    Assert.Equal("001122334455", start.DeviceId);
+    Assert.True(MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 8 F 0", out var finish));
+    Assert.True(finish.Finish);
+
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 0 S 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 9 X 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 9 S", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 00112233445 9 S 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot 0123456789abcdef 001122334455 9 S 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 -9 S 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 PRESS boot {token} 001122334455 9 0", out _));
+    // Arcade lines are not presses or keypad codes.
+    Assert.True(!MasterProtocolCodec.TryParsePhysicalPress($"GG1 ARCADE boot {token} 001122334455 7 S 40", out _));
+    Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 ARCADE boot {token} 001122334455 7 S 40", out _));
+    Assert.Equal($"GG1 RESULT {token} 001122334455 7 ACTIVE", MasterProtocolCodec.FormatArcadeResult(start, "ACTIVE"));
+    Assert.Equal($"spoke-arcade:{token}:001122334455:7", MasterProtocolCodec.GetArcadeMessageId(token, "001122334455", 7));
+}
+
+static void PhysicalArcadeStationFlow()
+{
+    const string regularMac = "AABBCCDDEEFF";
+    const string arcadeMac = "001122334455";
+    using var h = new TestHarness(MakeArcadeSpokeEdition(), NewPath(), simulatedDevicesOnline: false);
+    // The arcade station missed the scan; a valid signal from it is enough to bring it online.
+    h.Service.RecordDeviceScan(true, true, [regularMac]);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+
+    var protocol = new MasterProtocolState();
+    InputResult ReceiveStart(string boot, ulong sequence, bool allowed) => h.Service.ReceivePhysicalMasterStart(boot, sequence, allowed);
+    MasterPhysicalPressResult? pressResult = null;
+    MasterPhysicalPressResult? arcadeResult = null;
+    MasterPhysicalPressResult ReceivePress(MasterPhysicalPress item, bool allowed) => pressResult = h.Service.ReceivePhysicalSpokePress(item, allowed);
+    MasterPhysicalPressResult ReceiveArcade(MasterArcadeInput item, bool allowed) => arcadeResult = h.Service.ReceivePhysicalArcadeInput(item, allowed);
+    void Line(string line) => protocol.ProcessLine(line, ReceiveStart, ReceivePress, null, ReceiveArcade);
+    EventRecord Arcade() => h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == arcadeMac);
+    Line("GG1 HELLO boot");
+    Line("GG1 MODE IDLE");
+
+    // Armed but not started: seven emeralds cannot start the event.
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 1 S 0");
+    Assert.Equal("REJECTED", arcadeResult!.State);
+    Assert.Equal(EventStatus.Pending, Arcade().Status);
+
+    h.StartRun();
+    // A different master boot (or SPEED mode) is not the current session.
+    Line($"GG1 ARCADE other {token} {arcadeMac} 2 S 0");
+    Assert.Equal("REJECTED", arcadeResult!.State);
+    Assert.Equal(EventStatus.Pending, Arcade().Status);
+
+    // Signals only reach the matching event kind.
+    Line($"GG1 PRESS boot {token} {arcadeMac} 3 0");
+    Assert.Equal(MessageDisposition.UnknownStation, pressResult!.Disposition);
+    Line($"GG1 ARCADE boot {token} {regularMac} 3 S 0");
+    Assert.Equal(MessageDisposition.UnknownStation, arcadeResult!.Disposition);
+    Assert.Equal(EventStatus.Pending, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == regularMac).Status);
+
+    // Twenty rings before the emeralds cannot finish it.
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 4 F 0");
+    Assert.Equal(MessageDisposition.InvalidSignal, arcadeResult!.Disposition);
+    Assert.Equal("REJECTED", arcadeResult.State);
+
+    // All seven emeralds: the event starts at the time they were placed, not when the radio arrived.
+    h.Clock.Advance(TimeSpan.FromSeconds(3));
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 5 S 200");
+    Assert.Equal(MessageDisposition.Accepted, arcadeResult!.Disposition);
+    Assert.Equal("ACTIVE", arcadeResult.State);
+    Assert.Equal<long?>(2_800L, Arcade().StartElapsedMs);
+    Assert.Equal(DeviceAvailability.Online, h.Service.GetOperatorSnapshot().Devices.Single(d => d.DeviceId == arcadeMac).Availability);
+    Assert.Contains(h.Service.GetMasterStatuses().EventSnapshot.Events, item => item.DeviceId == arcadeMac && item.State == "ACTIVE");
+
+    // A radio retry of the same signal is a duplicate and reports the running state again.
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 5 S 260");
+    Assert.Equal(MessageDisposition.Duplicate, arcadeResult!.Disposition);
+    Assert.Equal("ACTIVE", arcadeResult.State);
+    // A second start (for example, emeralds swapped mid-event) never restarts the timer.
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 6 S 0");
+    Assert.Equal(MessageDisposition.InvalidSignal, arcadeResult!.Disposition);
+    Assert.Equal<long?>(2_800L, Arcade().StartElapsedMs);
+    Assert.Equal(EventStatus.Active, Arcade().Status);
+
+    // The 20th ring finishes and scores it exactly once.
+    h.Clock.Advance(TimeSpan.FromSeconds(10));
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 7 F 0");
+    Assert.Equal(MessageDisposition.Accepted, arcadeResult!.Disposition);
+    Assert.Equal("COMPLETED", arcadeResult.State);
+    Assert.Equal<long?>(14_000L, Arcade().FinishElapsedMs);
+    Assert.True(Arcade().Score is not null, "A finished arcade event is scored like any timed event.");
+    var finishedRevision = h.Service.GetOperatorSnapshot().CurrentRun!.Revision;
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 7 F 50");
+    Assert.Equal(MessageDisposition.Duplicate, arcadeResult!.Disposition);
+    Assert.Equal("COMPLETED", arcadeResult.State);
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 8 F 0");
+    Assert.Equal(MessageDisposition.AlreadyCompleted, arcadeResult!.Disposition);
+    Assert.Equal("COMPLETED", arcadeResult.State);
+    Assert.Equal<long?>(14_000L, Arcade().FinishElapsedMs);
+    Assert.Equal(finishedRevision, h.Service.GetOperatorSnapshot().CurrentRun!.Revision);
+
+    // A signal carrying another run's token never touches this run.
+    Line($"GG1 ARCADE boot FEDCBA9876543210 {arcadeMac} 9 S 0");
+    Assert.Equal("REJECTED", arcadeResult!.State);
+    Assert.Equal(1, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Count(e => e.Status == EventStatus.Completed));
+}
+
+static void ArcadePauseLateAndVirtualFallback()
+{
+    const string regularMac = "AABBCCDDEEFF";
+    const string arcadeMac = "001122334455";
+    using var h = new TestHarness(MakeArcadeSpokeEdition(), NewPath(), simulatedDevicesOnline: false);
+    h.Service.RecordDeviceScan(true, true, [regularMac, arcadeMac]);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    MasterPhysicalPressResult Arcade(uint sequence, bool finish, uint ageMs) =>
+        h.Service.ReceivePhysicalArcadeInput(new MasterArcadeInput("boot", token, arcadeMac, sequence, finish, ageMs), sessionAllowed: true);
+    EventRecord Event() => h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).Events.Single(e => e.DeviceId == arcadeMac);
+
+    Assert.Equal(MessageDisposition.Accepted, Arcade(1, false, 0).Disposition);
+
+    // Paused: a 20th ring entered before the pause but arriving after it still counts at its time.
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    h.Service.Pause();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(100));
+    Assert.Equal(MessageDisposition.Paused, Arcade(2, true, 50).Disposition);
+    Assert.Equal(EventStatus.Active, Event().Status);
+    var late = Arcade(3, true, 400);
+    Assert.Equal(MessageDisposition.Accepted, late.Disposition);
+    Assert.Equal("COMPLETED", late.State);
+    Assert.Equal<long?>(4_700L, Event().FinishElapsedMs);
+    h.Service.Resume();
+
+    // The operator can run the same event from its tile when the station is unavailable.
+    using var v = new TestHarness(MakeArcadeSpokeEdition(), NewPath());
+    var virtualRun = v.ArmAndStart();
+    Assert.Equal(MessageDisposition.Accepted, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
+    Assert.Equal(EventStatus.Active, v.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "chaos").Status);
+    v.Clock.Advance(TimeSpan.FromSeconds(4));
+    Assert.Equal(MessageDisposition.Accepted, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
+    var virtualEvent = v.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "chaos");
+    Assert.Equal(EventStatus.Completed, virtualEvent.Status);
+    Assert.Equal<long?>(4_000L, virtualEvent.FinishElapsedMs);
+    Assert.Equal(MessageDisposition.AlreadyCompleted, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
+}
+
+static void ArcadeEventStartsBonusButIsNeverATarget()
+{
+    EditionDefinition Edition(bool bonusEnabled)
+    {
+        var edition = MakeArcadeSpokeEdition();
+        edition.BonusGame = new BonusGameSettings { Enabled = bonusEnabled };
+        edition.Events.Add(new EventDefinition { EventId = "second", Name = "Second", DeviceId = "0A0B0C0D0E0F", Type = EventKind.Standard });
+        return edition;
+    }
+
+    void FinishAllButChaos(TestHarness h, RunRecord run)
+    {
+        h.Service.PressEvent(run.Id, "regular");
+        h.Service.PressEvent(run.Id, "second");
+        h.Service.PressEvent(run.Id, "chaos");
+        h.Clock.Advance(TimeSpan.FromSeconds(1));
+        h.Service.PressEvent(run.Id, "regular");
+        h.Service.PressEvent(run.Id, "second");
+    }
+
+    using (var h = new TestHarness(Edition(bonusEnabled: true), NewPath()))
+    {
+        var run = h.ArmAndStart();
+        FinishAllButChaos(h, run);
+        // Not every event is done yet: no bonus.
+        Assert.Equal<BonusGameRecord?>(null, h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame);
+        // Finishing the Chaos Heist event last starts the bonus round.
+        Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "chaos").Disposition);
+        var current = h.Service.GetOperatorSnapshot().CurrentRun!;
+        Assert.Equal(RunStatus.Active, current.Status);
+        Assert.True(current.BonusGame is not null, "The bonus round starts once every event, including Chaos Heist, is done.");
+
+        // Nothing answered the poll, yet only button events are ever lit.
+        h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+        h.Service.TickBonusGame();
+        for (var hit = 0; hit < 6; hit++)
+        {
+            var target = h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame!.TargetEventId!;
+            Assert.True(target != "chaos", "The Chaos Heist event must never be a bonus target.");
+            // The arcade tile never counts as a bonus hit.
+            Assert.True(h.Service.PressEvent(run.Id, "chaos").Disposition != MessageDisposition.Accepted);
+            h.Clock.Advance(TimeSpan.FromMilliseconds(300));
+            Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, target).Disposition);
+        }
+    }
+
+    // With the bonus round turned off, finishing every event finishes the run.
+    using (var h = new TestHarness(Edition(bonusEnabled: false), NewPath()))
+    {
+        var run = h.ArmAndStart();
+        FinishAllButChaos(h, run);
+        Assert.Equal(RunStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+        h.Service.PressEvent(run.Id, "chaos");
+        var current = h.Service.GetOperatorSnapshot().CurrentRun!;
+        Assert.Equal(RunStatus.Finished, current.Status);
+        Assert.Equal<BonusGameRecord?>(null, current.BonusGame);
+    }
 }
 
 static void PhysicalKeypadCodeFlow()

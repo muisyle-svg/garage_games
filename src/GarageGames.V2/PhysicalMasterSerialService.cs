@@ -531,6 +531,13 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                             pushStatus |= result.Disposition == MessageDisposition.Accepted;
                         }
                         return result;
+                    },
+                    (arcade, sessionAllowed) =>
+                    {
+                        var result = _runs.ReceivePhysicalArcadeInput(arcade, sessionAllowed);
+                        reply = MasterProtocolCodec.FormatArcadeResult(arcade, result.State);
+                        pushStatus |= result.Disposition == MessageDisposition.Accepted;
+                        return result;
                     });
             }
             catch

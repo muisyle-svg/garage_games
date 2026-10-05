@@ -201,8 +201,10 @@ available at the `archive/v1-final` tag.
 5. Editing: precision, and expected interaction when an operator edits during
    incoming presses. The editable scope is intentionally broad; the remaining
    question is the safest operator workflow.
-6. Special events: locate the magnetic sensor source, finalize keypad prompt
-   and validation rules, and define the arcade application's completion signal.
+6. Special events: finalize keypad prompt and validation rules. The magnetic
+   sensor source is the ChaosHeist project (`magnetic-arcade-sensor`); its
+   completion signal is the 20th ring, relayed as `GARC` ... `F` through the
+   master (see README "Chaos Heist arcade event").
    Final Speed Button bonus gameplay may be decided later.
 
 ## Build sequence after interview

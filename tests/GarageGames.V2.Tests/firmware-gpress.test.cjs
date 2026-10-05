@@ -133,7 +133,7 @@ test("bonus heartbeats let the app swap dead buttons, and a new run forgets the 
 
 test("presses for a paused or just-timed-out run still reach the app, which checks their age", () => {
   const relays = master.match(/const bool runStillAnswering = [^;]+;/g) || [];
-  assert.equal(relays.length, 2, "both the press and keypad relays");
+  assert.equal(relays.length, 3, "the press, keypad, and arcade relays");
   relays.forEach((relay) => assert.match(relay, /GARAGE_STATUS_PAUSED[\s\S]*GARAGE_STATUS_TIMED_OUT/));
   assert.match(master, /Serial\.setRxBufferSize\(HOST_RX_BUFFER_BYTES\);/, "the master's serial buffer holds a full status burst");
 });
