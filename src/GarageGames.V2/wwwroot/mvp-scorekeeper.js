@@ -1787,7 +1787,7 @@
   }
 
   function isUndoableEventType(event) {
-    return ["standard", "keypad"].includes(String(event.type || "standard").toLowerCase());
+    return ["standard", "keypad", "magneticarcade"].includes(String(event.type || "standard").toLowerCase());
   }
 
   // Mirrors RunService.IsUndoablePress: the start press while running, or the finishing
@@ -1801,6 +1801,11 @@
       const lastSolved = solved[solved.length - 1];
       if (lastSolved) return ["active", "completed"].includes(status) && lastSolved.solvedByMessageId === message.messageId;
       return status === "active" && message.type === "event-press" && event.startElapsedMs === elapsed && event.finishElapsedMs == null;
+    }
+    if (String(event.type || "").toLowerCase() === "magneticarcade") {
+      return status === "completed"
+        ? message.type === "arcade-finish" && event.finishElapsedMs === elapsed
+        : status === "active" && message.type === "arcade-start" && event.startElapsedMs === elapsed && event.finishElapsedMs == null;
     }
     if (status === "completed") {
       return message.type === "event-press" && event.finishElapsedMs === elapsed && event.lastSignalElapsedMs === elapsed;
@@ -2771,7 +2776,8 @@
     ui.pause.textContent = run?.status === "paused" ? "Resume" : "Pause";
     const undoable = undoableEventPress(run);
     ui.undoPress.disabled = state.busy || !undoable;
-    const undoneKeypadCode = undoable && undoable.message.type !== "event-press";
+    const undoneKeypadCode = undoable && String(undoable.event.type).toLowerCase() === "keypad" &&
+      undoable.message.type !== "event-press";
     ui.undoDetail.textContent = !undoable
       ? "No event press to undo."
       : undoneKeypadCode
@@ -3029,6 +3035,18 @@
       }, `${bonusName(run)} hit on ${event.name}.`);
       void pollBonusLive();
       return;
+    }
+    // The Chaos Heist shrine starts and finishes its own event. While it is responding, a tap
+    // here is an override, so make sure it's meant (a stray tap would start the clock before
+    // the competitor gets there, or end the event mid-rings and play the victory).
+    if (event.type === "magneticArcade" && event.status !== "completed" && physicalReadiness(event).key === "responding") {
+      const finishing = event.status === "active";
+      const confirmed = window.confirm(finishing
+        ? `Finish ${event.name} now from the scorekeeper?\n\n` +
+          "The shrine finishes it by itself at the 20th ring. Finishing here stops its clock now and plays the victory on the arcade. Undo can take it back."
+        : `Start ${event.name} now from the scorekeeper?\n\n` +
+          "The shrine starts it by itself when all seven emeralds are placed. Starting here starts its clock now and the competitor skips the emeralds. Undo can take it back.");
+      if (!confirmed) return;
     }
     await performAction(
       () => request(`/api/runs/${encodeURIComponent(run.id)}/events/${encodeURIComponent(event.eventId)}/press`, { method: "POST" }),

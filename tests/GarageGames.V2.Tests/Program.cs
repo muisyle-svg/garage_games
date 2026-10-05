@@ -2544,6 +2544,15 @@ static void ArcadePauseLateAndVirtualFallback()
     Assert.Equal(EventStatus.Completed, virtualEvent.Status);
     Assert.Equal<long?>(4_000L, virtualEvent.FinishElapsedMs);
     Assert.Equal(MessageDisposition.AlreadyCompleted, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
+
+    // A mistaken tap can be undone like a button press: the finish, then the start.
+    var undoneFinish = v.Service.UndoLastEventPress().Events.Single(e => e.EventId == "chaos");
+    Assert.Equal(EventStatus.Active, undoneFinish.Status);
+    Assert.Equal<long?>(null, undoneFinish.FinishElapsedMs);
+    Assert.Equal<long?>(0L, undoneFinish.StartElapsedMs);
+    var undoneStart = v.Service.UndoEventPress("chaos").Events.Single(e => e.EventId == "chaos");
+    Assert.Equal(EventStatus.Pending, undoneStart.Status);
+    Assert.Equal<long?>(null, undoneStart.StartElapsedMs);
 }
 
 static void ArcadeStationStatusIsShownWhileFresh()

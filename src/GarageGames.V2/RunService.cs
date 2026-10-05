@@ -458,9 +458,9 @@ public sealed class RunService
                 ? null
                 : run.Events.SingleOrDefault(item => item.EventId == eventId)
                     ?? throw new CommandException("That event is not part of this run.");
-            if (requestedEvent is not null && !IsButtonEvent(requestedEvent.Type))
+            if (requestedEvent is not null && !IsTimedEvent(requestedEvent.Type))
             {
-                throw new CommandException("Only button and keypad events can be undone this way; use the scorecard to correct it.");
+                throw new CommandException("Only button, keypad, and Chaos Heist events can be undone this way; use the scorecard to correct it.");
             }
             if (requestedEvent is not null && requestedEvent.Status == EventStatus.Pending)
             {
@@ -472,7 +472,7 @@ public sealed class RunService
                 .Select(message => new
                 {
                     Message = message,
-                    Event = run.Events.SingleOrDefault(item => IsButtonEvent(item.Type) &&
+                    Event = run.Events.SingleOrDefault(item => IsTimedEvent(item.Type) &&
                         string.Equals(item.DeviceId, message.DeviceId, StringComparison.OrdinalIgnoreCase))
                 })
                 .Where(item => item.Event is not null && (requestedEvent is null || item.Event.EventId == requestedEvent.EventId) &&
@@ -604,6 +604,16 @@ public sealed class RunService
             }
             return eventResult.Status == EventStatus.Active && message.Type == "event-press" &&
                 eventResult.StartElapsedMs == elapsed && eventResult.FinishElapsedMs is null;
+        }
+
+        if (eventResult.Type == EventKind.MagneticArcade)
+        {
+            // The shrine's signals or the operator's tile taps: the finish once complete, else
+            // the start while running. The shrine follows the event back (see ChaosHeist).
+            return eventResult.Status == EventStatus.Completed
+                ? message.Type == "arcade-finish" && eventResult.FinishElapsedMs == elapsed
+                : eventResult.Status == EventStatus.Active && message.Type == "arcade-start" &&
+                    eventResult.StartElapsedMs == elapsed && eventResult.FinishElapsedMs is null;
         }
 
         if (eventResult.Status == EventStatus.Completed)
