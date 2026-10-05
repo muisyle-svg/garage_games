@@ -66,6 +66,7 @@ var tests = new (string Name, Action Run)[]
     ("the Chaos Heist arcade station starts on emeralds, finishes on rings, once each, via the master", PhysicalArcadeStationFlow),
     ("arcade signals respect pause and late arrival, and the tile is an operator fallback with a double-tap guard", ArcadePauseLateAndVirtualFallback),
     ("an arcade event counts toward the bonus round but is never a bonus target", ArcadeEventStartsBonusButIsNeverATarget),
+    ("the Chaos Heist shrine's operator status is parsed and shown only while fresh", ArcadeStationStatusIsShownWhileFresh),
     ("physical keypad spoke starts, rejects wrong codes, shows typing on the TV, and finishes on the code", PhysicalKeypadCodeFlow),
     ("operator tap overrides a running keypad event and keypad runs auto-finish", KeypadOperatorOverrideAndAutoFinish),
     ("keypad events undo their code finish and their start like regular events", KeypadEventUndo),
@@ -2543,6 +2544,38 @@ static void ArcadePauseLateAndVirtualFallback()
     Assert.Equal(EventStatus.Completed, virtualEvent.Status);
     Assert.Equal<long?>(4_000L, virtualEvent.FinishElapsedMs);
     Assert.Equal(MessageDisposition.AlreadyCompleted, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
+}
+
+static void ArcadeStationStatusIsShownWhileFresh()
+{
+    Assert.True(MasterProtocolCodec.TryParseArcadeStatus("GG1 ARCSTAT boot 001122334455 C 3", out var clear));
+    Assert.Equal("clear", clear.Attention);
+    Assert.Equal(3, clear.Emeralds);
+    Assert.True(MasterProtocolCodec.TryParseArcadeStatus("GG1 ARCSTAT boot 001122334455 R 7", out var replace));
+    Assert.Equal("replace", replace.Attention);
+    Assert.True(MasterProtocolCodec.TryParseArcadeStatus("GG1 ARCSTAT boot 001122334455 O 0", out var ok));
+    Assert.Equal<string?>(null, ok.Attention);
+    foreach (var bad in new[]
+    {
+        "GG1 ARCSTAT boot 001122334455 X 3",
+        "GG1 ARCSTAT boot 001122334455 C 8",
+        "GG1 ARCSTAT boot 001122334455 C",
+        "GG1 ARCSTAT boot 00112233445 C 3",
+        "GG1 ARCSTAT boot 001122334455 C 3 extra",
+    })
+    {
+        Assert.True(!MasterProtocolCodec.TryParseArcadeStatus(bad, out _), bad);
+    }
+
+    using var h = new TestHarness(MakeArcadeSpokeEdition(), NewPath());
+    Assert.Equal(0, h.Service.GetOperatorSnapshot().ArcadeStations.Count);
+    h.Service.ReceiveArcadeStationStatus(clear);
+    var shown = h.Service.GetOperatorSnapshot().ArcadeStations.Single();
+    Assert.Equal("001122334455", shown.DeviceId);
+    Assert.Equal("clear", shown.Attention);
+    // The shrine repeats it every second; a silent shrine's last request disappears.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.ArcadeStatusFreshMilliseconds + 1));
+    Assert.Equal(0, h.Service.GetOperatorSnapshot().ArcadeStations.Count);
 }
 
 static void ArcadeEventStartsBonusButIsNeverATarget()

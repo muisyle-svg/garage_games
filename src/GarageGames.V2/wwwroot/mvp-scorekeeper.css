@@ -219,6 +219,9 @@ select:disabled, input:disabled { opacity: .58; }
 /* The bonus round's lit button: bright, pulsing, and impossible to miss among the tiles. */
 .virtual-button.is-bonus-target { border-color: #45d19a; background: rgba(69, 209, 154, .18); box-shadow: 0 0 0 3px rgba(69, 209, 154, .55), 0 0 22px rgba(69, 209, 154, .45); animation: bonus-target-pulse .5s ease-in-out infinite alternate; }
 .virtual-button.is-bonus-target .virtual-action-hint { color: #45d19a; font-weight: 950; }
+/* The Chaos Heist shrine needs the operator (emeralds to clear, or one to replace). */
+.virtual-button.is-arcade-warning { border-color: rgba(244, 189, 96, .75); }
+.virtual-button.is-arcade-warning .virtual-action-hint { color: var(--amber) !important; font-weight: 900; }
 @keyframes bonus-target-pulse { from { box-shadow: 0 0 0 2px rgba(69, 209, 154, .4), 0 0 10px rgba(69, 209, 154, .3); } to { box-shadow: 0 0 0 5px rgba(69, 209, 154, .75), 0 0 28px rgba(69, 209, 154, .6); } }
 @media (prefers-reduced-motion: reduce) { .virtual-button.is-bonus-target { animation: none; } }
 @keyframes started-event-flash { 50% { border-color: rgba(244, 189, 96, .28); background: rgba(244, 189, 96, .025); color: var(--amber); } }

@@ -784,6 +784,10 @@ public sealed class RunService
                         string.Equals(device.DeviceId, eventDefinition.DeviceId, StringComparison.OrdinalIgnoreCase)))
                     .Select(Clone)
                     .ToList(),
+                ArcadeStations = _arcadeStations
+                    .Where(pair => _clock.MonotonicMilliseconds - pair.Value.HeardAtMs <= ArcadeStatusFreshMilliseconds)
+                    .Select(pair => pair.Value.Status)
+                    .ToList(),
                 History = _data.Runs.Where(r => !r.IsDeleted).OrderByDescending(r => r.CreatedAt).Select(Listed).ToList(),
                 DeletedRuns = _data.Runs.Where(r => r.IsDeleted).OrderByDescending(r => r.DeletedAt).Select(Listed).ToList(),
                 Messages = _data.Messages.OrderByDescending(m => m.Id).Take(250).Select(Clone).ToList(),
@@ -1522,6 +1526,22 @@ public sealed class RunService
                     sequence = input.Sequence,
                     answer = input.Entry
                 }, sessionAllowed);
+        }
+    }
+
+    // The shrine repeats its status about once a second; anything older is no longer shown.
+    public const long ArcadeStatusFreshMilliseconds = 4_000;
+    private readonly Dictionary<string, (ArcadeStationStatus Status, long HeardAtMs)> _arcadeStations =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    // Display-only: what the shrine wants the operator to do. Kept in memory, never recorded.
+    public void ReceiveArcadeStationStatus(MasterArcadeStatus status)
+    {
+        lock (_gate)
+        {
+            _arcadeStations[status.DeviceId] = (
+                new ArcadeStationStatus(status.DeviceId, status.Attention, status.Emeralds),
+                _clock.MonotonicMilliseconds);
         }
     }
 

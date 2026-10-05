@@ -1988,6 +1988,14 @@
         actionHint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
       }
       if (!identificationMode && useVirtual && event.status !== "completed") actionHint = `Use virtual · ${actionHint}`;
+      // The Chaos Heist shrine's request (clear it, or replace one emerald) replaces the hint
+      // in the same slot, so the tile never changes size.
+      const arcadeNotice = !identificationMode && event.type === "magneticArcade" && event.status !== "completed"
+        ? arcadeAttention(deviceId) : "";
+      if (arcadeNotice) {
+        actionHint = arcadeNotice;
+        button.classList.add("is-arcade-warning");
+      }
       if (bonusRunning) actionHint = bonusName(run);
       button.setAttribute("aria-label", identificationMode
         ? `${event.name}: ${actionHint}.`
@@ -2162,6 +2170,20 @@
       result.classList.add("is-running");
     }
     return result;
+  }
+
+  // What the Chaos Heist shrine with this MAC is asking the operator to do, if anything.
+  function arcadeAttention(deviceId) {
+    if (!deviceId) return "";
+    const station = (state.snapshot?.arcadeStations || [])
+      .find((item) => setupTools.hardwareId(item?.deviceId || "") === deviceId);
+    // Short enough for the one-line hint; the tile's tooltip repeats it.
+    if (station?.attention === "replace") return "Lift & replace 1 emerald";
+    if (station?.attention === "clear") {
+      const count = Number(station.emeralds) || 0;
+      return `Clear shrine · ${count} emerald${count === 1 ? "" : "s"} on`;
+    }
+    return "";
   }
 
   function physicalReadinessKey(event) {

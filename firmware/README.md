@@ -127,5 +127,7 @@ the age. The app's `GG1 RESULT` reply is forwarded as the usual `GRESULT`
 packet. The shrine also answers a Garage Games device scan (only when Garage
 status packets are flowing, so it never joins the Speed game, and only while
 the ChaosHeist app is in Garage Games Mode) and can send
-`GTEST` for Setup's press-to-assign. Reflash the master for this; button spokes
-are unaffected.
+`GTEST` for Setup's press-to-assign. About once a second it also broadcasts
+`GARCS:3:<O|C|R>:<0-7>` (C = emeralds to clear, R = one to replace), which the
+master prints as `GG1 ARCSTAT <bootToken> <mac> <O|C|R> <count>` for the
+operator's tile. Reflash the master for this; button spokes are unaffected.

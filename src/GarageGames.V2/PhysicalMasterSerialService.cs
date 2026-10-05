@@ -468,6 +468,17 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                     return;
                 }
 
+                // The Chaos Heist shrine's status for the operator ("clear the shrine" and so on).
+                if (MasterProtocolCodec.TryParseArcadeStatus(line, out var arcadeStatus))
+                {
+                    if (_protocol.Mode == MasterMode.Idle &&
+                        string.Equals(_protocol.BootToken, arcadeStatus.BootToken, StringComparison.Ordinal))
+                    {
+                        _runs.ReceiveArcadeStationStatus(arcadeStatus);
+                    }
+                    return;
+                }
+
                 if (MasterProtocolCodec.TryParseBonusPollReply(line, out var bonusBootToken, out var bonusRunToken, out var bonusDeviceId))
                 {
                     if (_protocol.Mode == MasterMode.Idle && string.Equals(_protocol.BootToken, bonusBootToken, StringComparison.Ordinal))

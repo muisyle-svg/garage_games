@@ -2112,6 +2112,25 @@ void handleGarageArcade(const RxPacket& packet) {
                 (unsigned long)totalAgeMs);
 }
 
+// GARCS:3:<O|C|R>:<0-7>, the arcade station's status for the operator: C when
+// emeralds must come off the shrine, R when the competitor must lift and
+// replace one. Sent about once a second; relayed as GG1 ARCSTAT whenever the
+// app is listening in Garage Games mode, with or without a run.
+void handleGarageArcadeStatus(const RxPacket& packet) {
+  const uint32_t now = millis();
+  // Exactly "GARCS:3:<flag>:<digit>" (11 bytes).
+  if (packet.len != 11 || memcmp(packet.data, "GARCS:3:", 8) != 0 ||
+      packet.data[9] != ':' || packet.data[10] < '0' || packet.data[10] > '7' ||
+      !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0 ||
+      gameState != IDLE || !hostStatusFresh(now)) return;
+  const char flag = packet.data[8];
+  if (flag != 'O' && flag != 'C' && flag != 'R') return;
+  char macText[13];
+  macToHex(packet.source, macText, sizeof(macText));
+  Serial.printf("GG1 ARCSTAT %lu %s %c %c\n", (unsigned long)bootToken, macText,
+                flag, packet.data[10]);
+}
+
 void processRx() {
   RxPacket packet;
   while (rxQueue && xQueueReceive(rxQueue, &packet, 0) == pdTRUE) {
@@ -2129,6 +2148,10 @@ void processRx() {
     }
     if (strncmp(packet.data, "GARC:", 5) == 0) {
       handleGarageArcade(packet);
+      continue;
+    }
+    if (strncmp(packet.data, "GARCS:", 6) == 0) {
+      handleGarageArcadeStatus(packet);
       continue;
     }
     if (strncmp(packet.data, "GBHELLO:", 8) == 0) {

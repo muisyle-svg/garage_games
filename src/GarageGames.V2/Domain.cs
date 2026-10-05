@@ -604,12 +604,19 @@ public sealed class OperatorSnapshot
     public required List<CompetitorRecord> Competitors { get; set; }
     public required List<QueueItemRecord> Queue { get; set; }
     public required List<DeviceRecord> Devices { get; set; }
+    // What each Chaos Heist shrine is telling the operator right now (heard in the last few
+    // seconds), for example that emeralds must come off before the next competitor.
+    public List<ArcadeStationStatus> ArcadeStations { get; set; } = [];
     public required List<RunRecord> History { get; set; }
     public List<RunRecord> DeletedRuns { get; set; } = [];
     public required List<MessageRecord> Messages { get; set; }
     public required List<EditRecord> Edits { get; set; }
     public required List<LeaderboardRow> Leaderboard { get; set; }
 }
+
+// Attention is "clear" (emeralds must come off the shrine), "replace" (the competitor must
+// lift and replace one emerald), or null when nothing needs doing.
+public sealed record ArcadeStationStatus(string DeviceId, string? Attention, int Emeralds);
 
 public sealed class ScoreboardSnapshot
 {

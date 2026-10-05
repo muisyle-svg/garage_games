@@ -530,6 +530,12 @@ Setup:
    If the shrine shows as not responding, check that ChaosHeist is open and in
    Garage Games Mode.
 
+The event's tile also shows what the shrine needs from the operator, in amber:
+**Clear shrine · N emeralds on** when emeralds are still in place before a
+competitor can start, and **Lift & replace 1 emerald** when all seven went in
+before the run started. The shrine sends this through the master about once a
+second (`GARCS` → `GG1 ARCSTAT`); it is display-only and never recorded.
+
 During a run the event's tile works as an operator fallback, as it does for a
 keypad event. The first tap starts the event and the second finishes it (a
 second tap within half a second is ignored as a double tap), so a

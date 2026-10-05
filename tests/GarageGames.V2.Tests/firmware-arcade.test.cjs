@@ -30,4 +30,14 @@ test("master relays Chaos Heist arcade packets as GG1 ARCADE lines with their ag
   const dispatch = master.match(/void processRx\(\) \{[\s\S]*?\n}\n/);
   assert.ok(dispatch);
   assert.match(dispatch[0], /strncmp\(packet\.data, "GARC:", 5\) == 0[\s\S]*?handleGarageArcade\(packet\)/);
+  assert.match(dispatch[0], /strncmp\(packet\.data, "GARCS:", 6\) == 0[\s\S]*?handleGarageArcadeStatus\(packet\)/);
+});
+
+test("master relays the shrine's operator status as GG1 ARCSTAT lines", () => {
+  const handler = master.match(/void handleGarageArcadeStatus\([\s\S]*?\n}\n/);
+  assert.ok(handler, "status relay handler exists");
+  assert.match(handler[0], /packet\.len != 11/, "exactly GARCS:3:<flag>:<digit>");
+  assert.match(handler[0], /flag != 'O' && flag != 'C' && flag != 'R'/);
+  assert.match(handler[0], /hostStatusFresh\(now\)/, "nothing is relayed while the app is silent");
+  assert.match(handler[0], /GG1 ARCSTAT %lu %s %c %c/);
 });
