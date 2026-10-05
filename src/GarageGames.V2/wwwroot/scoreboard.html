@@ -10,15 +10,15 @@
 <body class="scoreboard-view">
   <main class="scoreboard-shell">
     <header class="scoreboard-header">
-      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true">GG</span><div><p class="eyebrow">Garage Games</p><h1 id="scoreboard-edition">Scoreboard</h1></div></div>
-      <div class="scoreboard-header-meta"><span id="scoreboard-mode" class="mode-badge">Connecting</span><span id="scoreboard-connection" class="connection-status is-stale"><span class="status-dot"></span><span>Connecting</span></span><span id="scoreboard-sync" class="sync-label">No sync yet</span></div>
+      <h1 id="scoreboard-edition" class="scoreboard-title">Scoreboard</h1>
+      <div class="scoreboard-header-meta"><span id="scoreboard-connection" class="connection-status is-stale"><span class="status-dot"></span><span>Connecting</span></span><span id="scoreboard-sync" class="sync-label">No sync yet</span></div>
     </header>
     <div id="scoreboard-stale" class="scoreboard-stale is-hidden" role="status"><strong>Connection lost.</strong> The display is holding its last known state; timer is stale.</div>
     <section class="scoreboard-stage">
       <div class="scoreboard-main">
       <div class="scoreboard-hero">
         <div class="hero-competitor">
-          <p class="eyebrow">Now competing</p>
+          <p id="scoreboard-competitor-label" class="eyebrow">Now competing</p>
           <h2 id="scoreboard-competitor">No active run</h2>
           <div class="scoreboard-category-row"><span id="scoreboard-category" class="category-pill">—</span><span id="scoreboard-phase" class="phase-chip">Waiting</span></div>
         </div>
@@ -37,7 +37,21 @@
         </div>
       </div>
         <section class="scoreboard-events" aria-label="Events">
+          <p id="scoreboard-bonus-summary" class="tv-bonus-summary" hidden></p>
           <div id="scoreboard-events" class="tv-event-grid"><div class="tv-empty">Events will appear when a run is armed.</div></div>
+          <div id="scoreboard-bonus" class="tv-keypad-challenge tv-bonus" role="status" aria-live="polite" hidden>
+            <p id="scoreboard-bonus-name" class="tv-keypad-label">Bonus round</p>
+            <p id="scoreboard-bonus-stats" class="tv-bonus-stats"></p>
+            <p id="scoreboard-bonus-target" class="tv-keypad-prompt tv-bonus-target"></p>
+            <p id="scoreboard-bonus-time" class="tv-bonus-time"></p>
+            <div class="tv-bonus-bar" aria-hidden="true"><span id="scoreboard-bonus-bar-fill"></span></div>
+          </div>
+          <div id="scoreboard-keypad" class="tv-keypad-challenge" role="status" aria-live="polite" hidden>
+            <p id="scoreboard-keypad-event" class="tv-keypad-label">Keypad</p>
+            <div class="tv-keypad-progress" aria-label="Codes solved"><span id="scoreboard-keypad-pips" class="tv-keypad-pips"></span><span id="scoreboard-keypad-count" class="tv-keypad-count"></span></div>
+            <p id="scoreboard-keypad-prompt" class="tv-keypad-prompt"></p>
+            <div class="tv-keypad-entry"><span id="scoreboard-keypad-keys" class="tv-keypad-keys"></span><span id="scoreboard-keypad-hint" class="tv-keypad-hint">Enter the code, then press ✱</span></div>
+          </div>
         </section>
       </div>
         <aside class="scoreboard-side">

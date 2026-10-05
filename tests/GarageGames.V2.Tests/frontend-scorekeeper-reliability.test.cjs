@@ -30,6 +30,8 @@ function makeSaveHarness({ dirty = false, recorded = false } = {}) {
     currentSave: {},
     currentSaveState: {},
     record: {},
+    recordActions: {},
+    reopen: {},
     historySave: {},
     historySaveState: {}
   };
@@ -40,6 +42,7 @@ function makeSaveHarness({ dirty = false, recorded = false } = {}) {
     ui,
     hasDrafts,
     hasBonusDraft,
+    runActions: require("../../src/GarageGames.V2/wwwroot/mvp-scorekeeper-run-actions.js"),
     isLiveLock: () => true
   });
   return { state, ui, hasDrafts, hasBonusDraft, setSaveStates };
@@ -63,16 +66,44 @@ test("a timed-out run's unsaved edits can still be saved and recorded", () => {
   assert.equal(harness.ui.record.textContent, "Save edits & record");
 });
 
-test("Record is enabled for a clean finished run and remains disabled after recording", () => {
+test("Record is enabled for a clean finished run and goes away after recording", () => {
   const harness = makeSaveHarness();
   harness.setSaveStates();
   assert.equal(harness.ui.record.disabled, false);
+  assert.equal(harness.ui.record.hidden, false);
+  assert.equal(harness.ui.recordActions.hidden, false);
   assert.equal(harness.ui.record.textContent, "Record result");
 
   harness.state.snapshot.currentRun.isRecorded = true;
   harness.setSaveStates();
   assert.equal(harness.ui.record.disabled, true);
-  assert.equal(harness.ui.record.textContent, "Already recorded");
+  assert.equal(harness.ui.record.hidden, true);
+  assert.equal(harness.ui.recordActions.hidden, true);
+});
+
+test("Record is not offered for a run that is armed or still in progress", () => {
+  for (const status of ["armed", "countdown", "active", "paused"]) {
+    const harness = makeSaveHarness({ dirty: true });
+    harness.state.snapshot.currentRun.status = status;
+    harness.setSaveStates();
+    assert.equal(harness.ui.record.disabled, true, status);
+    assert.equal(harness.ui.record.hidden, true, status);
+    assert.equal(harness.ui.recordActions.hidden, true, status);
+    assert.equal(harness.ui.currentSave.disabled, false, `${status} edits still save`);
+  }
+});
+
+test("a finished run with time left offers Reopen beside Record", () => {
+  const harness = makeSaveHarness();
+  Object.assign(harness.state.snapshot.currentRun, {
+    activeElapsedMs: 30_000, edition: { durationLimitSeconds: 300 }, events: [{ status: "pending" }]
+  });
+  harness.setSaveStates();
+  assert.equal(harness.ui.reopen.hidden, false);
+  assert.equal(harness.ui.reopen.disabled, false);
+  harness.state.snapshot.currentRun.status = "timedOut";
+  harness.setSaveStates();
+  assert.equal(harness.ui.reopen.hidden, true);
 });
 
 test("record action saves unsaved edits first, then records the saved run", async () => {
@@ -173,6 +204,15 @@ test("render failure keeps data connected and restores the last good snapshot", 
   assert.match(harness.alerts[0], /^Scorekeeper data is connected, but the screen could not refresh:/);
 });
 
+// undoableEventPress relies on two sibling helpers; load all three into the sandbox.
+function undoFinder(state) {
+  return vm.runInNewContext([
+    extractFunction("isUndoableEventType"),
+    extractFunction("isUndoablePress"),
+    `(${extractFunction("undoableEventPress")})`
+  ].join("\n"), { state });
+}
+
 test("undo availability tracks the latest still-effective standard event press", () => {
   const run = {
     id: "run-1",
@@ -196,7 +236,7 @@ test("undo availability tracks the latest still-effective standard event press",
       ]
     }
   };
-  const find = vm.runInNewContext(`(${extractFunction("undoableEventPress")})`, { state });
+  const find = undoFinder(state);
   assert.equal(find(run).message.id, 3);
 
   run.events[0].status = "completed";
@@ -209,4 +249,47 @@ test("undo availability tracks the latest still-effective standard event press",
   run.events[0].finishElapsedMs = null;
   run.events[0].lastSignalElapsedMs = 1000;
   assert.equal(find(run).message.id, 3);
+});
+
+test("keypad events undo one solved code at a time, then their start, past wrong codes", () => {
+  const challenges = [
+    { prompt: "one", answer: "A1", solvedElapsedMs: 4000, solvedByMessageId: "code-4" },
+    { prompt: "two", answer: "B2", solvedElapsedMs: 5000, solvedByMessageId: "override-5" }
+  ];
+  const run = {
+    id: "run-1",
+    status: "active",
+    events: [{
+      eventId: "code",
+      deviceId: "001122334455",
+      type: "keypad",
+      status: "completed",
+      startElapsedMs: 1000,
+      finishElapsedMs: 5000,
+      lastSignalElapsedMs: 5000,
+      keypad: { challenges }
+    }]
+  };
+  const message = (id, messageId, type, elapsed) =>
+    ({ id, messageId, runId: "run-1", type, disposition: "accepted", deviceId: "001122334455", elapsedMilliseconds: elapsed });
+  const state = {
+    snapshot: {
+      messages: [
+        message(1, "start-1", "event-press", 1000),
+        message(2, "wrong-3", "keypad-response", 3000),
+        message(3, "code-4", "keypad-response", 4000),
+        message(4, "override-5", "keypad-success", 5000)
+      ]
+    }
+  };
+  const find = undoFinder(state);
+  assert.equal(find(run).message.id, 4);
+
+  challenges.pop();
+  Object.assign(run.events[0], { status: "active", finishElapsedMs: null });
+  assert.equal(find(run).message.id, 3);
+
+  challenges[0].solvedElapsedMs = null;
+  challenges[0].solvedByMessageId = null;
+  assert.equal(find(run).message.id, 1, "a wrong code after the start does not hide the start");
 });

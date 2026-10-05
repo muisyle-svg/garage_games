@@ -310,3 +310,85 @@ test("operator UI derives arm-time readiness from operator snapshot and requires
   assert.match(source, /not responding · \$\{unverified\} unverified/);
   assert.match(source, /virtual event buttons remain available/);
 });
+
+test("keypad events set how many codes pass and report the keypad answer file", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-keypad",
+    name: "Edition",
+    keypadMessageCount: 66,
+    keypadMessageSource: "C:\\app\\config\\keypad-answers.csv",
+    keypadMessageError: null,
+    events: [
+      { eventId: "event-1", name: "Regular", deviceId: "unassigned-event-1", type: "standard" },
+      { eventId: "event-2", name: "Code Breaker", deviceId: "001122334455", type: "keypad", requiredSuccesses: 3 }
+    ]
+  });
+  assert.deepEqual(draft.keypadMessages, { count: 66, source: "C:\\app\\config\\keypad-answers.csv", error: "" });
+  assert.equal(draft.events[1].requiredSuccesses, 3);
+
+  // Regular events never send keypad fields; keypad events send their count only.
+  const payload = setup.buildSetupPayload(draft);
+  assert.equal("requiredSuccesses" in payload.events[0], false);
+  assert.equal(payload.events[1].type, "keypad");
+  assert.equal(payload.events[1].requiredSuccesses, 3);
+  assert.equal("prompt" in payload.events[1], false);
+  assert.equal("answer" in payload.events[1], false);
+
+  for (const bad of ["0", "21", "1.5", ""]) {
+    draft.events[1].requiredSuccesses = bad;
+    assert.throws(() => setup.buildSetupPayload(draft), /codes to pass must be a whole number from 1 to 20/);
+  }
+  draft.events[1].requiredSuccesses = "20";
+  assert.equal(setup.buildSetupPayload(draft).events[1].requiredSuccesses, 20);
+
+  // An older fixed fallback code is kept (normalized) but must still be typeable.
+  draft.events[1].answer = " d5* ";
+  assert.equal(setup.buildSetupPayload(draft).events[1].answer, "D5");
+  draft.events[1].answer = "E1";
+  assert.throws(() => setup.buildSetupPayload(draft), /keypad code must be 1 to 12 keys/);
+
+  // A newly added event switched to keypad defaults to one code.
+  draft.events[1].answer = "";
+  const added = setup.addEvent(draft);
+  added.type = "keypad";
+  assert.equal(setup.buildSetupPayload(draft).events[2].requiredSuccesses, 1);
+});
+test("bonus round settings edit in seconds, save in milliseconds, and validate", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-bonus",
+    name: "Edition",
+    bonusGame: { name: "Lightning Round", enabled: true, pointsPerPress: 7, initialWindowMs: 8000, stepMs: 500, stepEveryMs: 10000, minimumWindowMs: 1500 },
+    events: [{ eventId: "event-1", name: "Regular", deviceId: "unassigned-event-1", type: "standard" }]
+  });
+  assert.deepEqual(draft.bonusGame, {
+    name: "Lightning Round", enabled: true, pointsPerPress: "7", initialSeconds: "8", stepSeconds: "0.5", stepEverySeconds: "10", minimumSeconds: "1.5"
+  });
+  assert.deepEqual(setup.buildSetupPayload(draft).bonusGame, {
+    name: "Lightning Round", enabled: true, pointsPerPress: 7, initialWindowMs: 8000, stepMs: 500, stepEveryMs: 10000, minimumWindowMs: 1500
+  });
+
+  // The name is trimmed; a blank one falls back to the default, and it stays short.
+  draft.bonusGame.name = "  Speed Frenzy  ";
+  assert.equal(setup.buildSetupPayload(draft).bonusGame.name, "Speed Frenzy");
+  draft.bonusGame.name = "   ";
+  assert.equal(setup.buildSetupPayload(draft).bonusGame.name, "Bonus round");
+  draft.bonusGame.name = "x".repeat(61);
+  assert.throws(() => setup.buildSetupPayload(draft), /keep its name to 60 characters or fewer/);
+  draft.bonusGame.name = "Lightning Round";
+
+  // Older setups without bonus settings get the standalone game's timing.
+  const defaults = setup.normalizeSetup({ editionId: "e", name: "E", events: [{ eventId: "a", name: "A", deviceId: "unassigned-a" }] });
+  assert.deepEqual(setup.buildSetupPayload(defaults).bonusGame, {
+    name: "Bonus round", enabled: true, pointsPerPress: 5, initialWindowMs: 10000, stepMs: 1000, stepEveryMs: 10000, minimumWindowMs: 2000
+  });
+
+  draft.bonusGame.enabled = false;
+  assert.equal(setup.buildSetupPayload(draft).bonusGame.enabled, false);
+  draft.bonusGame.minimumSeconds = "9";
+  assert.throws(() => setup.buildSetupPayload(draft), /minimum seconds per press can't be longer/);
+  draft.bonusGame.minimumSeconds = "0.2";
+  assert.throws(() => setup.buildSetupPayload(draft), /minimum seconds per press must be a number from 0.5 to 60/);
+  draft.bonusGame.minimumSeconds = "2";
+  draft.bonusGame.pointsPerPress = "2.5";
+  assert.throws(() => setup.buildSetupPayload(draft), /points per press must be a whole number/);
+});

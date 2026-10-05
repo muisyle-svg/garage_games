@@ -43,7 +43,8 @@ a { color: inherit; }
 .button-secondary { border-color: rgba(157, 198, 236, .28); background: rgba(157, 198, 236, .09); color: var(--blue); }
 .button-record { background: var(--amber); color: #302311; }
 .button-discard { border-color: rgba(240, 135, 121, .34); background: rgba(240, 135, 121, .1); color: #ffaaa0; }
-.run-controls .button-discard[hidden] { display: none !important; }
+/* Discard keeps its place while hidden, so Pause and Finish never slide sideways. */
+.run-controls .button-discard[hidden] { display: inline-flex !important; visibility: hidden; }
 .operator-tabs { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .8rem; padding: .28rem; border: 1px solid var(--line); border-radius: 11px; background: rgba(7, 15, 13, .3); }
 .operator-tab { min-height: 37px; padding: .55rem .9rem; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; font-size: .72rem; font-weight: 850; }
 .operator-tab:hover { background: rgba(255, 255, 255, .04); color: var(--ink); }
@@ -52,8 +53,22 @@ a { color: inherit; }
 .tab-panel[hidden] { display: none !important; }
 .tab-panel:focus { outline: none; }
 .mvp-main { width: min(1600px, 100%); margin: 0 auto; padding: 1.35rem clamp(1rem, 3.5vw, 3.5rem) 2rem; }
-.alert-region:empty { display: none; }
-.alert { margin: 0 0 1rem; padding: .8rem .95rem; border: 1px solid rgba(240, 135, 121, .35); border-radius: 11px; background: rgba(240, 135, 121, .1); color: #ffb5aa; font-size: .8rem; line-height: 1.4; }
+/* Messages live in fixed-size slots and never change the page's layout: long text is cut
+   off (the full text is on hover). */
+.message-slot { display: grid; min-width: 0; overflow: hidden; }
+.message-slot > * { grid-area: 1 / 1; min-width: 0; }
+.message-slot .alert-region { display: grid; }
+/* One message at a time in a slot: a fresh alert, then a dropped master, then the countdown. */
+.master-lost-notice[hidden] { display: none !important; }
+.message-slot:has(.alert-region:not(:empty)) > :not(.alert-region) { visibility: hidden; }
+.message-slot:has(.master-lost-notice:not([hidden])) > .countdown-audio-notice { visibility: hidden; }
+.master-lost-notice { font-weight: 800; }
+.message-slot .alert { display: -webkit-box; margin: 0; padding: .45rem .7rem; overflow: hidden; font-size: .72rem; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.desk-messages { flex: 1 1 14rem; align-self: stretch; height: 4.3rem; }
+.desk-messages .alert { align-self: stretch; }
+.tab-alert-region { flex: 1 1 16rem; align-self: stretch; height: 37px; margin-left: .4rem; }
+.tab-alert-region .alert { padding: .2rem .6rem; font-size: .66rem; -webkit-line-clamp: 2; }
+.alert { margin: 0 0 1rem;padding: .8rem .95rem; border: 1px solid rgba(240, 135, 121, .35); border-radius: 11px; background: rgba(240, 135, 121, .1); color: #ffb5aa; font-size: .8rem; line-height: 1.4; }
 .alert.success { border-color: rgba(104, 214, 164, .3); background: rgba(104, 214, 164, .08); color: #a1ebc7; }
 .run-panel, .sheet-card { min-width: 0; border: 1px solid var(--line); border-radius: 15px; background: linear-gradient(145deg, rgba(31, 49, 43, .96), rgba(22, 35, 31, .96)); box-shadow: 0 18px 55px rgba(0, 0, 0, .17); }
 .run-panel { padding: clamp(.9rem, 2vw, 1.35rem); }
@@ -137,7 +152,15 @@ select:disabled, input:disabled { opacity: .58; }
 .on-deck-actions { display: flex; align-items: center; gap: .2rem; }
 .on-deck-move { display: grid; width: 30px; min-width: 30px; min-height: 30px; place-items: center; padding: .2rem; font-size: .82rem; line-height: 1; }
 .on-deck-remove { min-height: 30px; padding: .38rem .58rem; font-size: .63rem; }
-.run-state-banner { margin-bottom: .85rem; padding: .72rem .85rem; border: 1px solid rgba(104, 214, 164, .2); border-radius: 9px; background: rgba(104, 214, 164, .055); color: #c4e7d3; font-size: .74rem; line-height: 1.4; }
+/* The status line is one box of fixed height; Record and Reopen appear inside it on the
+   right once the run is over, so nothing below moves. */
+.run-state-row { display: flex; align-items: center; gap: .55rem; min-height: 3.35rem; margin-bottom: .85rem; padding: .35rem .45rem .35rem .85rem; border: 1px solid rgba(104, 214, 164, .2); border-radius: 9px; background: rgba(104, 214, 164, .055); }
+.run-state-row:has(.run-state-banner.is-discarded) { border-color: rgba(244, 189, 96, .32); background: rgba(244, 189, 96, .08); }
+.run-state-row .run-state-banner, .run-state-row .run-state-banner.is-discarded { display: -webkit-box; flex: 1 1 auto; min-width: 0; margin: 0; padding: 0; overflow: hidden; border: 0; background: none; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.record-actions { display: flex; flex: 0 0 auto; align-items: center; gap: .45rem; }
+.record-actions[hidden], .record-actions .button[hidden] { display: none; }
+.record-actions .button { min-height: 2.5rem; }
+.run-state-banner { margin-bottom: .85rem;padding: .72rem .85rem; border: 1px solid rgba(104, 214, 164, .2); border-radius: 9px; background: rgba(104, 214, 164, .055); color: #c4e7d3; font-size: .74rem; line-height: 1.4; }
 .run-state-banner.is-discarded { border-color: rgba(244, 189, 96, .32); background: rgba(244, 189, 96, .08); color: #f5d69c; }
 .physical-readiness-panel { display: grid; gap: .55rem; margin: -.25rem 0 .75rem; padding: .65rem .8rem; border: 1px solid rgba(157, 198, 236, .3); border-radius: 10px; background: linear-gradient(110deg, rgba(157, 198, 236, .075), rgba(255, 255, 255, .018)); }
 .physical-readiness-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .45rem .8rem; }
@@ -157,7 +180,7 @@ select:disabled, input:disabled { opacity: .58; }
 .physical-readiness-item.status-not-responding .physical-readiness-label { color: #ffaaa0; }
 .physical-readiness-item.status-unverified .physical-readiness-label { color: #f5d69c; }
 .physical-readiness-empty { color: var(--muted); font-size: .64rem; }
-.countdown-audio-notice:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .55rem; margin: -.35rem 0 .75rem; padding: .6rem .8rem; border: 1px solid rgba(244, 189, 96, .28); border-radius: 9px; background: rgba(244, 189, 96, .07); color: #f5d69c; font-size: .7rem; line-height: 1.4; }
+.countdown-audio-notice:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .35rem .55rem; margin: 0; overflow: hidden; padding: .45rem .7rem;border: 1px solid rgba(244, 189, 96, .28); border-radius: 9px; background: rgba(244, 189, 96, .07); color: #f5d69c; font-size: .7rem; line-height: 1.4; }
 .countdown-audio-notice [hidden] { display: none !important; }
 .countdown-audio-notice .button { min-height: 32px; padding: .4rem .65rem; font-size: .66rem; }
 .scorekeeper-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: .8rem; align-items: start; }
@@ -188,18 +211,32 @@ select:disabled, input:disabled { opacity: .58; }
 .virtual-button.is-started { border-color: var(--amber); animation: started-event-flash .85s steps(2, jump-none) infinite; }
 .virtual-button.is-identification-mode:not(:disabled) { border-style: dashed; }
 .virtual-button.is-physical-press { animation: physical-event-pulse .22s ease-in-out 5 alternate; }
+/* The bonus round's scorecard row: set apart from the events, with its hits count. */
+.bonus-score-row td { border-top: 1px dashed rgba(69, 209, 154, .45); background: rgba(69, 209, 154, .045); }
+.bonus-score-row .event-index { color: #45d19a; }
+.bonus-hits-field { display: flex; align-items: center; gap: .3rem; margin-top: .3rem; color: var(--muted); font-size: .62rem; font-weight: 800; white-space: nowrap; }
+.bonus-hits-field .hits-input { width: 4.2rem; min-height: 28px; }
+/* The bonus round's lit button: bright, pulsing, and impossible to miss among the tiles. */
+.virtual-button.is-bonus-target { border-color: #45d19a; background: rgba(69, 209, 154, .18); box-shadow: 0 0 0 3px rgba(69, 209, 154, .55), 0 0 22px rgba(69, 209, 154, .45); animation: bonus-target-pulse .5s ease-in-out infinite alternate; }
+.virtual-button.is-bonus-target .virtual-action-hint { color: #45d19a; font-weight: 950; }
+@keyframes bonus-target-pulse { from { box-shadow: 0 0 0 2px rgba(69, 209, 154, .4), 0 0 10px rgba(69, 209, 154, .3); } to { box-shadow: 0 0 0 5px rgba(69, 209, 154, .75), 0 0 28px rgba(69, 209, 154, .6); } }
+@media (prefers-reduced-motion: reduce) { .virtual-button.is-bonus-target { animation: none; } }
 @keyframes started-event-flash { 50% { border-color: rgba(244, 189, 96, .28); background: rgba(244, 189, 96, .025); color: var(--amber); } }
 @keyframes physical-event-pulse { to { border-color: #cf9dff; background: rgba(173, 128, 255, .34); box-shadow: 0 0 0 3px rgba(173, 128, 255, .24); } }
-.virtual-note { margin: 0; padding: 0 .9rem .85rem; }
+/* Two lines reserved whatever the note says, so the scorecard below doesn't move. */
+.virtual-note { display: -webkit-box; box-sizing: content-box; min-height: 2.9em; margin: 0; padding: 0 .9rem .85rem; overflow: hidden; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 
 /* Run lifecycle buttons stay top-right; Discard sits apart from Record. */
 .run-controls { align-items: center; }
 .run-controls-divider { width: 1px; height: 26px; margin: 0 .35rem; background: var(--line); }
-.run-controls-divider:has(+ [hidden]) { display: none; }
+.run-controls-divider:has(+ [hidden]) { visibility: hidden; }
 
-/* Start lives with the event buttons it unlocks. */
+/* Start lives with the event buttons it unlocks, with Up Next beside it. The row keeps its
+   height while the buttons are hidden during a run. */
 .virtual-card-heading { flex-wrap: wrap; }
-.start-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .45rem; }
+.card-heading > .start-controls { display: flex; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: .45rem; min-height: 44px; }
+.start-controls .button { white-space: nowrap; }
+#prime-next-button { min-width: 9.6rem; }
 .start-controls .button[hidden] { display: none; }
 .button-start { min-height: 44px; padding: .65rem 1.25rem; font-size: .85rem; }
 
@@ -207,12 +244,17 @@ select:disabled, input:disabled { opacity: .58; }
 .undo-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .75rem; margin: 0 .95rem .9rem; padding: .5rem .6rem; border: 1px dashed rgba(244, 189, 96, .3); border-radius: 10px; background: rgba(244, 189, 96, .04); }
 .button-undo { border-color: rgba(244, 189, 96, .55); background: rgba(244, 189, 96, .12); color: var(--amber); font-size: .78rem; }
 .button-undo span { margin-right: .4rem; font-size: 1rem; line-height: 1; }
-.undo-detail { color: var(--muted); font-size: .7rem; }
+/* Fixed flex sizes, so a longer "Will undo" line never changes how the row wraps. */
+.undo-detail { flex: 1 1 11rem; min-width: 0; overflow: hidden; color: var(--muted); font-size: .7rem; text-overflow: ellipsis; white-space: nowrap; }
 .button-undo:not(:disabled) + .undo-detail { color: var(--ink); }
 
 /* Unsaved scorecard edits: shown on this page but not yet counted on the TV or in results. */
-.unsaved-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem .75rem; margin: 0 .95rem .9rem; padding: .55rem .7rem; border: 1px solid rgba(244, 189, 96, .6); border-radius: 10px; background: rgba(244, 189, 96, .12); color: #f5d69c; font-size: .74rem; font-weight: 750; }
-.unsaved-bar span { flex: 1 1 260px; }
+.unsaved-bar { display: flex; flex: 1 1 22rem; align-items: center; gap: .45rem; min-width: 0;padding: .3rem .35rem .3rem .65rem; border: 1px solid rgba(244, 189, 96, .6); border-radius: 8px; background: rgba(244, 189, 96, .12); color: #f5d69c; font-size: .7rem; font-weight: 750; }
+/* Hidden means invisible, not gone: the undo row keeps the same height either way. */
+.unsaved-bar[hidden] { display: flex !important; visibility: hidden; }
+.undo-bar .unsaved-bar { box-sizing: border-box; height: 38px; }
+.unsaved-bar span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.unsaved-bar .button { flex: 0 0 auto; min-height: 30px; padding: .3rem .6rem; font-size: .68rem; }
 .unsaved-bar.has-error { border-color: rgba(240, 135, 121, .7); background: rgba(240, 135, 121, .12); color: #ffb8ae; }
 .summary-total strong.is-unsaved, .scorecard-summary-total.is-unsaved { color: var(--amber); }
 .summary-total strong.is-unsaved::after, .scorecard-summary-total.is-unsaved::after { content: " (unsaved)"; font-size: .55em; font-weight: 800; }
@@ -233,8 +275,13 @@ select:disabled, input:disabled { opacity: .58; }
 .hardware-panel .physical-readiness-panel { margin: 0; }
 
 /* Event tiles carry each event's result: points, start → stop and duration, or a live timer. */
-.virtual-tile-result { display: grid; gap: .12rem; padding: .35rem .45rem; border-radius: 7px; background: rgba(0, 0, 0, .18); }
-.virtual-tile-points { color: var(--ink); font-size: 1.15rem; font-weight: 900; font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1.05; }
+/* One line (points left, times right) on every tile, started or not, so tiles never change height. */
+.virtual-tile-result { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: .45rem; padding: .3rem .45rem; border-radius: 7px; background: rgba(0, 0, 0, .18); }
+.virtual-tile-result.is-pending { background: rgba(0, 0, 0, .1); }
+.virtual-tile-result .virtual-tile-points { flex: 0 0 auto; white-space: nowrap; }
+.virtual-tile-result .virtual-tile-times { flex: 0 1 auto; min-width: 0; text-align: right; }
+.virtual-tile-result.is-unsaved .virtual-tile-times { color: var(--amber); font-weight: 850; }
+.virtual-tile-points { color: var(--ink); font-size: 1.05rem;font-weight: 900; font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1.05; }
 .virtual-tile-points small { color: var(--muted); font-size: .62rem; font-weight: 800; letter-spacing: 0; }
 .virtual-tile-points.is-empty { color: var(--dim); }
 .virtual-tile-result.is-complete .virtual-tile-points { color: var(--green); }
@@ -340,7 +387,12 @@ select:disabled, input:disabled { opacity: .58; }
 .leaderboard-player-select select { min-width: 0; }
 .leaderboard-table { font-variant-numeric: tabular-nums; }
 .leaderboard-table td { height: 38px; }
-.leaderboard-rank { width: 4.5rem; color: var(--dim); font-weight: 850; }
+/* Leaderboards fit their card: the first column is a short rank (not an event name), and
+   these tables never force a minimum width (so no sideways scrolling). */
+.score-table.leaderboard-table { min-width: 0; }
+.leaderboard-table td:first-child { min-width: 0; }
+.leaderboard-table th:first-child { width: 2.6rem; }
+.leaderboard-rank { width: 2.6rem; padding-right: .15rem !important; color: var(--dim); font-weight: 850; }
 .leaderboard-player { min-width: 120px; font-weight: 760; }
 .leaderboard-points { color: var(--green); font-weight: 900; text-align: right; white-space: nowrap; }
 .leaderboard-category { color: var(--muted); font-size: .62rem; white-space: nowrap; }
@@ -349,7 +401,10 @@ select:disabled, input:disabled { opacity: .58; }
 .leaderboard-table th:last-child { text-align: right; }
 .leaderboard-table-scroll { max-height: 450px; }
 .player-results-scroll { max-height: 540px; }
-.player-results-table { min-width: 680px; }
+/* The player scorecard's first column is the event name, so it keeps a sensible width. */
+.score-table.player-results-table { min-width: 0; }
+.player-results-table td:first-child { min-width: 120px; }
+.player-results-table th:first-child { width: auto; }
 .leaderboard-card tfoot th, .leaderboard-card tfoot td { padding: .58rem .55rem; border-top: 1px solid var(--line); color: var(--ink); font-size: .7rem; font-weight: 900; }
 .leaderboard-card tfoot td { color: var(--green); text-align: right; }
 .setup-panel { padding-bottom: .85rem; }
@@ -370,6 +425,19 @@ select:disabled, input:disabled { opacity: .58; }
 .setup-device-chip { min-height: 32px; padding: .4rem .58rem; border: 1px solid rgba(157, 198, 236, .25); border-radius: 8px; background: rgba(157, 198, 236, .075); color: var(--blue); cursor: pointer; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .66rem; font-weight: 800; }
 .setup-device-chip:hover:not(:disabled) { border-color: rgba(157, 198, 236, .65); background: rgba(157, 198, 236, .14); }
 .setup-device-chip:disabled { cursor: not-allowed; opacity: .55; }
+/* A device chip with its Flash button; lights up when that physical button is pressed. */
+.setup-device-group { display: inline-flex; align-items: stretch; border-radius: 9px; }
+.setup-device-group .setup-device-chip { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.setup-device-flash { min-height: 32px; padding: .3rem .5rem; border: 1px solid rgba(244, 189, 96, .4); border-left: 0; border-radius: 0 8px 8px 0; background: rgba(244, 189, 96, .08); color: var(--amber); cursor: pointer; font-size: .62rem; font-weight: 850; }
+.setup-device-flash:hover:not(:disabled) { background: rgba(244, 189, 96, .18); }
+.setup-device-flash:disabled { cursor: not-allowed; opacity: .45; }
+.setup-device-group.is-button-pressed, .setup-event-row.is-button-pressed { animation: setup-button-pressed .45s ease-in-out 8 alternate; }
+.setup-device-group.is-button-pressed .setup-device-chip { border-color: #cf9dff; background: rgba(173, 128, 255, .3); color: #f1e4ff; opacity: 1; }
+.setup-event-row.is-button-pressed { border-color: #cf9dff; }
+@keyframes setup-button-pressed { to { box-shadow: 0 0 0 3px rgba(173, 128, 255, .55), 0 0 18px rgba(173, 128, 255, .45); } }
+@media (prefers-reduced-motion: reduce) { .setup-device-group.is-button-pressed, .setup-event-row.is-button-pressed { animation: none; box-shadow: 0 0 0 3px rgba(173, 128, 255, .55); } }
+.setup-last-pressed { margin: .15rem 0 .5rem; color: var(--muted); font-size: .7rem; font-weight: 750; }
+.setup-event-identify { flex: 0 0 auto; }
 .setup-list-heading { padding: 0 .95rem .55rem; }
 .setup-list-heading > div { display: grid; gap: .16rem; }
 .setup-list-heading .mvp-kicker { margin: 0; }
@@ -387,9 +455,20 @@ select:disabled, input:disabled { opacity: .58; }
 .setup-event-scoring-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 118px), 1fr)); align-items: end; gap: .45rem; max-width: 800px; margin-top: .45rem; }
 .setup-event-kind { display: grid; min-height: 37px; align-content: center; gap: .1rem; color: var(--dim); font-size: .55rem; text-transform: uppercase; }
 .setup-event-kind strong { color: var(--ink); font-size: .65rem; text-transform: none; }
+.setup-event-kind select { min-width: 0; min-height: 34px; font-size: .7rem; text-transform: none; }
+.setup-event-keypad-row { display: grid; grid-template-columns: minmax(110px, 140px) minmax(0, 1fr); align-items: center; gap: .4rem .6rem; max-width: 800px; margin-top: .48rem; padding: .5rem; border: 1px dashed rgba(246, 184, 77, .35); border-radius: 8px; }
+.setup-event-keypad-count { grid-row: span 2; align-self: start; }
+.setup-event-keypad-help { margin: 0; color: var(--muted); font-size: .6rem; line-height: 1.4; }
+.setup-event-keypad-help.is-error { color: #f07a71; font-weight: 800; }
 .setup-event-remove { min-height: 34px; padding: .4rem .55rem; font-size: .62rem; }
-.setup-event-device-row { display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(150px, .6fr); align-items: end; gap: .4rem; margin-top: .48rem; }
-.setup-event-clear, .setup-event-check { min-height: 34px; padding: .4rem .55rem; font-size: .62rem; }
+.setup-event-device-row { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto auto minmax(150px, .6fr); align-items: end; gap: .4rem; margin-top: .48rem; }
+.setup-event-clear, .setup-event-check, .setup-event-identify, .setup-event-assign { min-height: 34px; padding: .4rem .55rem; font-size: .62rem; }
+/* An event waiting for its button: the next press (or MAC clicked) is assigned to it. */
+.setup-event-row.is-assigning { border-color: var(--green); animation: setup-assigning 1s ease-in-out infinite alternate; }
+.setup-event-row.is-assigning .setup-event-assign { background: var(--amber); color: #302311; }
+.setup-event-assign { min-width: 7.4rem; white-space: nowrap; }
+@keyframes setup-assigning { to { box-shadow: 0 0 0 3px rgba(104, 214, 164, .45); } }
+@media (prefers-reduced-motion: reduce) { .setup-event-row.is-assigning { animation: none; box-shadow: 0 0 0 3px rgba(104, 214, 164, .45); } }
 .setup-event-readiness { display: flex; min-height: 34px; align-items: center; justify-content: space-between; gap: .35rem; }
 .setup-readiness { display: inline-flex; min-height: 24px; align-items: center; gap: .32rem; padding: .24rem .45rem; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: .58rem; font-weight: 800; white-space: nowrap; }
 .setup-event-readiness { flex-wrap: wrap; justify-content: flex-start; }
@@ -400,6 +479,14 @@ select:disabled, input:disabled { opacity: .58; }
 .setup-readiness.detected { border-color: rgba(244, 189, 96, .3); color: var(--amber); }
 .setup-readiness.unassigned { color: var(--dim); }
 .setup-event-id { margin: .38rem 0 0; color: var(--dim); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .54rem; }
+.setup-bonus { display: grid; gap: .45rem; margin: .85rem .95rem 0; padding: .75rem; border: 1px solid rgba(104, 214, 164, .28); border-radius: 10px; background: rgba(104, 214, 164, .05); }
+.setup-bonus h3 { margin: .1rem 0 0; }
+.setup-bonus-toggle { display: flex; align-items: center; gap: .45rem; font-size: .72rem; font-weight: 850; }
+.setup-bonus-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: .45rem; max-width: 900px; }
+.setup-bonus-fields label { display: grid; gap: .25rem; color: var(--muted); font-size: .58rem; font-weight: 850; letter-spacing: .045em; text-transform: uppercase; }
+.setup-bonus-fields input { min-width: 0; min-height: 34px; font-size: .7rem; }
+.setup-bonus-fields input:disabled { opacity: .5; }
+.setup-bonus-fields .setup-bonus-name { grid-column: 1 / -1; max-width: 420px; }
 .setup-preview { display: grid; gap: .35rem; margin: .85rem .95rem 0; padding: .75rem; border: 1px solid rgba(104, 214, 164, .2); border-radius: 10px; background: rgba(104, 214, 164, .035); }
 .setup-preview h3 { margin: 0; font-size: .8rem; }
 .setup-preview .mvp-kicker { margin: 0 0 .12rem; }
@@ -421,7 +508,6 @@ select:disabled, input:disabled { opacity: .58; }
 .event-leaderboard-heading .small-note { flex: 0 0 auto; text-align: right; }
 .event-leaderboard-table-scroll { max-height: 310px; }
 .event-leaderboard-table { min-width: 0; }
-.event-leaderboard-table td:first-child { min-width: 55px; }
 .event-leaderboard-table .empty-cell { white-space: normal; }
 .danger-tools { margin-top: 1rem; border: 1px solid rgba(240, 135, 121, .2); border-radius: 11px; background: rgba(7, 15, 13, .22); }
 .danger-tools > summary { padding: .75rem .9rem; color: var(--muted); cursor: pointer; font-size: .7rem; font-weight: 850; }
@@ -444,6 +530,10 @@ select:disabled, input:disabled { opacity: .58; }
 
 @media (max-width: 760px) {
   .mvp-header, .run-panel-top { align-items: flex-start; flex-direction: column; }
+  .run-panel-top { align-items: stretch; gap: .6rem; }
+  .desk-messages { flex: 0 0 auto; width: 100%; }
+  /* Start and Up Next keep a line of their own, used or not, so the tiles never jump. */
+  .virtual-card-heading > .start-controls { flex-basis: 100%; justify-content: flex-start; }
   .header-status { justify-content: flex-start; }
   .run-controls { width: 100%; justify-content: flex-start; }
   .on-deck-form { grid-template-columns: minmax(0, 1fr) minmax(135px, .6fr); }
@@ -454,6 +544,7 @@ select:disabled, input:disabled { opacity: .58; }
   .virtual-event-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .history-list { max-height: 230px; border-right: 0; border-bottom: 1px solid var(--line); }
   .score-table { min-width: 610px; }
+  .score-table.leaderboard-table { min-width: 0; }
 }
 
 @media (max-width: 500px) {
@@ -473,6 +564,9 @@ select:disabled, input:disabled { opacity: .58; }
   .on-deck-actions { grid-column: 2; justify-self: end; }
   .summary-total { grid-column: 2; }
   .run-controls .button { flex: 1 1 auto; }
+  /* On a phone the Record buttons sit under the status text; room for them is kept. */
+  .run-state-row { flex-wrap: wrap; align-content: flex-start; min-height: 6.2rem; }
+  .run-state-row .run-state-banner { flex-basis: 100%; }
   .master-port-controls { flex-basis: 100%; }
   .master-port-controls label { flex: 1 0 100%; }
   .master-readout { flex-basis: 100%; }
@@ -483,7 +577,9 @@ select:disabled, input:disabled { opacity: .58; }
   .setup-event-top { grid-template-columns: auto minmax(0, 1fr) auto; }
   .setup-event-kind { grid-column: 2; grid-row: 2; }
   .setup-event-remove { grid-column: 3; grid-row: 2; }
-  .setup-event-device-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .setup-event-device-row { grid-template-columns: repeat(3, auto); justify-content: start; }
+  .setup-event-assignment { grid-column: 1 / -1; }
+  .setup-event-keypad-row { grid-template-columns: 1fr; }
   .setup-event-scoring-row { grid-template-columns: repeat(auto-fit, minmax(min(100%, 118px), 1fr)); max-width: 100%; }
   .setup-event-readiness { grid-column: 1 / -1; }
   .leaderboard-player-select { grid-template-columns: 1fr; gap: .35rem; }

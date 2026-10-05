@@ -114,6 +114,9 @@
         eventId,
         name: String(event.name || `Event ${index + 1}`),
         type: String(event.type || "standard"),
+        prompt: String(event.prompt || ""),
+        answer: String(event.answer || ""),
+        requiredSuccesses: integerDefault(event.requiredSuccesses, 1, { minimum: 1, maximum: MAX_KEYPAD_REQUIRED_SUCCESSES }),
         ...values,
         ...Object.fromEntries(SCORE_FIELDS.map((field) => [`${field}Inherited`, inherited[field]])),
         assignmentValue: assignedMac || "",
@@ -125,8 +128,67 @@
       editionId: String(source.editionId || ""),
       name: String(source.name || ""),
       scoringDefaults: defaults,
+      bonusGame: normalizeBonusGame(source.bonusGame),
+      // Where keypad events get their messages and codes (the keypad answer file).
+      keypadMessages: {
+        count: integerDefault(source.keypadMessageCount, 0),
+        source: String(source.keypadMessageSource || ""),
+        error: String(source.keypadMessageError || "")
+      },
       events
     };
+  }
+
+  // The bonus speed round's settings, edited in seconds (the app stores milliseconds).
+  const BONUS_DEFAULTS = Object.freeze({
+    name: "Bonus round", enabled: true, pointsPerPress: 5, initialWindowMs: 10_000, stepMs: 1_000, stepEveryMs: 10_000, minimumWindowMs: 2_000
+  });
+  const MAX_BONUS_NAME_LENGTH = 60;
+
+  function normalizeBonusGame(source) {
+    const value = { ...BONUS_DEFAULTS, ...(source && typeof source === "object" ? source : {}) };
+    const seconds = (ms) => String(Math.round(Number(ms) / 100) / 10);
+    return {
+      name: String(value.name || BONUS_DEFAULTS.name),
+      enabled: value.enabled !== false,
+      pointsPerPress: String(value.pointsPerPress),
+      initialSeconds: seconds(value.initialWindowMs),
+      stepSeconds: seconds(value.stepMs),
+      stepEverySeconds: seconds(value.stepEveryMs),
+      minimumSeconds: seconds(value.minimumWindowMs)
+    };
+  }
+
+  function buildBonusGamePayload(bonus) {
+    const source = bonus || normalizeBonusGame(null);
+    const secondsToMs = (text, label, minimum, maximum) => {
+      const number = Number(String(text ?? "").trim());
+      if (String(text ?? "").trim() === "" || !Number.isFinite(number) || number < minimum || number > maximum) {
+        throw new Error(`Bonus round: ${label} must be a number from ${minimum} to ${maximum} seconds.`);
+      }
+      return Math.round(number * 1000);
+    };
+    if (!validInteger(source.pointsPerPress, 0, 100_000)) {
+      throw new Error("Bonus round: points per press must be a whole number from 0 to 100,000.");
+    }
+    // A blank name falls back to the default.
+    const name = String(source.name ?? "").trim() || BONUS_DEFAULTS.name;
+    if (name.length > MAX_BONUS_NAME_LENGTH) {
+      throw new Error(`Bonus round: keep its name to ${MAX_BONUS_NAME_LENGTH} characters or fewer.`);
+    }
+    const payload = {
+      name,
+      enabled: source.enabled !== false,
+      pointsPerPress: Number(source.pointsPerPress),
+      initialWindowMs: secondsToMs(source.initialSeconds, "starting seconds per press", 0.5, 60),
+      stepMs: secondsToMs(source.stepSeconds, "the drop", 0, 60),
+      stepEveryMs: secondsToMs(source.stepEverySeconds, "how often it drops", 1, 600),
+      minimumWindowMs: secondsToMs(source.minimumSeconds, "minimum seconds per press", 0.5, 60)
+    };
+    if (payload.minimumWindowMs > payload.initialWindowMs) {
+      throw new Error("Bonus round: the minimum seconds per press can't be longer than the starting seconds.");
+    }
+    return payload;
   }
 
   function addEvent(draft) {
@@ -143,6 +205,9 @@
       eventId,
       name: `Event ${(draft?.events || []).length + 1}`,
       type: "standard",
+      prompt: "",
+      answer: "",
+      requiredSuccesses: 1,
       basePoints: defaults.basePoints,
       basePointsInherited: true,
       minimumPoints: defaults.minimumPoints,
@@ -219,20 +284,39 @@
         deviceId = uniquePlaceholder(eventId, deviceIds);
       }
       deviceIds.add(deviceId.toLowerCase());
+      const type = String(event.type || "standard");
+      const prompt = String(event.prompt || "").trim();
+      const answer = normalizeKeypadCode(event.answer);
+      if (type === "keypad") {
+        if (!validInteger(event.requiredSuccesses, 1, MAX_KEYPAD_REQUIRED_SUCCESSES)) {
+          throw new Error(`${eventName}: codes to pass must be a whole number from 1 to ${MAX_KEYPAD_REQUIRED_SUCCESSES}.`);
+        }
+        // A fixed message/code is only a fallback kept from older setups; the keypad
+        // answer file normally supplies them.
+        if (prompt.length > MAX_KEYPAD_PROMPT_LENGTH) throw new Error(`${eventName}: keep the TV message to ${MAX_KEYPAD_PROMPT_LENGTH} characters or fewer.`);
+        if (answer && !KEYPAD_CODE_PATTERN.test(answer)) {
+          throw new Error(`${eventName}: the keypad code must be 1 to 12 keys using 0-9, A-D, or #; players press * to enter it.`);
+        }
+      }
       return {
         eventId,
         name: eventName,
         deviceId,
-        type: String(event.type || "standard"),
+        type,
         basePoints: event.basePointsInherited ? null : basePoints,
         minimumPoints: event.minimumPointsInherited ? null : minimumPoints,
         decayPoints: event.decayPointsInherited ? null : decayPoints,
         decayEverySeconds: event.decayEverySecondsInherited ? null : decayEverySeconds,
-        graceSeconds: event.graceSecondsInherited ? null : graceSeconds
+        graceSeconds: event.graceSecondsInherited ? null : graceSeconds,
+        ...(type === "keypad" ? {
+          requiredSuccesses: Number(event.requiredSuccesses),
+          ...(prompt ? { prompt } : {}),
+          ...(answer ? { answer } : {})
+        } : {})
       };
     });
 
-    return { editionId, name, events: payloadEvents };
+    return { editionId, name, events: payloadEvents, bonusGame: buildBonusGamePayload(draft.bonusGame) };
   }
 
   function scanStatus(value) {
@@ -345,8 +429,21 @@
     return text !== "" && Number.isInteger(number) && number >= minimum && number <= maximum;
   }
 
+  // Codes are typed on a 4x4 keypad (0-9, A-D, #) and submitted with '*', so a code
+  // written as "D5*" is stored as "D5".
+  const KEYPAD_CODE_PATTERN = /^[0-9A-D#]{1,12}$/;
+  const MAX_KEYPAD_PROMPT_LENGTH = 120;
+  const MAX_KEYPAD_REQUIRED_SUCCESSES = 20;
+
+  function normalizeKeypadCode(value) {
+    return String(value ?? "").replace(/\s+/g, "").toUpperCase().replace(/\*+$/, "");
+  }
+
   const api = Object.freeze({
     hardwareId,
+    normalizeKeypadCode,
+    normalizeBonusGame,
+    buildBonusGamePayload,
     normalizeSetup,
     addEvent,
     updateEventScoring,

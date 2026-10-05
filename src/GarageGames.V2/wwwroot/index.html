@@ -23,14 +23,17 @@
   </header>
 
   <main class="mvp-main">
-    <div id="alert-region" class="alert-region" aria-live="polite"></div>
-
     <div class="operator-tabs" role="tablist" aria-label="Scorekeeper sections">
       <button id="tab-scorekeeping" class="operator-tab is-selected" type="button" role="tab" aria-selected="true" aria-controls="panel-scorekeeping" tabindex="0">Scorekeeping</button>
       <button id="tab-on-deck" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-on-deck" tabindex="-1">On deck</button>
       <button id="tab-history" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-history" tabindex="-1">Run history</button>
       <button id="tab-leaderboards" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-leaderboards" tabindex="-1">Leaderboards</button>
       <button id="tab-setup" class="operator-tab" type="button" role="tab" aria-selected="false" aria-controls="panel-setup" tabindex="-1">Setup</button>
+      <!-- Messages on the other tabs use the spare room beside the tabs, so nothing shifts. -->
+      <div class="message-slot tab-alert-region">
+        <div id="master-lost-tab" class="alert master-lost-notice" role="alert" hidden></div>
+        <div id="tab-alert-region" class="alert-region" aria-live="polite"></div>
+      </div>
     </div>
 
     <section id="panel-scorekeeping" class="tab-panel" role="tabpanel" aria-labelledby="tab-scorekeeping" tabindex="0">
@@ -41,10 +44,18 @@
           <h1 id="run-heading">Current run</h1>
           <p id="run-caption" class="muted">Choose a competitor and set the run length before starting.</p>
         </div>
+        <!-- A fixed-size slot for messages, so they never push the buttons around. -->
+        <div class="message-slot desk-messages">
+          <div id="master-lost-desk" class="alert master-lost-notice" role="alert" hidden></div>
+          <div id="countdown-audio-notice" class="countdown-audio-notice" role="status" aria-live="polite" hidden>
+            <span id="countdown-audio-message"></span>
+            <button id="countdown-audio-retry" class="button button-secondary" type="button" hidden>Retry countdown audio</button>
+          </div>
+          <div id="alert-region" class="alert-region" aria-live="polite"></div>
+        </div>
         <div class="run-controls" role="group" aria-label="Run controls">
           <button id="pause-run-button" class="button button-secondary" type="button" disabled>Pause</button>
           <button id="finish-run-button" class="button button-secondary" type="button" disabled>Finish run</button>
-          <button id="record-run-button" class="button button-record" type="button" disabled>Record result</button>
           <span class="run-controls-divider" aria-hidden="true"></span>
           <button id="discard-run-button" class="button button-discard" type="button" hidden>Discard run</button>
         </div>
@@ -72,10 +83,14 @@
         <div class="summary-stat summary-total"><span>Total points</span><strong id="run-total">0</strong></div>
       </div>
 
-      <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
-      <div id="countdown-audio-notice" class="countdown-audio-notice" role="status" aria-live="polite" hidden>
-        <span id="countdown-audio-message"></span>
-        <button id="countdown-audio-retry" class="button button-secondary" type="button" hidden>Retry countdown audio</button>
+      <!-- The status line keeps one height; Record and Reopen appear inside it once the run is over. -->
+      <div class="run-state-row">
+        <div id="run-state-banner" class="run-state-banner" role="status">No run is active. Select a competitor to begin.</div>
+        <!-- Shown only once a run is over: recording never ends a run in progress. -->
+        <div id="record-actions" class="record-actions" role="group" aria-label="Record the finished run" hidden>
+          <button id="reopen-run-button" class="button button-secondary" type="button" hidden title="Finished by mistake? Bring the run back paused, with the clock where it stopped.">Reopen run</button>
+          <button id="record-run-button" class="button button-record" type="button" disabled>Record result</button>
+        </div>
       </div>
 
       <div class="scorekeeper-layout">
@@ -83,6 +98,7 @@
           <div class="card-heading virtual-card-heading">
             <div><p class="mvp-kicker">Course map</p><h2 id="virtual-heading">Start &amp; event buttons</h2></div>
             <div class="start-controls" role="group" aria-label="Start the run">
+              <button id="prime-next-button" class="button button-secondary" type="button" disabled title="Show the selected competitor on the TV as up next, with the full clock and no scores. Nothing starts.">Up Next</button>
               <button id="arm-physical-button" class="button button-secondary" type="button" disabled hidden>Arm for physical Start</button>
               <button id="start-run-button" class="button button-primary button-start" type="button" disabled>Start 5:00 run</button>
             </div>
@@ -90,11 +106,12 @@
           <div class="undo-bar">
             <button id="undo-last-event-press" class="button button-undo" type="button" disabled><span aria-hidden="true">↶</span> Undo last press</button>
             <span id="undo-last-event-detail" class="undo-detail" aria-live="polite">No event press to undo.</span>
-          </div>
-          <div id="unsaved-edits-bar" class="unsaved-bar" role="status" hidden>
-            <span id="unsaved-edits-message">Unsaved scorecard edits. The TV and results don't include them until you save.</span>
-            <button id="unsaved-edits-save" class="button button-record" type="button">Save edits</button>
-            <button id="unsaved-edits-discard" class="button button-quiet" type="button">Discard</button>
+            <!-- Unsaved edits share the undo row and keep their space when hidden. -->
+            <div id="unsaved-edits-bar" class="unsaved-bar" role="status" hidden>
+              <span id="unsaved-edits-message">Unsaved edits · not on the TV or in results until saved.</span>
+              <button id="unsaved-edits-save" class="button button-record" type="button">Save edits</button>
+              <button id="unsaved-edits-discard" class="button button-quiet" type="button">Discard</button>
+            </div>
           </div>
           <div id="virtual-event-buttons" class="virtual-event-grid">
             <p class="empty-state">Start a run to enable the virtual buttons.</p>
@@ -284,17 +301,17 @@
 
         <section class="sheet-card leaderboard-card player-leaderboard-card" aria-labelledby="player-leaderboard-heading">
           <div class="card-heading">
-            <div><p class="mvp-kicker">Official event results</p><h2 id="player-leaderboard-heading">Player scorecard</h2></div>
+            <div><p class="mvp-kicker">Event results by run</p><h2 id="player-leaderboard-heading">Player scorecard</h2></div>
           </div>
           <div class="leaderboard-player-select">
-            <label for="leaderboard-player-select">Display player</label>
-            <select id="leaderboard-player-select" aria-describedby="player-leaderboard-caption"><option value="">Select a player…</option></select>
+            <label for="leaderboard-player-select">Player and run</label>
+            <select id="leaderboard-player-select" aria-describedby="player-leaderboard-caption"><option value="">Select a player's run…</option></select>
           </div>
-          <p id="player-leaderboard-caption" class="leaderboard-help" aria-live="polite">Select a player to review their event times and points.</p>
+          <p id="player-leaderboard-caption" class="leaderboard-help" aria-live="polite">Select a player's run to review their event times and points.</p>
           <div class="table-scroll player-results-scroll">
             <table class="score-table leaderboard-table player-results-table">
               <thead><tr><th scope="col">Event</th><th scope="col">Start<br><small>M:SS remaining</small></th><th scope="col">Finish<br><small>M:SS remaining</small></th><th scope="col">Duration</th><th scope="col">Points</th></tr></thead>
-              <tbody id="player-leaderboard-body"><tr><td colspan="5" class="empty-cell">Select a player to see their scorecard.</td></tr></tbody>
+              <tbody id="player-leaderboard-body"><tr><td colspan="5" class="empty-cell">Select a player's run to see its scorecard.</td></tr></tbody>
               <tfoot><tr><th colspan="4" scope="row">Total points</th><td id="player-leaderboard-total">—</td></tr></tfoot>
             </table>
           </div>
@@ -337,7 +354,8 @@
               <h3 id="setup-discovery-heading">Discovered hardware</h3>
               <span id="setup-selected-event-label" class="small-note">Select an event to assign a device.</span>
             </div>
-            <p id="setup-discovery-help" class="small-note">Run a fresh scan, select an event below, then select a discovered device. You can also enter its 12-hex MAC address manually.</p>
+            <p id="setup-discovery-help" class="small-note">Run a fresh scan, or press a physical button to add it here and light up its MAC. Select an event below, then select a device to assign it; <strong>Flash</strong> blinks that physical button so you can find it. You can also enter a 12-hex MAC address manually.</p>
+            <p id="setup-last-pressed" class="setup-last-pressed" role="status" aria-live="polite">Press a physical button (with no run underway) to light up its MAC here, or use Flash to blink a button.</p>
             <div id="setup-discovered-devices" class="setup-discovered-devices"><span class="small-note">No fresh scan results.</span></div>
           </section>
           <div class="setup-list-heading">
@@ -346,6 +364,19 @@
           </div>
           <p id="setup-validation" class="setup-validation" role="status" aria-live="polite"></p>
           <div id="setup-event-list" class="setup-event-list"></div>
+          <section id="setup-bonus" class="setup-bonus" aria-labelledby="setup-bonus-heading">
+            <div><p class="mvp-kicker">After the last event</p><h3 id="setup-bonus-heading">Bonus speed round</h3></div>
+            <p class="small-note">When the last event is finished with time left, the clock keeps running and the buttons light one at a time. Each press in time scores the points below, added when the round ends. A miss ends the run; so does running out of time. The standalone Speed game on the master is not affected.</p>
+            <label class="setup-bonus-toggle"><input id="setup-bonus-enabled" type="checkbox" data-bonus-field="enabled"> Play the bonus round</label>
+            <div class="setup-bonus-fields">
+              <label class="setup-bonus-name">Name on the TV, scorecards, and leaderboards<input id="setup-bonus-name" type="text" maxlength="60" autocomplete="off" placeholder="Bonus round" data-bonus-field="name"></label>
+              <label>Points per press<input id="setup-bonus-points" type="number" min="0" max="100000" step="1" inputmode="numeric" data-bonus-field="pointsPerPress"></label>
+              <label>Starting seconds per press<input id="setup-bonus-initial" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" data-bonus-field="initialSeconds"></label>
+              <label>Drops by (seconds)<input id="setup-bonus-step" type="number" min="0" max="60" step="0.1" inputmode="decimal" data-bonus-field="stepSeconds"></label>
+              <label>Every (seconds of bonus play)<input id="setup-bonus-every" type="number" min="1" max="600" step="1" inputmode="numeric" data-bonus-field="stepEverySeconds"></label>
+              <label>Minimum seconds per press<input id="setup-bonus-minimum" type="number" min="0.5" max="60" step="0.1" inputmode="decimal" data-bonus-field="minimumSeconds"></label>
+            </div>
+          </section>
           <section class="setup-preview" aria-labelledby="setup-preview-heading">
             <div><p class="mvp-kicker">Review before starting</p><h3 id="setup-preview-heading">Run setup summary</h3></div>
             <p id="setup-preview-summary" class="small-note">Event order, scoring, and button assignments update as you edit.</p>

@@ -77,3 +77,63 @@ test("authoritative event-state sync lets virtual actions and undo reset physica
   assert.match(spoke, /revision <= garageEventRevision/);
   assert.match(spoke, /garageEventRevision = revision;/);
 });
+
+test("keypad spokes report typing, submit codes on '*', and flash red on a wrong code", () => {
+  const parser = master.match(
+    /bool parseGarageKeypadPacket\([\s\S]*?\n}\n\nvoid handleGarageKeypad/
+  );
+  assert.ok(parser, "dedicated keypad packet parser exists");
+  assert.match(parser[0], /GKEY:3:/);
+  assert.match(parser[0], /readPacketField\(cursor, packetEnd, entry, entrySize\)/);
+  assert.match(parser[0], /validKeypadEntry\(entry\)/);
+  assert.match(master, /GG1 KEYPAD %lu %s %s %lu %c %s %lu/);
+  assert.match(master, /handleGarageKeypad\(packet\)/);
+
+  assert.match(spoke, /#include <Wire\.h>/);
+  assert.match(spoke, /GKEY:3:%s:%lu:K:%s:0/, "typing updates carry the whole entry");
+  assert.match(spoke, /GKEY:3:%s:%lu:S:%s/, "submissions are retried like presses");
+  assert.match(spoke, /if \(key == '\*'\) \{\s*submitKeypadEntry\(\);/);
+  assert.match(spoke, /garagePendingIsKeypad = true;/);
+  assert.match(spoke, /flashKeypadWrong\(\);/);
+  assert.match(spoke, /strcmp\(garageResultState, "ACTIVE"\) == 0/,
+    "keys count only while the spoke's event is running");
+  assert.match(spoke, /Wire\.end\(\);/, "spokes without a keypad release the I2C pins");
+  assert.match(master, /strcmp\(resultState, "NEXT"\) == 0/, "the master relays NEXT results");
+  assert.match(spoke, /strcmp\(text, "NEXT"\) == 0/);
+  assert.match(spoke, /flashKeypadCorrect\(\);/, "a right code that is not the last flashes green");
+});
+
+test("the Garage bonus round is relayed by the master and lit on spokes, apart from the Speed game", () => {
+  assert.match(master, /bool parseBonusLine\(/);
+  assert.match(master, /GBONUS:3:%s:%lu:%c:%s:%lu/, "the master rebroadcasts the scorekeeper's bonus state");
+  assert.match(master, /GG1 BONUSNODE %lu %s %s/, "poll answers go back to the scorekeeper");
+  assert.match(master, /handleBonusHello\(packet\)/);
+  assert.match(master, /updateBonusBroadcast\(\);/);
+
+  assert.match(spoke, /void handleBonusState\(const RxPacket& packet\)/);
+  assert.match(spoke, /GBHELLO:3:%s:%lu/, "each spoke answers the intro poll");
+  assert.match(spoke, /applyTargetColorsForRemaining\(remainingMs\);/, "bonus targets use the Speed game's look");
+  assert.match(spoke, /if \(bonusTargetPressable\(now\)\) sendBonusPress\(\);/, "only the lit spoke reports a press");
+  assert.match(spoke, /if \(bonusVisualOwnsLed\) return;/, "the bonus round owns the LED while it runs");
+
+  // The standalone Speed game still drives its own targets from the master.
+  assert.match(master, /void selectAndCueNextTarget|bool selectAndCueNextTarget/);
+  assert.match(spoke, /void updateTargetVisual\(\)/);
+});
+
+test("bonus heartbeats let the app swap dead buttons, and a new run forgets the last round", () => {
+  assert.match(spoke, /GBHB:3:%s:%lu/, "spokes beat through the bonus round with the target they show");
+  assert.match(spoke, /bonusNextBeatMs = now;/, "a newly lit spoke reports at once (its READY)");
+  assert.match(master, /GG1 BONUSBEAT %lu %s %s %lu/, "the master relays heartbeats to the app");
+  assert.match(master, /handleBonusBeat\(packet\)/);
+  assert.match(spoke, /void resetBonusMemory\(\)/);
+  const newSession = spoke.match(/if \(!sameSession\) \{[\s\S]*?\n  \}/);
+  assert.ok(newSession && /resetBonusMemory\(\);/.test(newSession[0]), "a new run clears bonus memory");
+});
+
+test("presses for a paused or just-timed-out run still reach the app, which checks their age", () => {
+  const relays = master.match(/const bool runStillAnswering = [^;]+;/g) || [];
+  assert.equal(relays.length, 2, "both the press and keypad relays");
+  relays.forEach((relay) => assert.match(relay, /GARAGE_STATUS_PAUSED[\s\S]*GARAGE_STATUS_TIMED_OUT/));
+  assert.match(master, /Serial\.setRxBufferSize\(HOST_RX_BUFFER_BYTES\);/, "the master's serial buffer holds a full status burst");
+});

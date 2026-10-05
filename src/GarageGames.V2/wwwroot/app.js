@@ -919,7 +919,7 @@
   }
 
   function pollScoreboard() {
-    request(API.scoreboard).then((snapshot) => {
+    return request(API.scoreboard).then((snapshot) => {
       state.scoreboard = snapshot;
       state.lastGoodAt = new Date();
       setConnection(true, state.lastGoodAt);
@@ -929,8 +929,15 @@
     });
   }
 
+  // Poll faster while a keypad message is up so typed keys appear promptly on the TV.
+  function scheduleScoreboardPoll() {
+    const current = state.scoreboard && state.scoreboard.currentRun;
+    const bonusLive = !!(current && current.bonusGame && String(current.bonusGame.phase).toLowerCase() !== "ended");
+    const keypadActive = !!(current && current.keypadChallenge);
+    window.setTimeout(() => pollScoreboard().finally(scheduleScoreboardPoll), keypadActive || bonusLive ? 250 : 1000);
+  }
+
   function renderScoreboard(snapshot) {
-    setMode(!!snapshot.simulationMode, snapshot.editionName, "#scoreboard-mode");
     text(q("#scoreboard-edition"), snapshot.editionName || "Scoreboard");
     text(q("#scoreboard-leaderboard-note"), snapshot.showExhibitionsOnLeaderboard
       ? "Official · exhibitions shown"
@@ -941,14 +948,26 @@
     const remaining = run ? Number(run.remainingMilliseconds || 0) : Number(snapshot.durationLimitSeconds || 300) * 1000;
     text(q("#scoreboard-competitor"), run ? run.competitorName : "No active run");
     const category = q("#scoreboard-category"); text(category, run ? pretty(run.category) : "—"); category.className = `category-pill${run ? ` ${categoryClass(run.category)}` : ""}`;
-    const phase = q("#scoreboard-phase"); text(phase, run ? pretty(run.phase) : "Waiting"); phase.className = `phase-chip${run && run.phase === "bonus" ? " phase-bonus" : " phase-normal"}`;
-    text(q("#scoreboard-countdown"), formatMs(remaining));
-    text(q("#scoreboard-run-status"), run ? pretty(run.status) : "Awaiting master start");
+    // In the bonus speed round the chip names the round (as set in Setup).
+    const phaseLabel = run && run.bonusGame && run.phase === "bonus" ? String(run.bonusGame.name || "").trim() || "Bonus round" : null;
+    const phase = q("#scoreboard-phase"); text(phase, phaseLabel || (run ? pretty(run.phase) : "Waiting")); phase.className = `phase-chip${run && run.phase === "bonus" ? " phase-bonus" : " phase-normal"}`;
+    scoreboardClock = { remaining, running: !!run && String(run.status).toLowerCase() === "active", receivedAt: performance.now() };
+    renderScoreboardClock();
+    // An "Up Next" competitor from the scorekeeper: full clock, no scores, not started.
+    const upNext = !!(run && run.isPrimed);
+    text(q("#scoreboard-competitor-label"), upNext ? "Up next" : "Now competing");
+    if (upNext) text(q("#scoreboard-phase"), "Up next");
+    text(q("#scoreboard-run-status"), upNext ? "Get ready" : run ? pretty(run.status) : "Awaiting master start");
     text(q("#scoreboard-points"), run ? run.awardedPoints || 0 : 0);
     text(q("#scoreboard-event-progress"), `${completed} / ${total} complete`);
     const fill = q("#scoreboard-progress-fill"); if (fill) fill.style.width = `${total ? Math.min(100, completed / total * 100) : 0}%`;
     renderOnDeckBoard(snapshot);
     renderScoreboardEvents(run);
+    renderKeypadChallenge(run && run.keypadChallenge);
+    scoreboardBonus = run && run.bonusGame
+      ? { ...run.bonusGame, running: String(run.status).toLowerCase() === "active", receivedAt: performance.now() }
+      : null;
+    renderScoreboardBonus();
     // Playoff standings get their own board above the main one, shown only once
     // playoff results exist; ranks already restart within each category.
     const rows = snapshot.leaderboard || [];
@@ -957,6 +976,16 @@
     if (playoffPanel) playoffPanel.hidden = playoffRows.length === 0;
     renderLeaderboard(playoffRows, "#scoreboard-playoff-leaderboard");
     renderLeaderboard(rows.filter((row) => row.category !== "playoff"), "#scoreboard-leaderboard");
+  }
+
+  // The TV clock counts down locally between fetches (like the scorekeeper page) so it
+  // changes on each real second instead of whenever the last fetch arrived, and it rounds
+  // the same way as the scorekeeper, so both screens always show the same time.
+  let scoreboardClock = null;
+  function renderScoreboardClock() {
+    if (!scoreboardClock) return;
+    const sinceFetch = scoreboardClock.running ? performance.now() - scoreboardClock.receivedAt : 0;
+    text(q("#scoreboard-countdown"), scorekeeperTime.formatClockMs(Math.max(0, scoreboardClock.remaining - sinceFetch)));
   }
 
   function renderOnDeckBoard(snapshot) {
@@ -982,14 +1011,100 @@
     });
   }
 
+  // The bonus speed round: the lit button's event and its time left, counted down locally
+  // between fetches; afterwards a short summary strip above the event results.
+  let scoreboardBonus = null;
+  const bonusEndLabels = { miss: "missed a button", timeout: "time ran out", operator: "ended by the scorekeeper", "no-buttons": "no buttons left answering" };
+  function renderScoreboardBonus() {
+    const panel = q("#scoreboard-bonus");
+    const summary = q("#scoreboard-bonus-summary");
+    if (!panel || !summary) return;
+    const bonus = scoreboardBonus;
+    const phase = String(bonus?.phase || "").toLowerCase();
+    const hits = Number(bonus?.hits || 0);
+    const perPress = Number(bonus?.pointsPerPress || 0);
+    panel.hidden = !bonus || phase === "ended";
+    summary.hidden = !bonus || phase !== "ended";
+    if (!bonus) return;
+    const name = String(bonus.name || "").trim() || "Bonus round";
+    if (phase === "ended") {
+      const points = Number(bonus.awardedPoints ?? hits * perPress);
+      text(summary, `${name}: ${hits} hit${hits === 1 ? "" : "s"} · +${points} points${bonusEndLabels[bonus.endReason] ? ` · ${bonusEndLabels[bonus.endReason]}` : ""}`);
+      return;
+    }
+    text(q("#scoreboard-bonus-name"), name);
+    text(q("#scoreboard-bonus-stats"), `${hits} hit${hits === 1 ? "" : "s"} · +${hits * perPress} points`);
+    const fill = q("#scoreboard-bonus-bar-fill");
+    if (phase === "intro") {
+      panel.style.setProperty("--bonus-color", "rgb(0, 255, 0)");
+      panel.classList.remove("is-blink-off");
+      text(q("#scoreboard-bonus-target"), "Get ready!");
+      text(q("#scoreboard-bonus-time"), "Hit the lit button");
+      if (fill) fill.style.width = "100%";
+      return;
+    }
+    const now = performance.now();
+    const remaining = Math.max(0, Number(bonus.targetRemainingMs || 0) - (bonus.running ? now - bonus.receivedAt : 0));
+    const windowMs = Math.max(1, Number(bonus.targetWindowMs || 1));
+    text(q("#scoreboard-bonus-target"), bonus.targetEventName || "");
+    text(q("#scoreboard-bonus-time"), `${(remaining / 1000).toFixed(1)} s`);
+    if (fill) fill.style.width = `${Math.min(100, remaining / windowMs * 100)}%`;
+    // Match the lit button: same color for the time left, same blink, restarting per target.
+    const look = buttonTargetLook(remaining);
+    const blink = bonusBlink;
+    if (blink.target !== bonus.targetEventId || blink.windowMs !== bonus.targetWindowMs) {
+      Object.assign(blink, { target: bonus.targetEventId, windowMs: bonus.targetWindowMs, on: false, nextToggleAt: now });
+    }
+    if (bonus.running && now >= blink.nextToggleAt) {
+      blink.on = !blink.on;
+      blink.nextToggleAt = now + look.periodMs;
+    }
+    panel.style.setProperty("--bonus-color", look.color);
+    panel.classList.toggle("is-blink-off", bonus.running && !blink.on);
+  }
+
+  const bonusBlink = { target: null, windowMs: null, on: false, nextToggleAt: 0 };
+  const buttonTargetLook = (remainingMs) => scorekeeperTime.buttonTargetLook(remainingMs);
+
+  function renderKeypadChallenge(challenge) {
+    const panel = q("#scoreboard-keypad");
+    if (!panel) return;
+    panel.hidden = !challenge;
+    // The chime for a new message plays from the app through the computer's speakers.
+    if (!challenge) { panel.classList.remove("is-wrong", "is-correct"); return; }
+    text(q("#scoreboard-keypad-event"), challenge.eventName || "Keypad");
+    text(q("#scoreboard-keypad-prompt"), challenge.prompt);
+    const keys = q("#scoreboard-keypad-keys"); clear(keys);
+    Array.from(challenge.entry || "").forEach((key) => keys.appendChild(make("span", "tv-keypad-key", key)));
+    keys.appendChild(make("span", "tv-keypad-caret"));
+    const required = Math.max(1, Number(challenge.requiredSuccesses) || 1);
+    const solved = Math.min(required, Math.max(0, Number(challenge.successes) || 0));
+    const pips = q("#scoreboard-keypad-pips"); clear(pips);
+    for (let index = 0; index < required; index += 1) pips.appendChild(make("span", `tv-keypad-pip${index < solved ? " is-solved" : ""}`));
+    text(q("#scoreboard-keypad-count"), `${solved} of ${required} code${required === 1 ? "" : "s"} solved`);
+    const correct = !!challenge.showCorrect && !challenge.showWrong;
+    panel.classList.toggle("is-wrong", !!challenge.showWrong);
+    panel.classList.toggle("is-correct", correct);
+    text(q("#scoreboard-keypad-hint"), challenge.showWrong ? "Wrong code — try again"
+      : correct ? `Correct! ${required - solved} more to go`
+        : "Enter the code, then press ✱");
+  }
+
   function renderScoreboardEvents(run) {
     const container = q("#scoreboard-events"); clear(container);
     if (!run || !run.events || !run.events.length) { container.appendChild(make("div", "tv-empty", "Events will appear when a run is armed.")); return; }
     run.events.forEach((event) => {
       const card = make("article", `tv-event ${event.status || "pending"}`);
       const name = make("span", "tv-event-name", event.name); card.appendChild(name);
-      if (event.prompt) card.appendChild(make("span", "event-device", event.prompt));
-      const meta = make("div", "tv-event-meta"); meta.appendChild(make("span", "tv-event-status", pretty(event.status))); meta.appendChild(make("strong", "", event.awardedPoints || 0)); card.appendChild(meta);
+      const meta = make("div", "tv-event-meta");
+      // A finished event shows how long it took (rounded like the scorekeeper) and its points
+      // large; others show their status.
+      const finished = event.status === "completed" && Number.isFinite(event.durationMs);
+      meta.appendChild(finished
+        ? make("span", "tv-event-time", scorekeeperTime.formatClockMs(event.durationMs))
+        : make("span", "tv-event-status", pretty(event.status)));
+      meta.appendChild(make("strong", "tv-event-points", event.awardedPoints || 0));
+      card.appendChild(meta);
       container.appendChild(card);
     });
   }
@@ -1008,8 +1123,11 @@
 
   function initScoreboard() {
     setConnection(false, null);
-    pollScoreboard();
-    window.setInterval(pollScoreboard, 1000);
+    pollScoreboard().finally(scheduleScoreboardPoll);
+    window.setInterval(renderScoreboardClock, 100);
+    // Every frame, so the bonus timer can blink as fast as the buttons (65 ms at the end).
+    const bonusFrame = () => { renderScoreboardBonus(); window.requestAnimationFrame(bonusFrame); };
+    window.requestAnimationFrame(bonusFrame);
   }
 
   if (operatorPage) initOperator();

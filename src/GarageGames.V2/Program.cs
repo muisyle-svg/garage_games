@@ -22,9 +22,13 @@ if (!File.Exists(editionPath))
 }
 
 var edition = EditionDefinition.FromJson(editionPath);
+// Keypad messages and their codes. A missing or invalid file is reported in Setup rather
+// than stopping the app; keypad events then fall back to operator overrides.
+var keypadAnswersPath = GetOption(args, "--keypad-answers") ?? Path.Combine(Path.GetDirectoryName(editionPath)!, "keypad-answers.csv");
+var keypadChallenges = KeypadChallengeSet.LoadOrReportError(keypadAnswersPath);
 var store = new RunStore(dataPath);
 var clock = new SimulationClock();
-var service = new RunService(store, edition, clock);
+var service = new RunService(store, edition, clock, keypadChallenges);
 var urls = GetOption(args, "--urls") ?? "http://127.0.0.1:5187";
 ValidateLoopbackUrls(urls);
 
@@ -46,9 +50,19 @@ builder.Services.AddSingleton(service);
 builder.Services.AddSingleton<PhysicalMasterSerialService>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<PhysicalMasterSerialService>());
 builder.Services.AddHostedService<RunCheckpointHostedService>();
+// Game sounds play through this computer's speakers, not a browser tab. --no-sound
+// silences them (for example, on a machine that is only testing).
+var soundsEnabled = OperatingSystem.IsWindows() && !args.Contains("--no-sound", StringComparer.OrdinalIgnoreCase);
+builder.Services.AddSingleton<ISoundPlayer>(provider => soundsEnabled
+    ? new WindowsSoundPlayer(Path.Combine(AppContext.BaseDirectory, "wwwroot", "sounds"),
+        provider.GetRequiredService<ILogger<WindowsSoundPlayer>>())
+    : SilentSoundPlayer.Instance);
+builder.Services.AddHostedService<RunTimingHostedService>();
 builder.WebHost.UseUrls(urls);
 
 var app = builder.Build();
+var soundPlayer = app.Services.GetRequiredService<ISoundPlayer>();
+service.SoundCueRequested += cue => soundPlayer.Play(cue);
 var webRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot");
 var staticAssetVersion = StaticAssetVersioning.ComputeVersion(webRootPath);
 var buildId = GetOption(args, "--build-id") ??
@@ -202,7 +216,7 @@ app.MapGet("/api/scoreboard", (RunService runs) => Results.Ok(runs.GetScoreboard
 app.MapGet("/api/setup", (RunService runs) => Results.Ok(runs.GetSetup()));
 app.MapPut("/api/setup", (EditionSetup request, RunService runs) => Results.Ok(runs.UpdateSetup(request)));
 app.MapGet("/api/run/countdown-state", (RunService runs) => Results.Ok(runs.GetCountdownState()));
-app.MapGet("/api/export", (RunService runs) => Results.Json(runs.GetOperatorSnapshot(simulationMode), JsonDefaults.Options));
+app.MapGet("/api/export", (RunService runs) => Results.Json(runs.GetOperatorSnapshot(simulationMode, forExport: true), JsonDefaults.Options));
 app.MapPost("/api/competitors", (AddCompetitorRequest request, RunService runs) =>
     Results.Ok(runs.AddCompetitor(request.Name)));
 app.MapPut("/api/competitors/{competitorId}", (string competitorId, RenameCompetitorRequest request, RunService runs) =>
@@ -241,6 +255,10 @@ app.MapPost("/api/run/countdown-finished", async (CountdownFinishedRequest reque
     await master.SendCurrentStatusAsync(cancellationToken);
     return Results.Ok(run);
 });
+// Shows the selected competitor as up next on the TV (full clock, no scores) without
+// arming or starting anything.
+app.MapPost("/api/run/prime", (StartCompetitorRunRequest request, RunService runs) =>
+    Results.Ok(runs.PrimeNextCompetitor(request.CompetitorId, request.Category, request.DurationLimitSeconds)));
 app.MapPost("/api/run/arm", async (StartCompetitorRunRequest request, RunService runs,
     PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
 {
@@ -265,6 +283,12 @@ app.MapPost("/api/run/resume", async (RunService runs, PhysicalMasterSerialServi
 app.MapPost("/api/run/finish", async (RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
 {
     var run = runs.Finish();
+    await master.SendCurrentStatusAsync(cancellationToken);
+    return Results.Ok(run);
+});
+app.MapPost("/api/run/reopen", async (RunService runs, PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
+{
+    var run = runs.ReopenFinished();
     await master.SendCurrentStatusAsync(cancellationToken);
     return Results.Ok(run);
 });
@@ -398,6 +422,11 @@ app.MapPost("/api/simulator/advance-clock", (AdvanceClockRequest request) =>
     return Results.Ok(new { advancedMilliseconds = request.Milliseconds });
 });
 
+// Keep the PC from sleeping while the app runs (sleep drops the master's USB connection).
+if (!args.Contains("--allow-sleep", StringComparer.OrdinalIgnoreCase))
+{
+    KeepAwake.Request();
+}
 app.Run();
 
 static string? GetOption(string[] arguments, string name)

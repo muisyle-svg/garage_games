@@ -12,15 +12,24 @@ public sealed class PhysicalMasterSerialService : BackgroundService
     private readonly ILogger<PhysicalMasterSerialService> _logger;
     private readonly MasterProtocolState _protocol = new();
     private static readonly TimeSpan StatusInterval = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan EventSnapshotRetryInterval = TimeSpan.FromSeconds(3);
+    // Sending every button's state at once overflowed the master's small serial buffer and
+    // silently dropped the last button (by MAC). MasterEventLineSync picks only what's due;
+    // at most EventLinesPerWrite ride along with the status lines and any more are spaced out.
+    internal static readonly TimeSpan EventLinePacing = TimeSpan.FromMilliseconds(10);
+    private const int EventLinesPerWrite = 2;
     private SerialPort? _port;
     private CancellationTokenSource? _connectionCancellation;
     private ScanWaiter? _pendingScan;
     private string? _lastTestDeviceId;
     private DateTimeOffset? _lastTestAt;
     private uint _identifySequence;
-    private string? _lastEventSnapshotVersion;
-    private DateTimeOffset? _lastEventSnapshotSentAt;
+    private readonly MasterEventLineSync _eventSync = new();
+    // The port the operator connected. If the connection drops without them disconnecting
+    // (a bumped cable, a USB glitch, the master rebooting), it is reopened automatically.
+    private static readonly TimeSpan ReconnectInterval = TimeSpan.FromSeconds(2);
+    private string? _reconnectPortName;
+    private DateTimeOffset? _connectionLostAt;
+    private DateTimeOffset _lastReconnectAttemptAt;
 
     public PhysicalMasterSerialService(RunService runs, ILogger<PhysicalMasterSerialService> logger)
     {
@@ -44,14 +53,17 @@ public sealed class PhysicalMasterSerialService : BackgroundService
 
         lock (_gate)
         {
+            var connected = _port?.IsOpen == true;
             return new MasterConnectionSnapshot(
-                _port?.IsOpen == true,
-                _port?.IsOpen == true ? _port.PortName : null,
+                connected,
+                connected ? _port!.PortName : null,
                 availablePorts,
                 _protocol.Mode?.ToString().ToUpperInvariant(),
                 _protocol.LastMessage,
                 _lastTestDeviceId,
-                _lastTestAt);
+                _lastTestAt,
+                connected ? null : _reconnectPortName,
+                connected ? null : _connectionLostAt);
         }
     }
 
@@ -142,9 +154,10 @@ public sealed class PhysicalMasterSerialService : BackgroundService
             }
 
             _protocol.Reset();
-            _lastEventSnapshotVersion = null;
-            _lastEventSnapshotSentAt = null;
+            ResetEventSyncLocked();
             _port = port;
+            _reconnectPortName = selectedPort;
+            _connectionLostAt = null;
             var connectionCancellation = new CancellationTokenSource();
             _connectionCancellation = connectionCancellation;
             _ = Task.Run(() => ReadLoopAsync(port, connectionCancellation.Token));
@@ -158,6 +171,9 @@ public sealed class PhysicalMasterSerialService : BackgroundService
     {
         lock (_gate)
         {
+            // The operator chose to disconnect: don't reconnect on our own.
+            _reconnectPortName = null;
+            _connectionLostAt = null;
             CloseConnectionLocked();
         }
 
@@ -323,11 +339,37 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         {
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
+                TryReconnect();
                 await SendStatusAsync(stoppingToken);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
+        }
+    }
+
+    private void TryReconnect()
+    {
+        string portName;
+        lock (_gate)
+        {
+            if (_port?.IsOpen == true || _reconnectPortName is not { } wanted ||
+                DateTimeOffset.UtcNow - _lastReconnectAttemptAt < ReconnectInterval)
+            {
+                return;
+            }
+            _lastReconnectAttemptAt = DateTimeOffset.UtcNow;
+            portName = wanted;
+        }
+
+        try
+        {
+            Connect(portName);
+            _logger.LogInformation("Physical master reconnected on {Port}.", portName);
+        }
+        catch (CommandException)
+        {
+            // Not back yet (unplugged, or still re-enumerating); try again shortly.
         }
     }
 
@@ -426,7 +468,26 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                     return;
                 }
 
-                if (MasterProtocolCodec.TryParseScanReply(line, out var scanReply))
+                if (MasterProtocolCodec.TryParseBonusPollReply(line, out var bonusBootToken, out var bonusRunToken, out var bonusDeviceId))
+                {
+                    if (_protocol.Mode == MasterMode.Idle && string.Equals(_protocol.BootToken, bonusBootToken, StringComparison.Ordinal))
+                    {
+                        _runs.ReceiveBonusPollReply(bonusRunToken, bonusDeviceId);
+                    }
+                    return;
+                }
+
+                // A bonus heartbeat; when it confirms the lit button, the buttons get a fresh status.
+                var handledBeat = false;
+                if (MasterProtocolCodec.TryParseBonusBeat(line, out var beatBootToken, out var beatRunToken, out var beatDeviceId, out var beatSequence))
+                {
+                    if (_protocol.Mode == MasterMode.Idle && string.Equals(_protocol.BootToken, beatBootToken, StringComparison.Ordinal))
+                    {
+                        pushStatus = _runs.ReceiveBonusBeat(beatRunToken, beatDeviceId, beatSequence);
+                    }
+                    handledBeat = true;
+                }
+                else if (MasterProtocolCodec.TryParseScanReply(line, out var scanReply))
                 {
                     if (_pendingScan is { } scan && string.Equals(scan.ScanId, scanReply.ScanId, StringComparison.Ordinal))
                     {
@@ -446,7 +507,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                     return;
                 }
 
-                _protocol.ProcessLine(line,
+                if (!handledBeat) _protocol.ProcessLine(line,
                     (bootToken, sequence, startAllowed) =>
                     {
                         var result = _runs.ReceivePhysicalMasterStart(bootToken, sequence, startAllowed);
@@ -458,6 +519,17 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                         var result = _runs.ReceivePhysicalSpokePress(press, sessionAllowed);
                         reply = MasterProtocolCodec.FormatPhysicalPressResult(press, result.State);
                         pushStatus |= result.Disposition == MessageDisposition.Accepted;
+                        return result;
+                    },
+                    (keypad, sessionAllowed) =>
+                    {
+                        // Typed-entry updates return null: they only refresh the TV and need no reply.
+                        var result = _runs.ReceivePhysicalKeypadInput(keypad, sessionAllowed);
+                        if (result is not null)
+                        {
+                            reply = MasterProtocolCodec.FormatKeypadResult(keypad, result.State);
+                            pushStatus |= result.Disposition == MessageDisposition.Accepted;
+                        }
                         return result;
                     });
             }
@@ -525,39 +597,26 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                 var (status, garageStatus, eventSnapshot) = _runs.GetMasterStatuses();
                 var lines = new StringBuilder()
                     .Append(MasterProtocolCodec.FormatStatus(status)).Append('\n')
-                    .Append(MasterProtocolCodec.FormatGarageStatus(garageStatus)).Append('\n');
-                var syncEvents = false;
-                if (eventSnapshot.Version is not null && eventSnapshot.Events.Count > 0)
+                    .Append(MasterProtocolCodec.FormatGarageStatus(garageStatus)).Append('\n')
+                    .Append(MasterProtocolCodec.FormatBonusStatus(_runs.GetMasterBonusStatus())).Append('\n');
+                List<MasterGarageEventStatus> eventLines;
+                lock (_gate)
                 {
-                    lock (_gate)
-                    {
-                        var now = DateTimeOffset.UtcNow;
-                        var snapshotChanged = !string.Equals(_lastEventSnapshotVersion, eventSnapshot.Version, StringComparison.Ordinal);
-                        var retryElapsed = _lastEventSnapshotSentAt is null ||
-                            now - _lastEventSnapshotSentAt.Value >= EventSnapshotRetryInterval;
-                        syncEvents = ReferenceEquals(_port, port) && (snapshotChanged || retryElapsed);
-                    }
+                    eventLines = ReferenceEquals(_port, port) ? PickEventLinesLocked(eventSnapshot) : [];
                 }
-                if (syncEvents)
+                foreach (var eventStatus in eventLines.Take(EventLinesPerWrite))
                 {
-                    foreach (var eventStatus in eventSnapshot.Events)
-                    {
-                        lines.Append(MasterProtocolCodec.FormatGarageEventStatus(eventStatus)).Append('\n');
-                    }
+                    lines.Append(MasterProtocolCodec.FormatGarageEventStatus(eventStatus)).Append('\n');
                 }
                 var bytes = Encoding.ASCII.GetBytes(lines.ToString());
                 await port.BaseStream.WriteAsync(bytes.AsMemory(), cancellationToken);
                 await port.BaseStream.FlushAsync(cancellationToken);
-                if (syncEvents)
+                foreach (var eventStatus in eventLines.Skip(EventLinesPerWrite))
                 {
-                    lock (_gate)
-                    {
-                        if (ReferenceEquals(_port, port))
-                        {
-                            _lastEventSnapshotVersion = eventSnapshot.Version;
-                            _lastEventSnapshotSentAt = DateTimeOffset.UtcNow;
-                        }
-                    }
+                    await Task.Delay(EventLinePacing, cancellationToken);
+                    var eventLine = Encoding.ASCII.GetBytes(MasterProtocolCodec.FormatGarageEventStatus(eventStatus) + "\n");
+                    await port.BaseStream.WriteAsync(eventLine.AsMemory(), cancellationToken);
+                    await port.BaseStream.FlushAsync(cancellationToken);
                 }
             }
             finally
@@ -587,10 +646,21 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         }
     }
 
+    private void ResetEventSyncLocked() => _eventSync.Reset();
+
+    private List<MasterGarageEventStatus> PickEventLinesLocked(MasterGarageEventSnapshot snapshot) =>
+        _eventSync.Pick(snapshot, DateTimeOffset.UtcNow);
+
     private void CloseConnectionLocked()
     {
         var port = _port;
         var cancellation = _connectionCancellation;
+        if (port is not null && _reconnectPortName is not null)
+        {
+            // Dropped without the operator disconnecting: the status loop reopens it.
+            _connectionLostAt ??= DateTimeOffset.UtcNow;
+            _lastReconnectAttemptAt = DateTimeOffset.UtcNow;
+        }
         _port = null;
         _connectionCancellation = null;
         _pendingScan?.Completion.TrySetResult(-1);

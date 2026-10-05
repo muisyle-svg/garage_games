@@ -14,10 +14,81 @@ public sealed record MasterGarageEventStatus(string RunToken, int Revision, stri
 
 public sealed record MasterGarageEventSnapshot(string? Version, IReadOnlyList<MasterGarageEventStatus> Events);
 
+// Decides which buttons' state lines go to the master with each status push: every button
+// whose state changed, those that changed on the previous push again (a second copy in case
+// the radio dropped the first), and, when nothing else is due, one button per second in
+// rotation so a button that rebooted or missed both copies catches up.
+public sealed class MasterEventLineSync
+{
+    public static readonly TimeSpan ResyncInterval = TimeSpan.FromSeconds(1);
+    private readonly Dictionary<string, string> _sentStates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> _repeats = [];
+    private string? _runToken;
+    private int _resyncCursor;
+    private DateTimeOffset? _lastResyncAt;
+
+    public void Reset()
+    {
+        _sentStates.Clear();
+        _repeats.Clear();
+        _runToken = null;
+        _resyncCursor = 0;
+        _lastResyncAt = null;
+    }
+
+    public List<MasterGarageEventStatus> Pick(MasterGarageEventSnapshot snapshot, DateTimeOffset now)
+    {
+        if (snapshot.Version is null || snapshot.Events.Count == 0)
+        {
+            Reset();
+            return [];
+        }
+
+        var runToken = snapshot.Events[0].RunToken;
+        if (!string.Equals(_runToken, runToken, StringComparison.Ordinal))
+        {
+            Reset();
+            _runToken = runToken;
+        }
+
+        var changed = snapshot.Events
+            .Where(item => !_sentStates.TryGetValue(item.DeviceId, out var sent) || sent != item.State)
+            .ToList();
+        var picked = new List<MasterGarageEventStatus>(changed);
+        picked.AddRange(snapshot.Events.Where(item =>
+            _repeats.Contains(item.DeviceId, StringComparer.OrdinalIgnoreCase) &&
+            changed.All(change => !string.Equals(change.DeviceId, item.DeviceId, StringComparison.OrdinalIgnoreCase))));
+
+        if (picked.Count == 0 && (_lastResyncAt is null || now - _lastResyncAt.Value >= ResyncInterval))
+        {
+            picked.Add(snapshot.Events[_resyncCursor % snapshot.Events.Count]);
+            _resyncCursor = (_resyncCursor + 1) % snapshot.Events.Count;
+            _lastResyncAt = now;
+        }
+
+        foreach (var item in changed)
+        {
+            _sentStates[item.DeviceId] = item.State;
+        }
+        _repeats.Clear();
+        _repeats.AddRange(changed.Select(item => item.DeviceId));
+        return picked;
+    }
+}
+
+// The bonus round's state for the buttons: INTRO (poll and flash), TARGET (DeviceId lit with
+// RemainingMs to go; null DeviceId means a virtual-only target), or OFF.
+public sealed record MasterBonusStatus(string Token, int Sequence, string Phase, string? DeviceId, long RemainingMs);
+
 // AgeMilliseconds is how long before the relay line the button was pressed (0 from older firmware).
 public sealed record MasterPhysicalPress(string BootToken, string RunToken, string DeviceId, uint Sequence,
     uint AgeMilliseconds = 0);
 public sealed record MasterButtonTestPress(string BootToken, string DeviceId, uint Sequence);
+
+// A keypad spoke reports its typed entry (Submit = false) after each key so the TV can
+// show it, and submits the entry when '*' is pressed. Only submissions are acknowledged.
+public sealed record MasterKeypadInput(string BootToken, string RunToken, string DeviceId, uint Sequence,
+    bool Submit, string Entry, uint AgeMilliseconds = 0);
 
 public sealed record MasterPhysicalPressResult(string State, MessageDisposition Disposition, string Reason);
 
@@ -30,11 +101,21 @@ public sealed record MasterConnectionSnapshot(
     string? Mode,
     string? LastMessage,
     string? LastTestDeviceId = null,
-    DateTimeOffset? LastTestAt = null);
+    DateTimeOffset? LastTestAt = null,
+    // Set while the connection dropped unexpectedly and the app is trying to reopen this port.
+    string? ReconnectingPort = null,
+    DateTimeOffset? ConnectionLostAt = null);
 
 public static class MasterProtocolCodec
 {
     public const int MaximumLineLength = 128;
+    // Bounded by the 63-byte ESP-NOW packet the spoke sends ("GKEY:3:<token>:<seq>:<S|K>:<entry>:<age>").
+    public const int MaximumKeypadEntryLength = 12;
+
+    // '*' is the keypad's Enter key, so it never appears inside an entry.
+    public static bool IsValidKeypadEntry(string? entry) =>
+        entry is not null && entry.Length <= MaximumKeypadEntryLength &&
+        entry.All(character => character is >= '0' and <= '9' or >= 'A' and <= 'D' or '#');
 
     public static bool IsValidBootToken(string? token) =>
         !string.IsNullOrEmpty(token) && token.Length <= 64 && token.All(character =>
@@ -48,6 +129,9 @@ public static class MasterProtocolCodec
 
     public static string GetPhysicalPressMessageId(string runToken, string deviceId, uint sequence) =>
         $"spoke-press:{runToken}:{deviceId}:{sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+    public static string GetKeypadSubmitMessageId(string runToken, string deviceId, uint sequence) =>
+        $"spoke-keypad:{runToken}:{deviceId}:{sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
     public static string? GetGarageRunToken(string? runId)
     {
@@ -72,6 +156,47 @@ public static class MasterProtocolCodec
 
     public static string FormatPhysicalPressResult(MasterPhysicalPress press, string state) =>
         $"GG1 RESULT {press.RunToken} {press.DeviceId} {press.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)} {state}";
+
+    public static string FormatBonusStatus(MasterBonusStatus status) =>
+        $"GG1 BONUS {status.Token} {status.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)} {status.Phase} " +
+        $"{status.DeviceId ?? "-"} {Math.Clamp(status.RemainingMs, 0, 999_999).ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+    // GG1 BONUSNODE <bootToken> <runToken> <mac>: a button answered the bonus round's poll.
+    public static bool TryParseBonusPollReply(string line, out string bootToken, out string runToken, out string deviceId)
+    {
+        bootToken = runToken = deviceId = "";
+        var parts = line.Length > MaximumLineLength ? [] : line.Split(' ');
+        if (parts.Length != 5 || parts[0] != "GG1" || parts[1] != "BONUSNODE" || !IsValidBootToken(parts[2]) ||
+            !IsUpperHex(parts[3], 16) || !IsUpperHex(parts[4], 12))
+        {
+            return false;
+        }
+
+        (bootToken, runToken, deviceId) = (parts[2], parts[3], parts[4]);
+        return true;
+    }
+
+    // GG1 BONUSBEAT <bootToken> <runToken> <mac> <shownSequence>: a button's bonus-round
+    // heartbeat, with the target sequence it is lit for (0 when it isn't lit).
+    public static bool TryParseBonusBeat(string line, out string bootToken, out string runToken, out string deviceId,
+        out uint shownSequence)
+    {
+        bootToken = runToken = deviceId = "";
+        shownSequence = 0;
+        var parts = line.Length > MaximumLineLength ? [] : line.Split(' ');
+        if (parts.Length != 6 || parts[0] != "GG1" || parts[1] != "BONUSBEAT" || !IsValidBootToken(parts[2]) ||
+            !IsUpperHex(parts[3], 16) || !IsUpperHex(parts[4], 12) ||
+            !uint.TryParse(parts[5], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out shownSequence))
+        {
+            return false;
+        }
+
+        (bootToken, runToken, deviceId) = (parts[2], parts[3], parts[4]);
+        return true;
+    }
+
+    public static string FormatKeypadResult(MasterKeypadInput input, string state) =>
+        $"GG1 RESULT {input.RunToken} {input.DeviceId} {input.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)} {state}";
 
     public static string FormatButtonTest(MasterButtonTestPress press) =>
         $"GG1 TEST {press.BootToken} {press.DeviceId} {press.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
@@ -119,6 +244,34 @@ public static class MasterProtocolCodec
         }
 
         press = new MasterPhysicalPress(parts[2], parts[3], parts[4], sequence, ageMilliseconds);
+        return true;
+    }
+
+    // GG1 KEYPAD <bootToken> <runToken> <mac> <sequence> <S|K> <entry or -> <ageMs>
+    public static bool TryParseKeypadInput(string line, out MasterKeypadInput input)
+    {
+        input = null!;
+        if (line.Length > MaximumLineLength)
+        {
+            return false;
+        }
+
+        var parts = line.Split(' ');
+        if (parts.Length != 9 || parts[0] != "GG1" || parts[1] != "KEYPAD" ||
+            !IsValidBootToken(parts[2]) || !IsUpperHex(parts[3], 16) || !IsUpperHex(parts[4], 12) ||
+            !TryParseDecimalUInt(parts[5], out var sequence) || sequence == 0 ||
+            parts[6] is not ("S" or "K") || !TryParseDecimalUInt(parts[8], out var ageMilliseconds))
+        {
+            return false;
+        }
+
+        var entry = parts[7] == "-" ? "" : parts[7];
+        if (entry.Length == 0 && parts[7] != "-" || !IsValidKeypadEntry(entry))
+        {
+            return false;
+        }
+
+        input = new MasterKeypadInput(parts[2], parts[3], parts[4], sequence, parts[6] == "S", entry, ageMilliseconds);
         return true;
     }
 
@@ -249,7 +402,20 @@ public sealed class MasterProtocolState
 
     public bool ProcessLine(string line, Func<string, ulong, bool, InputResult> receiveStart,
         Func<MasterPhysicalPress, bool, MasterPhysicalPressResult>? receivePhysicalPress)
+        => ProcessLine(line, receiveStart, receivePhysicalPress, null);
+
+    public bool ProcessLine(string line, Func<string, ulong, bool, InputResult> receiveStart,
+        Func<MasterPhysicalPress, bool, MasterPhysicalPressResult>? receivePhysicalPress,
+        Func<MasterKeypadInput, bool, MasterPhysicalPressResult?>? receiveKeypad)
     {
+        if (MasterProtocolCodec.TryParseKeypadInput(line, out var keypad))
+        {
+            LastMessage = line;
+            var sessionAllowed = string.Equals(BootToken, keypad.BootToken, StringComparison.Ordinal) && Mode == MasterMode.Idle;
+            receiveKeypad?.Invoke(keypad, sessionAllowed);
+            return true;
+        }
+
         if (MasterProtocolCodec.TryParsePhysicalPress(line, out var press))
         {
             LastMessage = line;

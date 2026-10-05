@@ -21,6 +21,11 @@ var tests = new (string Name, Action Run)[]
     ("physical master start is durable, deduplicated, and consumes its on-deck item", PhysicalMasterStartDurabilityAndQueue),
     ("physical master status follows run countdown", PhysicalMasterStatusCountdown),
     ("timeout autosaves and releases next competitor", MvpTimeoutAndNextRun),
+    ("only a finished run is recorded, and a mistaken finish can be reopened", RecordNeedsFinishedRunAndFinishReopens),
+    ("a press made before the buzzer or a pause counts even when it arrives just after", LatePressesCountAtPressTime),
+    ("button states go to the master when they change, twice, then one button a second in rotation", MasterEventLinesSendChangesAndRotate),
+    ("the polled snapshot leaves out edit copies the page never uses; the export keeps them", SnapshotLeavesOutEditCopies),
+    ("a bonus button that dies is swapped out like the Speed game, not counted as a miss", BonusRoundSwapsDeadButtons),
     ("HTTP arm request duration flows into the saved run and ten-second timeout", ArmRequestDurationHandoff),
     ("custom run duration snapshots timeout and preserves edition leaderboard identity", PerRunDurationSnapshot),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
@@ -56,6 +61,20 @@ var tests = new (string Name, Action Run)[]
     ("a second official result cannot be recorded from history", SecondOfficialCannotBeRecordedFromHistory),
     ("corrections cannot create unfinished history or count paused time", CorrectionsCannotCorruptRunLifecycle),
     ("physical press age back-dates presses within the current active stretch", PhysicalPressAgeBackdatesWithinActiveTime),
+    ("keypad protocol lines parse strictly and '*' is never part of an entry", KeypadProtocolParsing),
+    ("physical keypad spoke starts, rejects wrong codes, shows typing on the TV, and finishes on the code", PhysicalKeypadCodeFlow),
+    ("operator tap overrides a running keypad event and keypad runs auto-finish", KeypadOperatorOverrideAndAutoFinish),
+    ("keypad events undo their code finish and their start like regular events", KeypadEventUndo),
+    ("keypad answer CSV maps each message to its row and column code", KeypadAnswerCsv),
+    ("keypad events draw unrepeated messages, need several codes, and undo one code at a time", KeypadMultipleCodes),
+    ("the app plays the countdown and starts the run at Go without a browser", ServerCountdownAndSounds),
+    ("an unrecorded timed-out run can be discarded; a recorded one cannot", DiscardTimedOutRun),
+    ("the bonus round polls, lights targets, counts hits, shrinks windows, and ends the run on a miss", BonusRoundMissEndsRun),
+    ("the bonus round ends on timeout, on operator finish, and uses every tile when nothing answers", BonusRoundOtherEndings),
+    ("bonus round settings save through setup, validate, and version recorded editions", BonusRoundSetup),
+    ("the bonus round is corrected like an event: hits, points override, times, clear, and history", BonusRoundCorrections),
+    ("Up Next shows the next competitor on the TV between runs until a run is armed", UpNextOnTheTv),
+    ("the TV gets each finished event's elapsed time", ScoreboardEventDurations),
     ("schema version 1 databases upgrade once after a backup", SchemaVersion1UpgradesWithBackup),
     ("deleted runs leave history and standings, persist, and can be restored", DeletedRunsHideAndRestore),
     ("deleting a recorded redo restores the result it replaced", DeletingRedoRestoresOriginal),
@@ -597,8 +616,8 @@ static void PhysicalSpokeDedupesAndMixesWithVirtual()
     protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} FFFFFFFFFFFF 6", ReceiveStart, ReceivePress);
     Assert.Equal(MessageDisposition.UnknownStation, received!.Disposition);
     h.Service.PressEvent(run.Id, "spoke-event-02");
-    h.Service.PressEvent(run.Id, "spoke-event-02");
     h.Clock.Advance(TimeSpan.FromMilliseconds(700));
+    h.Service.PressEvent(run.Id, "spoke-event-02");
     protocol.ProcessLine($"GG1 PRESS boot-after-restart {runToken} {firstMac} 7", ReceiveStart, ReceivePress);
     Assert.Equal(MessageDisposition.Accepted, received!.Disposition);
     Assert.Equal("COMPLETED", received.State);
@@ -633,6 +652,15 @@ static void PhysicalButtonStateSnapshotTracksMixedInputs()
     Assert.Equal(MessageDisposition.Accepted, physicalStart.Disposition);
     Assert.Equal("ACTIVE", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
 
+    // A double press within the finish lockout is ignored and the button keeps running.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.FinishPressLockoutMilliseconds - 100));
+    var doublePress = h.Service.ReceivePhysicalSpokePress(
+        new MasterPhysicalPress("boot-test", runToken, firstMac, 2), sessionAllowed: true);
+    Assert.Equal(MessageDisposition.TooSoon, doublePress.Disposition);
+    Assert.Equal("ACTIVE", doublePress.State);
+    Assert.Equal(EventStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(item => item.DeviceId == firstMac).Status);
+
+    h.Clock.Advance(TimeSpan.FromMilliseconds(100));
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "spoke-event-01").Disposition);
     Assert.Equal("COMPLETED", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
 
@@ -645,8 +673,9 @@ static void PhysicalButtonStateSnapshotTracksMixedInputs()
     Assert.Equal("PENDING", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
 
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "spoke-event-01").Disposition);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
     var physicalFinish = h.Service.ReceivePhysicalSpokePress(
-        new MasterPhysicalPress("boot-test", runToken, firstMac, 2), sessionAllowed: true);
+        new MasterPhysicalPress("boot-test", runToken, firstMac, 3), sessionAllowed: true);
     Assert.Equal(MessageDisposition.Accepted, physicalFinish.Disposition);
     Assert.Equal("COMPLETED", h.Service.GetMasterStatuses().EventSnapshot.Events.Single(item => item.DeviceId == firstMac).State);
 
@@ -662,6 +691,7 @@ static EditionDefinition MakeSpokeEdition() => new()
     Name = "Physical spoke test edition",
     DurationLimitSeconds = 30,
     Scoring = new ScoringRule(),
+    BonusGame = new BonusGameSettings { Enabled = false },
     Events =
     [
         new EventDefinition { EventId = "spoke-event-01", Name = "Spoke event 1", DeviceId = "AABBCCDDEEFF", Type = EventKind.Standard },
@@ -865,12 +895,164 @@ static void MvpTimeoutAndNextRun()
     Assert.Equal(1, h.Service.GetOperatorSnapshot().History.Count(r => r.Id == first.Id));
     Assert.Equal(MessageDisposition.TimedOut, h.Service.PressEvent(first.Id, "event-01").Disposition);
 
+    // The next run (and the Up Next view) waits until the timed-out run is recorded or discarded.
     var nextCompetitor = h.AddCompetitor("Next competitor");
+    var blocked = Assert.Throws<CommandException>(() => h.Service.ArmCompetitor(nextCompetitor.Id, RunCategory.Official));
+    Assert.True(blocked.Message.Contains("timed out", StringComparison.Ordinal));
+    Assert.Throws<CommandException>(() => h.Service.PrimeNextCompetitor(nextCompetitor.Id, RunCategory.Official, 2));
+    var queued = h.Service.AddToQueue(nextCompetitor.Id, RunCategory.Exhibition);
+    Assert.Throws<CommandException>(() => h.Service.Arm(queued.Id));
+    h.Service.RecordHistoricalRun(first.Id);
     var nextRun = h.Service.ArmCompetitor(nextCompetitor.Id, RunCategory.Official);
     Assert.Equal(RunStatus.Armed, nextRun.Status);
     Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == first.Id).Status);
     Assert.Equal(nextRun.Id, h.StartRun().Id);
     Assert.Equal(RunStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+}
+
+static void SnapshotLeavesOutEditCopies()
+{
+    using var h = NewHarness();
+    var run = h.ArmAndStart();
+    h.Service.Finish();
+    h.Service.Record();
+    var recorded = h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id);
+    h.Service.EditHistoricalRun(run.Id, new EditRunRequest
+    {
+        ExpectedRevision = recorded.Revision,
+        Reason = "Correction",
+        BonusPointsOverride = 5
+    });
+
+    var polled = h.Service.GetOperatorSnapshot().Edits.Single(e => e.RunId == run.Id);
+    Assert.Equal("", polled.BeforeJson);
+    Assert.Equal("", polled.AfterJson);
+    Assert.Equal("Correction", polled.Reason);
+    var exported = h.Service.GetOperatorSnapshot(forExport: true).Edits.Single(e => e.RunId == run.Id);
+    Assert.True(exported.BeforeJson.Length > 0 && exported.AfterJson.Length > 0);
+    // Undo still works from the stored copy.
+    var undone = h.Service.UndoHistoricalEdit(run.Id, polled.Id, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).Revision, "Undo");
+    Assert.Equal(null, undone.BonusPointsOverride);
+}
+
+static void MasterEventLinesSendChangesAndRotate()
+{
+    var sync = new MasterEventLineSync();
+    var start = new DateTimeOffset(2026, 9, 29, 12, 0, 0, TimeSpan.Zero);
+    MasterGarageEventSnapshot Snapshot(int revision, params (string Mac, string State)[] events) =>
+        new($"run:{revision}", events.Select(item => new MasterGarageEventStatus("TOKEN", revision, item.Mac, item.State)).ToList());
+    string Devices(List<MasterGarageEventStatus> lines) => string.Join(",", lines.Select(line => line.DeviceId));
+
+    // The first push sends every button; the next push repeats them once.
+    var all = Snapshot(1, ("A", "PENDING"), ("B", "PENDING"), ("C", "PENDING"));
+    Assert.Equal("A,B,C", Devices(sync.Pick(all, start)));
+    Assert.Equal("A,B,C", Devices(sync.Pick(all, start.AddMilliseconds(100))));
+    // Then only one button per second in rotation.
+    Assert.Equal("A", Devices(sync.Pick(all, start.AddMilliseconds(200))));
+    Assert.Equal("", Devices(sync.Pick(all, start.AddMilliseconds(700))));
+    Assert.Equal("B", Devices(sync.Pick(all, start.AddMilliseconds(1_300))));
+
+    // A change sends just that button, twice.
+    var bActive = Snapshot(2, ("A", "PENDING"), ("B", "ACTIVE"), ("C", "PENDING"));
+    Assert.Equal("B", Devices(sync.Pick(bActive, start.AddMilliseconds(1_400))));
+    Assert.Equal("B", Devices(sync.Pick(bActive, start.AddMilliseconds(1_500))));
+    Assert.Equal("C", Devices(sync.Pick(bActive, start.AddMilliseconds(2_400))));
+
+    // A new run starts over.
+    var nextRun = new MasterGarageEventSnapshot("next:1", [new MasterGarageEventStatus("OTHER", 1, "A", "PENDING")]);
+    Assert.Equal("A", Devices(sync.Pick(nextRun, start.AddMilliseconds(2_500))));
+    Assert.Equal(0, sync.Pick(new MasterGarageEventSnapshot(null, []), start.AddMilliseconds(2_600)).Count);
+}
+
+static void LatePressesCountAtPressTime()
+{
+    const string firstMac = "AABBCCDDEEFF";
+    const string secondMac = "001122334455";
+    using var h = new TestHarness(MakeSpokeEdition(), NewPath(), simulatedDevicesOnline: false);
+    h.Service.RecordDeviceScan(true, true, [firstMac, secondMac]);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    MasterPhysicalPressResult Press(string mac, uint sequence, uint ageMs) =>
+        h.Service.ReceivePhysicalSpokePress(new MasterPhysicalPress("boot", token, mac, sequence, ageMs), sessionAllowed: true);
+    EventRecord Event(string mac) => h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).Events.Single(e => e.DeviceId == mac);
+
+    Assert.Equal(MessageDisposition.Accepted, Press(firstMac, 1, 0).Disposition);
+    Assert.Equal(MessageDisposition.Accepted, Press(secondMac, 1, 0).Disposition);
+
+    // Pause: a finish pressed 300 ms before the pause but arriving 100 ms after still counts.
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    h.Service.Pause();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(100));
+    var beforePause = Press(firstMac, 2, 400);
+    Assert.Equal(MessageDisposition.Accepted, beforePause.Disposition);
+    Assert.Equal("COMPLETED", beforePause.State);
+    Assert.Equal<long?>(4_700L, Event(firstMac).FinishElapsedMs);
+    Assert.Equal(RunStatus.Paused, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+    // Pressed after the pause: still ignored.
+    Assert.Equal(MessageDisposition.Paused, Press(secondMac, 2, 50).Disposition);
+    h.Service.Resume();
+
+    // Timeout: the clock passes the 30 s limit 100 ms before the app notices on its next tick.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(30_000 - 5_000 + 100));
+    Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+    // Pressed 50 ms after the buzzer: too late.
+    Assert.Equal(MessageDisposition.TimedOut, Press(secondMac, 3, 50).Disposition);
+    Assert.Equal(EventStatus.Active, Event(secondMac).Status);
+    // Pressed 200 ms before the buzzer, arriving now: counts, and the run stays timed out.
+    var atBuzzer = Press(secondMac, 4, 300);
+    Assert.Equal(MessageDisposition.Accepted, atBuzzer.Disposition);
+    Assert.Equal("COMPLETED", atBuzzer.State);
+    Assert.Equal<long?>(29_800L, Event(secondMac).FinishElapsedMs);
+    var timedOut = h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id);
+    Assert.Equal(RunStatus.TimedOut, timedOut.Status);
+    Assert.True(!timedOut.IsRecorded);
+    Assert.Equal(RunStatus.TimedOut, h.Store.Load().Runs.Single(r => r.Id == run.Id).Status);
+}
+
+static void RecordNeedsFinishedRunAndFinishReopens()
+{
+    using var h = new TestHarness(MakeMvpEdition(durationSeconds: 60), NewPath());
+    var run = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 60);
+    // An armed run has nothing to finish or record; it can only be discarded.
+    Assert.Throws<CommandException>(() => h.Service.Record());
+    Assert.Throws<CommandException>(() => h.Service.Finish());
+    Assert.Throws<CommandException>(() => h.Service.RecordHistoricalRun(run.Id));
+    var countdown = h.Service.StartMaster();
+    Assert.Throws<CommandException>(() => h.Service.Record());
+    h.Service.CompleteCountdown(countdown.Id);
+    h.Service.PressEvent(run.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+
+    // Recording never ends a run in progress.
+    Assert.Throws<CommandException>(() => h.Service.Record());
+    Assert.Equal(RunStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+    h.Service.Pause();
+    Assert.Throws<CommandException>(() => h.Service.Record());
+    h.Service.Resume();
+    Assert.Throws<CommandException>(() => h.Service.ReopenFinished());
+
+    // A mistaken Finish is reopened paused, with the clock where it stopped.
+    var finished = h.Service.Finish();
+    var reopened = h.Service.ReopenFinished();
+    Assert.Equal(RunStatus.Paused, reopened.Status);
+    Assert.Equal(finished.ActiveElapsedMs, reopened.ActiveElapsedMs);
+    Assert.Equal<DateTimeOffset?>(null, reopened.FinishedAt);
+    Assert.Equal(RunStatus.Paused, h.Store.Load().Runs.Single(r => r.Id == run.Id).Status);
+    h.Clock.Advance(TimeSpan.FromSeconds(30));
+    var resumed = h.Service.Resume();
+    Assert.Equal(finished.ActiveElapsedMs, resumed.ActiveElapsedMs);
+    h.Clock.Advance(TimeSpan.FromSeconds(2));
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "event-01").Disposition);
+    h.Service.Finish();
+    Assert.True(h.Service.Record().IsRecorded);
+    Assert.Throws<CommandException>(() => h.Service.ReopenFinished());
+
+    // A discarded run that never started cannot be recorded from history either.
+    var other = h.AddCompetitor("Never started");
+    var armed = h.Service.ArmCompetitor(other.Id, RunCategory.Exhibition, 60);
+    h.Service.Abort("Wrong player");
+    Assert.Throws<CommandException>(() => h.Service.RecordHistoricalRun(armed.Id));
 }
 
 static void PerRunDurationSnapshot()
@@ -910,6 +1092,7 @@ static void PerRunDurationSnapshot()
     Assert.Equal(2, persistedCustomRun.Edition.DurationLimitSeconds);
     Assert.Equal(edition.EditionId, persistedCustomRun.EditionId);
 
+    h.Service.Abort("Discarded so the next run can start");
     var defaultRun = h.Service.ArmCompetitor(nextCompetitor.Id, RunCategory.Official);
     Assert.Equal(300, defaultRun.Edition.DurationLimitSeconds);
     Assert.Equal(edition.EditionId, defaultRun.EditionId);
@@ -1422,6 +1605,7 @@ static void UndoLastButtonPress()
         Name = "Undo button test",
         DurationLimitSeconds = 60,
         Scoring = new ScoringRule(),
+        BonusGame = new BonusGameSettings { Enabled = false },
         Events = [new EventDefinition { EventId = "one", Name = "One event", DeviceId = "station-01", Type = EventKind.Standard }]
     };
     using var h = new TestHarness(edition, NewPath());
@@ -1456,6 +1640,7 @@ static void ClearEventResult()
         Name = "Clear event test",
         DurationLimitSeconds = 60,
         Scoring = new ScoringRule(),
+        BonusGame = new BonusGameSettings { Enabled = false },
         Events = [new EventDefinition { EventId = "one", Name = "One event", DeviceId = "station-01", Type = EventKind.Standard }]
     };
     using var h = new TestHarness(edition, NewPath());
@@ -1527,7 +1712,11 @@ static void DuplicateAndStale()
     Assert.Equal(MessageDisposition.Accepted, otherStation.Disposition);
     var staleEventOne = h.Send(run, "station-01", "event-press", "event-one-stale", 4_000);
     Assert.Equal(MessageDisposition.StaleTimestamp, staleEventOne.Disposition);
-    var eventOneCompletion = h.Send(run, "station-01", "event-press", "event-one-finish", 5_000);
+    // A finish press within half a second of the start is a double press and is ignored.
+    var doublePress = h.Send(run, "station-01", "event-press", "event-one-double", 5_000 + RunService.FinishPressLockoutMilliseconds - 1);
+    Assert.Equal(MessageDisposition.TooSoon, doublePress.Disposition);
+    Assert.Equal(EventStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == "station-01").Status);
+    var eventOneCompletion = h.Send(run, "station-01", "event-press", "event-one-finish", 5_000 + RunService.FinishPressLockoutMilliseconds);
     Assert.Equal(MessageDisposition.Accepted, eventOneCompletion.Disposition);
 }
 
@@ -1750,6 +1939,7 @@ static void VirtualPressReadinessFallback()
 
     Assert.Equal(MessageDisposition.Offline, h.Send(run, "station-01", "event-press", "unverified-packet").Disposition);
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "event-01").Disposition);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
     Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "event-01").Disposition);
     Assert.Equal(DeviceAvailability.Unverified, h.Service.GetOperatorSnapshot().Devices
         .Single(device => device.DeviceId == "station-01").Availability);
@@ -1802,6 +1992,7 @@ static void RestartAndOfficialRule()
     Assert.Equal(RunStatus.Completed, history.Single(r => r.Id == first.Id).Status);
     Assert.Equal(first.Id, h.Service.GetOperatorSnapshot().Leaderboard.Single().RunId);
 
+    h.StartRun();
     h.Service.Finish();
     h.Service.Record();
     Assert.Equal(RunStatus.Superseded, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == first.Id).Status);
@@ -2014,11 +2205,16 @@ static void HistoricalRecordKeepsOnDeckQueue()
     h.Clock.Advance(TimeSpan.FromSeconds(3));
     Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
 
+    // The next run waits for the timed-out one, so set it aside (delete) and bring it back
+    // afterwards to record it from history.
     var next = h.AddCompetitor("Next competitor");
     var onDeckCompetitor = h.AddCompetitor("On-deck competitor");
+    var oldRevision = h.Service.GetOperatorSnapshot().CurrentRun!.Revision;
+    h.Service.DeleteRun(old.Id, oldRevision, "Set aside");
     h.Service.ArmCompetitor(next.Id, RunCategory.Official, 60);
     var onDeck = h.Service.AddToQueue(onDeckCompetitor.Id, RunCategory.Official);
 
+    h.Service.RestoreRun(old.Id);
     h.Service.RecordHistoricalRun(old.Id);
     Assert.Equal(onDeck.Id, h.Service.GetOperatorSnapshot().Queue.Single().Id);
     Assert.Equal(onDeck.Id, h.Store.Load().Queue.Single().Id);
@@ -2047,11 +2243,14 @@ static void SecondOfficialCannotBeRecordedFromHistory()
     h.Clock.Advance(TimeSpan.FromSeconds(3));
     Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
 
+    var timedOutRevision = h.Service.GetOperatorSnapshot().CurrentRun!.Revision;
+    h.Service.DeleteRun(timedOut.Id, timedOutRevision, "Set aside");
     var second = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 60);
     h.StartRun();
     h.Service.Finish();
     h.Service.Record();
 
+    h.Service.RestoreRun(timedOut.Id);
     Assert.Throws<CommandException>(() => h.Service.RecordHistoricalRun(timedOut.Id));
     Assert.Equal(second.Id, h.Service.GetScoreboard().Leaderboard.Single(r => r.Category == RunCategory.Official).RunId);
     Assert.True(!h.Store.Load().Runs.Single(r => r.Id == timedOut.Id).IsRecorded);
@@ -2132,6 +2331,895 @@ static void PhysicalPressAgeBackdatesWithinActiveTime()
     var capped = h.Service.ReceivePhysicalSpokePress(new MasterPhysicalPress("boot", token, secondMac, 1, uint.MaxValue), sessionAllowed: true);
     Assert.Equal(MessageDisposition.Accepted, capped.Disposition);
     Assert.Equal<long?>(7_000L, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == secondMac).StartElapsedMs);
+}
+
+static EditionDefinition MakeKeypadSpokeEdition() => new()
+{
+    EditionId = "keypad-spoke-test-edition",
+    Name = "Keypad spoke test edition",
+    DurationLimitSeconds = 60,
+    Scoring = new ScoringRule(),
+    BonusGame = new BonusGameSettings { Enabled = false },
+    Events =
+    [
+        new EventDefinition { EventId = "regular", Name = "Regular", DeviceId = "AABBCCDDEEFF", Type = EventKind.Standard },
+        new EventDefinition { EventId = "keypad", Name = "Code Breaker", DeviceId = "001122334455", Type = EventKind.Keypad,
+            Prompt = "Summer League 2009", Answer = "D5*" }
+    ]
+};
+
+static void KeypadProtocolParsing()
+{
+    const string token = "0123456789ABCDEF";
+    Assert.True(MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 7 S D5 40", out var submit));
+    Assert.True(submit.Submit);
+    Assert.Equal("D5", submit.Entry);
+    Assert.Equal(7u, submit.Sequence);
+    Assert.Equal(40u, submit.AgeMilliseconds);
+    Assert.True(MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 8 K - 0", out var typing));
+    Assert.True(!typing.Submit);
+    Assert.Equal("", typing.Entry);
+    Assert.True(MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 9 K 0123456789#A 0", out _));
+
+    Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 9 S D5* 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 9 S d5 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 9 S 0123456789ABC 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 0 S D5 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 9 X D5 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 9 S D5", out _));
+    Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 KEYPAD boot {token} 001122334455 9 S  0", out _));
+    Assert.Equal($"GG1 RESULT {token} 001122334455 7 ACTIVE", MasterProtocolCodec.FormatKeypadResult(submit, "ACTIVE"));
+}
+
+static void PhysicalKeypadCodeFlow()
+{
+    const string regularMac = "AABBCCDDEEFF";
+    const string keypadMac = "001122334455";
+    using var h = new TestHarness(MakeKeypadSpokeEdition(), NewPath(), simulatedDevicesOnline: false);
+    h.Service.RecordDeviceScan(true, true, [regularMac, keypadMac]);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+
+    var protocol = new MasterProtocolState();
+    InputResult ReceiveStart(string boot, ulong sequence, bool allowed) => h.Service.ReceivePhysicalMasterStart(boot, sequence, allowed);
+    MasterPhysicalPressResult? pressResult = null;
+    MasterPhysicalPressResult? keypadResult = null;
+    MasterPhysicalPressResult ReceivePress(MasterPhysicalPress item, bool allowed) => pressResult = h.Service.ReceivePhysicalSpokePress(item, allowed);
+    MasterPhysicalPressResult? ReceiveKeypad(MasterKeypadInput item, bool allowed) => keypadResult = h.Service.ReceivePhysicalKeypadInput(item, allowed);
+    void Line(string line) => protocol.ProcessLine(line, ReceiveStart, ReceivePress, ReceiveKeypad);
+    Line("GG1 HELLO boot");
+    Line("GG1 MODE IDLE");
+
+    // The message stays hidden until the event is started, and typing before then is ignored.
+    Assert.Equal<ScoreboardKeypadChallenge?>(null, h.Service.GetScoreboard().CurrentRun!.KeypadChallenge);
+    Assert.Equal<string?>(null, h.Service.GetScoreboard().CurrentRun!.Events.Single(e => e.Name == "Code Breaker").Prompt);
+    Line($"GG1 KEYPAD boot {token} {keypadMac} 1 S D5 0");
+    Assert.Equal("REJECTED", keypadResult!.State);
+    Assert.Equal(EventStatus.Pending, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == keypadMac).Status);
+
+    h.Clock.Advance(TimeSpan.FromSeconds(2));
+    Line($"GG1 PRESS boot {token} {keypadMac} 2 0");
+    Assert.Equal(MessageDisposition.Accepted, pressResult!.Disposition);
+    Assert.Equal("ACTIVE", pressResult.State);
+    Assert.Contains(h.Service.GetMasterStatuses().EventSnapshot.Events, item => item.DeviceId == keypadMac && item.State == "ACTIVE");
+    var challenge = h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!;
+    Assert.Equal("Summer League 2009", challenge.Prompt);
+    Assert.Equal("", challenge.Entry);
+    Assert.True(!challenge.ShowWrong);
+
+    // A second button press cannot finish it, and the spoke is told the event is still running.
+    Line($"GG1 PRESS boot {token} {keypadMac} 3 0");
+    Assert.Equal(MessageDisposition.InvalidSignal, pressResult!.Disposition);
+    Assert.Equal("ACTIVE", pressResult.State);
+
+    // Typing updates reach the TV without an acknowledgement; stale updates are ignored.
+    keypadResult = null;
+    Line($"GG1 KEYPAD boot {token} {keypadMac} 5 K D55 0");
+    Assert.Equal<MasterPhysicalPressResult?>(null, keypadResult);
+    Line($"GG1 KEYPAD boot {token} {keypadMac} 4 K D 0");
+    Assert.Equal("D55", h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Entry);
+
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    Line($"GG1 KEYPAD boot {token} {keypadMac} 6 S D55 0");
+    Assert.Equal(MessageDisposition.Accepted, keypadResult!.Disposition);
+    Assert.Equal("ACTIVE", keypadResult.State);
+    challenge = h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!;
+    Assert.Equal("", challenge.Entry);
+    Assert.True(challenge.ShowWrong);
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.KeypadWrongDisplayMilliseconds));
+    Assert.True(!h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.ShowWrong);
+
+    // Keys are not accepted while paused, and the message stays up until the run resumes.
+    h.Service.Pause();
+    Line($"GG1 KEYPAD boot {token} {keypadMac} 7 S D5 0");
+    Assert.Equal(MessageDisposition.Paused, keypadResult!.Disposition);
+    Assert.True(h.Service.GetScoreboard().CurrentRun!.KeypadChallenge is not null);
+    h.Service.Resume();
+
+    h.Clock.Advance(TimeSpan.FromSeconds(3));
+    Line($"GG1 KEYPAD boot {token} {keypadMac} 8 S D5 250");
+    Assert.Equal(MessageDisposition.Accepted, keypadResult!.Disposition);
+    Assert.Equal("COMPLETED", keypadResult.State);
+    var completed = h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == keypadMac);
+    Assert.Equal(EventStatus.Completed, completed.Status);
+    Assert.Equal<long?>(2_000L, completed.StartElapsedMs);
+    Assert.Equal<long?>(7_750L, completed.FinishElapsedMs); // The 250 ms press age is back-dated.
+    Assert.Equal<ScoreboardKeypadChallenge?>(null, h.Service.GetScoreboard().CurrentRun!.KeypadChallenge);
+
+    // A retransmitted submission is a duplicate that still reports the completed state.
+    Line($"GG1 KEYPAD boot {token} {keypadMac} 8 S D5 250");
+    Assert.Equal(MessageDisposition.Duplicate, keypadResult!.Disposition);
+    Assert.Equal("COMPLETED", keypadResult.State);
+
+    // Codes sent to a regular event are refused.
+    Line($"GG1 PRESS boot {token} {regularMac} 1 0");
+    Line($"GG1 KEYPAD boot {token} {regularMac} 2 S D5 0");
+    Assert.Equal("REJECTED", keypadResult!.State);
+    Assert.Equal(EventStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == regularMac).Status);
+}
+
+static void KeypadOperatorOverrideAndAutoFinish()
+{
+    const string keypadMac = "001122334455";
+    using var h = new TestHarness(MakeKeypadSpokeEdition(), NewPath());
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "regular").Disposition);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "regular").Disposition);
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "keypad").Disposition);
+    Assert.Equal("Summer League 2009", h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Prompt);
+    // A double tap on the tile is not taken as the operator's override.
+    Assert.Equal(MessageDisposition.TooSoon, h.Service.PressEvent(run.Id, "keypad").Disposition);
+    Assert.Equal(EventStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad").Status);
+
+    // A physical wrong code followed by the operator's override finishes the event.
+    var wrong = h.Service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, 1, true, "1234"), sessionAllowed: true);
+    Assert.Equal("ACTIVE", wrong!.State);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    var overridden = h.Service.PressEvent(run.Id, "keypad");
+    Assert.Equal(MessageDisposition.Accepted, overridden.Disposition);
+    Assert.Equal(EventStatus.Completed, overridden.Run!.Events.Single(e => e.EventId == "keypad").Status);
+    Assert.Contains(h.Service.GetOperatorSnapshot().Messages, message =>
+        message.Type == "keypad-success" && message.MessageId.StartsWith("virtual-keypad-override", StringComparison.Ordinal));
+
+    // Regular and keypad events together finish the run like an all-regular roster.
+    var finished = h.Service.GetOperatorSnapshot().CurrentRun!;
+    Assert.Equal(RunStatus.Finished, finished.Status);
+    Assert.Equal(RunPhase.Normal, finished.Phase);
+    Assert.Equal<ScoreboardKeypadChallenge?>(null, h.Service.GetScoreboard().CurrentRun!.KeypadChallenge);
+}
+
+static void KeypadEventUndo()
+{
+    const string keypadMac = "001122334455";
+    using var h = new TestHarness(MakeKeypadSpokeEdition(), NewPath());
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    EventRecord Keypad() => h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad");
+
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    h.Service.PressEvent(run.Id, "keypad");
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    Assert.Equal("ACTIVE", h.Service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, 1, true, "99"), true)!.State);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    Assert.Equal("COMPLETED", h.Service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, 2, true, "D5"), true)!.State);
+
+    // The run-wide undo takes back the code that finished it; the TV message returns.
+    var undoneFinish = h.Service.UndoLastEventPress();
+    Assert.Equal(EventStatus.Active, undoneFinish.Events.Single(e => e.EventId == "keypad").Status);
+    Assert.Equal<long?>(null, Keypad().FinishElapsedMs);
+    Assert.Equal(0, Keypad().Score);
+    Assert.Equal("Summer League 2009", h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Prompt);
+    Assert.Contains(h.Service.GetMasterStatuses().EventSnapshot.Events, item => item.DeviceId == keypadMac && item.State == "ACTIVE");
+    Assert.Contains(h.Service.GetOperatorSnapshot().Messages, message =>
+        message.MessageId == MasterProtocolCodec.GetKeypadSubmitMessageId(token, keypadMac, 2) && message.Disposition == MessageDisposition.Undone);
+
+    // The event's own undo then takes back its start, even after a wrong code was entered.
+    h.Service.UndoEventPress("keypad");
+    Assert.Equal(EventStatus.Pending, Keypad().Status);
+    Assert.Equal<ScoreboardKeypadChallenge?>(null, h.Service.GetScoreboard().CurrentRun!.KeypadChallenge);
+    Assert.Throws<CommandException>(() => h.Service.UndoEventPress("keypad"));
+
+    // An operator override finishing the whole run is undone too, reopening the run.
+    h.Service.PressEvent(run.Id, "regular");
+    h.Service.PressEvent(run.Id, "keypad");
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    h.Service.PressEvent(run.Id, "regular");
+    h.Service.PressEvent(run.Id, "keypad");
+    Assert.Equal(RunStatus.Finished, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+    var reopened = h.Service.UndoEventPress("keypad");
+    Assert.Equal(RunStatus.Active, reopened.Status);
+    Assert.Equal(EventStatus.Active, reopened.Events.Single(e => e.EventId == "keypad").Status);
+    Assert.Equal(EventStatus.Completed, reopened.Events.Single(e => e.EventId == "regular").Status);
+}
+
+static void KeypadAnswerCsv()
+{
+    // The shipped answer file loads, and every message's code is its row label plus its column
+    // label, whatever size the grid is (read here straight from the file, not assumed).
+    var shipped = KeypadChallengeSet.LoadOrReportError(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..", "config", "keypad-answers.csv")));
+    if (!File.Exists(shipped.Source))
+    {
+        shipped = KeypadChallengeSet.LoadOrReportError(Path.Combine(AppContext.BaseDirectory, "config", "keypad-answers.csv"));
+    }
+    Assert.Equal<string?>(null, shipped.Error);
+    var grid = File.ReadAllLines(shipped.Source!).Select(line => line.Split(',')).ToList();
+    Assert.True(grid.All(cells => cells.All(cell => !cell.Contains('"'))), "the shipped grid has no quoted cells");
+    var expectedCodes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var cells in grid.Skip(1))
+    {
+        var rowLabel = cells[0].Trim().ToUpperInvariant();
+        for (var column = 1; column < cells.Length && rowLabel.Length > 0; column++)
+        {
+            var message = cells[column].Trim();
+            if (message.Length == 0) continue;
+            expectedCodes[message] = rowLabel == "##" ? "##" : rowLabel + grid[0][column].Trim().ToUpperInvariant();
+        }
+    }
+    Assert.True(expectedCodes.Count > 0);
+    Assert.Equal(expectedCodes.Count, shipped.Challenges.Count);
+    foreach (var challenge in shipped.Challenges)
+    {
+        Assert.Equal(expectedCodes[challenge.Prompt], challenge.Answer);
+    }
+    Assert.Equal("A2", shipped.Challenges.Single(c => c.Prompt == "rocket pepper 1819").Answer);
+
+    // Other grid sizes: nothing assumes four rows or sixteen columns.
+    var small = KeypadChallengeCsv.Parse(",1,2,3\nA,a1,a2,a3\nB,b1,,b3\n");
+    Assert.Equal(5, small.Count);
+    Assert.Equal("B3", small.Single(c => c.Prompt == "b3").Answer);
+    var wide = KeypadChallengeCsv.Parse("," + string.Join(",", Enumerable.Range(1, 20)) + "\nC," + string.Join(",", Enumerable.Range(1, 20).Select(i => $"c{i}")) + "\n");
+    Assert.Equal(20, wide.Count);
+    Assert.Equal("C20", wide.Single(c => c.Prompt == "c20").Answer);
+
+    var quoted = KeypadChallengeCsv.Parse(",1,2\r\nA,\"comma, here\",\"say \"\"hi\"\"\"\r\n,,\r\n##,any\r\n");
+    Assert.Equal("A1", quoted.Single(c => c.Prompt == "comma, here").Answer);
+    Assert.Equal("A2", quoted.Single(c => c.Prompt == "say \"hi\"").Answer);
+    Assert.Equal("##", quoted.Single(c => c.Prompt == "any").Answer);
+
+    Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\nA,same\nB,Same\n"));
+    Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\nE,untypable\n"));
+    Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\n,orphan\n"));
+    Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\n"));
+    Assert.True(KeypadChallengeSet.LoadOrReportError(Path.Combine(NewPath(), "missing.csv")).Error is not null);
+}
+
+static void KeypadMultipleCodes()
+{
+    const string keypadMac = "001122334455";
+    var edition = MakeKeypadSpokeEdition();
+    var keypadDefinition = edition.Events.Single(e => e.EventId == "keypad");
+    keypadDefinition.Prompt = null;
+    keypadDefinition.Answer = null;
+    keypadDefinition.RequiredSuccesses = 3;
+    var pool = new KeypadChallengeSet(
+        Enumerable.Range(1, 5).Select(i => new KeypadChallengeDefinition { Prompt = $"message {i}", Answer = $"A{i}" }).ToList(),
+        "test", null);
+    var path = NewPath();
+    var h = new TestHarness(edition, path, keypadChallenges: pool);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    uint sequence = 0;
+    EventRecord Keypad() => h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad");
+    string CurrentAnswer() => Keypad().Keypad!.Current!.Answer;
+    MasterPhysicalPressResult Submit(string code) =>
+        h.Service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, ++sequence, true, code), true)!;
+
+    h.Service.PressEvent(run.Id, "keypad");
+    var challenge = h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!;
+    Assert.Equal(0, challenge.Successes);
+    Assert.Equal(3, challenge.RequiredSuccesses);
+    Assert.Equal(Keypad().Keypad!.Current!.Prompt, challenge.Prompt);
+
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    var first = Keypad().Keypad!.Current!.Prompt;
+    Assert.Equal("ACTIVE", Submit("99").State);
+    var next = Submit(CurrentAnswer());
+    Assert.Equal("NEXT", next.State);
+    Assert.Equal(EventStatus.Active, Keypad().Status);
+    challenge = h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!;
+    Assert.Equal(1, challenge.Successes);
+    Assert.True(challenge.ShowCorrect);
+    Assert.True(challenge.Prompt != first, "a solved message is never shown again in the run");
+
+    // Persisted mid-event: a restart keeps the drawn messages and the count.
+    var secondPrompt = Keypad().Keypad!.Current!.Prompt;
+    h.Store.Dispose();
+    var reopenedStore = new RunStore(path);
+    var service = new RunService(reopenedStore, edition, h.Clock, pool);
+    var recovered = service.GetOperatorSnapshot().CurrentRun!;
+    Assert.Equal(1, recovered.Events.Single(e => e.EventId == "keypad").Keypad!.SolvedCount);
+    Assert.Equal(secondPrompt, recovered.Events.Single(e => e.EventId == "keypad").Keypad!.Current!.Prompt);
+    Assert.Equal(5, recovered.Edition.KeypadChallenges!.Count);
+    if (recovered.Status == RunStatus.Paused) service.Resume();
+
+    EventRecord K() => service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad");
+    MasterPhysicalPressResult Send(string code) =>
+        service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, ++sequence, true, code), true)!;
+
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    var secondCode = K().Keypad!.Current!.Answer;
+    var secondMessageSequence = sequence + 1;
+    Assert.Equal("NEXT", Send(secondCode).State);
+    // A retransmitted correct submission still reports NEXT, never a wrong code.
+    Assert.Equal("NEXT", service.ReceivePhysicalKeypadInput(
+        new MasterKeypadInput("boot", token, keypadMac, secondMessageSequence, true, secondCode), true)!.State);
+    // The operator's tap credits one message, finishing on the third.
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    var third = K().Keypad!.Current!.Prompt;
+    Assert.Equal(MessageDisposition.Accepted, service.PressEvent(run.Id, "keypad").Disposition);
+    Assert.Equal(EventStatus.Completed, K().Status);
+    Assert.Equal(3, K().Keypad!.Challenges.Select(c => c.Prompt).Distinct().Count());
+    Assert.Equal<ScoreboardKeypadChallenge?>(null, service.GetScoreboard().CurrentRun!.KeypadChallenge);
+
+    // Undo steps back one code at a time, putting that message back on the TV.
+    service.UndoEventPress("keypad");
+    Assert.Equal(EventStatus.Active, K().Status);
+    Assert.Equal(2, K().Keypad!.SolvedCount);
+    Assert.Equal(third, service.GetScoreboard().CurrentRun!.KeypadChallenge!.Prompt);
+    service.UndoLastEventPress();
+    Assert.Equal(1, K().Keypad!.SolvedCount);
+    Assert.Equal(secondPrompt, K().Keypad!.Current!.Prompt);
+    Assert.Equal(2, K().Keypad!.Challenges.Count);
+    service.UndoEventPress("keypad");
+    Assert.Equal(0, K().Keypad!.SolvedCount);
+    Assert.Equal(first, K().Keypad!.Current!.Prompt);
+    service.UndoEventPress("keypad");
+    Assert.Equal(EventStatus.Pending, K().Status);
+    Assert.Equal<KeypadProgress?>(null, K().Keypad);
+    Assert.Contains(service.GetOperatorSnapshot().Edits, edit => edit.Reason == "Undid the latest code 3 of 3 for 'Code Breaker'.");
+
+    // A scorecard reset forgets the messages; restarting draws afresh.
+    service.PressEvent(run.Id, "keypad");
+    Assert.True(K().Keypad!.Current is not null);
+    service.ClearEvent(run.Id, "keypad", 0);
+    Assert.Equal<KeypadProgress?>(null, K().Keypad);
+    reopenedStore.Dispose();
+    Cleanup(path);
+}
+
+static void ServerCountdownAndSounds()
+{
+    using var h = new TestHarness(MakeKeypadSpokeEdition(), NewPath());
+    var sounds = new RecordingSoundPlayer();
+    h.Service.SoundCueRequested += cue => sounds.Play(cue);
+    var countdown = new RunTimingHostedService(h.Service, sounds);
+
+    Assert.True(!countdown.TickCountdown());
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    Assert.True(!countdown.TickCountdown());
+    Assert.Equal(0, sounds.Played.Count);
+
+    h.Service.StartMaster();
+    Assert.True(!countdown.TickCountdown());
+    Assert.Equal(SoundCue.Countdown, sounds.Played.Single());
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunTimingHostedService.GoAtMilliseconds - 1));
+    Assert.True(!countdown.TickCountdown());
+    Assert.Equal(1, sounds.Played.Count); // The voice plays once per countdown.
+    Assert.Equal(RunStatus.Countdown, h.Service.GetCountdownState().Status);
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1));
+    Assert.True(countdown.TickCountdown());
+    Assert.Equal(RunStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+    Assert.True(!countdown.TickCountdown());
+    // The page's backup Go afterwards is harmless.
+    Assert.Equal(RunStatus.Active, h.Service.CompleteCountdown(run.Id).Status);
+
+    // Each keypad message drawn plays the chime.
+    h.Service.PressEvent(run.Id, "keypad");
+    Assert.Equal(SoundCue.KeypadMessage, sounds.Played.Last());
+    Assert.Equal(2, sounds.Played.Count);
+
+    // A wrong code buzzes once; the keypad's retransmission of the same entry doesn't buzz again.
+    var keypadToken = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    var wrongCode = new MasterKeypadInput("boot", keypadToken, "001122334455", 1, true, "1234");
+    Assert.Equal("ACTIVE", h.Service.ReceivePhysicalKeypadInput(wrongCode, true)!.State);
+    Assert.Equal(SoundCue.KeypadWrong, sounds.Played.Last());
+    h.Service.ReceivePhysicalKeypadInput(wrongCode, true);
+    Assert.Equal(3, sounds.Played.Count);
+
+    // A countdown first noticed well after it began still starts on time, but without a
+    // voice that would be out of step with Go.
+    using var late = new TestHarness(MakeKeypadSpokeEdition(), NewPath());
+    var lateSounds = new RecordingSoundPlayer();
+    var lateCountdown = new RunTimingHostedService(late.Service, lateSounds);
+    late.Service.Arm(late.Service.GetOperatorSnapshot().Queue.Single().Id);
+    late.Service.StartMaster();
+    late.Clock.Advance(TimeSpan.FromMilliseconds(1_200));
+    Assert.True(!lateCountdown.TickCountdown());
+    Assert.Equal(0, lateSounds.Played.Count);
+    late.Clock.Advance(TimeSpan.FromMilliseconds(RunTimingHostedService.GoAtMilliseconds));
+    Assert.True(lateCountdown.TickCountdown());
+}
+
+static void DiscardTimedOutRun()
+{
+    using var h = NewHarness(durationSeconds: 10);
+    var run = h.ArmAndStart();
+    h.Send(run, "station-01", "event-press", "timeout-discard-start", 1_000);
+    h.Clock.Advance(TimeSpan.FromSeconds(11));
+    var timedOut = h.Service.GetOperatorSnapshot().CurrentRun!;
+    Assert.Equal(RunStatus.TimedOut, timedOut.Status);
+    Assert.True(!timedOut.IsRecorded);
+    var timedOutAt = timedOut.FinishedAt;
+
+    var discarded = h.Service.Abort("Operator discarded the timed-out run.");
+    Assert.Equal(run.Id, discarded.Id);
+    Assert.Equal(RunStatus.Aborted, discarded.Status);
+    Assert.Equal(timedOutAt, discarded.FinishedAt); // It keeps the moment it timed out.
+    Assert.Equal(10_000L, discarded.ActiveElapsedMs);
+    Assert.DoesNotContain(h.Service.GetScoreboard().Leaderboard, row => row.RunId == run.Id);
+    Assert.Throws<CommandException>(() => h.Service.Record());
+    Assert.Throws<CommandException>(() => h.Service.Abort());
+    Assert.Contains(h.Service.GetOperatorSnapshot().Messages, message => message.Type == "operator-abort" && message.RunId == run.Id);
+
+    // Once recorded, a timed-out run is a result and is changed only from history.
+    h.Service.AddToQueue(h.CompetitorId, RunCategory.Exhibition);
+    var second = h.ArmAndStart(RunCategory.Exhibition);
+    h.Clock.Advance(TimeSpan.FromSeconds(11));
+    Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+    h.Service.Record();
+    Assert.Throws<CommandException>(() => h.Service.Abort());
+    Assert.Equal(RunStatus.TimedOut, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == second.Id).Status);
+}
+
+static EditionDefinition MakeBonusEdition(int durationSeconds = 60) => new()
+{
+    EditionId = "bonus-test-edition",
+    Name = "Bonus test edition",
+    DurationLimitSeconds = durationSeconds,
+    Scoring = new ScoringRule(),
+    BonusGame = new BonusGameSettings
+    {
+        PointsPerPress = 5, InitialWindowMs = 4_000, StepMs = 1_000, StepEveryMs = 3_000, MinimumWindowMs = 2_000
+    },
+    Events =
+    [
+        new EventDefinition { EventId = "first", Name = "First", DeviceId = "AABBCCDDEEFF", Type = EventKind.Standard },
+        new EventDefinition { EventId = "second", Name = "Second", DeviceId = "001122334455", Type = EventKind.Standard },
+        new EventDefinition { EventId = "third", Name = "Third", DeviceId = "0A0B0C0D0E0F", Type = EventKind.Standard }
+    ]
+};
+
+static void BonusRoundSwapsDeadButtons()
+{
+    const string first = "AABBCCDDEEFF", second = "001122334455";
+    using var h = new TestHarness(MakeBonusEdition(), NewPath());
+    var run = h.ArmAndStart();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    FinishAllEvents(h, run);
+    BonusGameRecord Bonus() => h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame!;
+    void Beat(string mac, uint shown = 0) => h.Service.ReceiveBonusBeat(token, mac, shown);
+
+    // Two buttons answer the poll and send heartbeats through the intro.
+    h.Service.ReceiveBonusPollReply(token, first);
+    h.Service.ReceiveBonusPollReply(token, second);
+    Beat(first);
+    Beat(second);
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+    Assert.True(h.Service.TickBonusGame());
+    var lit = Bonus().TargetDeviceId!;
+    var other = lit == first ? second : first;
+    Assert.True(Bonus().TargetAwaitingReady, "the window waits for the lit button to confirm");
+
+    // The lit button never confirms (switched off as it lit): another button is lit instead.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusReadyTimeoutMilliseconds));
+    Beat(other);
+    Assert.True(h.Service.TickBonusGame());
+    Assert.Equal(other, Bonus().TargetDeviceId);
+    Assert.Equal(1, Bonus().TargetsReplaced);
+    Assert.Equal(BonusGamePhase.Target, Bonus().Phase);
+
+    // It confirms: the window starts now, at full length.
+    Assert.True(h.Service.ReceiveBonusBeat(token, other, (uint)Bonus().Sequence));
+    Assert.True(!Bonus().TargetAwaitingReady);
+    var status = h.Service.GetMasterBonusStatus();
+    Assert.Equal(Bonus().TargetWindowMs, status.RemainingMs);
+
+    // A hit lights the next button, which must be alive: only the first, which came back.
+    Beat(lit);
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, other == first ? "first" : "second").Disposition);
+    Assert.Equal(1, Bonus().Hits);
+    Assert.Equal(lit, Bonus().TargetDeviceId);
+    Assert.True(h.Service.ReceiveBonusBeat(token, lit, (uint)Bonus().Sequence));
+
+    // The lit button goes silent mid-window while the other keeps answering: swapped, no miss.
+    for (var step = 0; step < 5; step++)
+    {
+        h.Clock.Advance(TimeSpan.FromMilliseconds(700));
+        Beat(other);
+        h.Service.TickBonusGame();
+    }
+    Assert.Equal(other, Bonus().TargetDeviceId);
+    Assert.Equal(2, Bonus().TargetsReplaced);
+    Assert.Equal(BonusGamePhase.Target, Bonus().Phase);
+
+    // Every button goes quiet: the round ends as "no buttons", not a miss, keeping its hit.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusReadyTimeoutMilliseconds + RunService.BonusButtonAliveMilliseconds));
+    h.Service.TickBonusGame();
+    var ended = h.Service.GetOperatorSnapshot().CurrentRun!;
+    Assert.Equal(BonusGamePhase.Ended, ended.BonusGame!.Phase);
+    Assert.Equal("no-buttons", ended.BonusGame.EndReason);
+    Assert.Equal(1, ended.BonusGame.Hits);
+    Assert.Equal(RunStatus.Finished, ended.Status);
+}
+
+static void FinishAllEvents(TestHarness h, RunRecord run)
+{
+    foreach (var eventId in new[] { "first", "second", "third" })
+    {
+        h.Service.PressEvent(run.Id, eventId);
+        h.Clock.Advance(TimeSpan.FromMilliseconds(500));
+        h.Service.PressEvent(run.Id, eventId);
+    }
+}
+
+static void BonusRoundMissEndsRun()
+{
+    using var h = new TestHarness(MakeBonusEdition(), NewPath());
+    var sounds = new List<SoundCue>();
+    h.Service.SoundCueRequested += sounds.Add;
+    var run = h.ArmAndStart();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    FinishAllEvents(h, run);
+    RunRecord Current() => h.Service.GetOperatorSnapshot().CurrentRun!;
+
+    // The last event starts the bonus intro; the clock keeps running.
+    Assert.Equal(RunStatus.Active, Current().Status);
+    Assert.Equal(RunPhase.Bonus, Current().Phase);
+    Assert.Equal(BonusGamePhase.Intro, Current().BonusGame!.Phase);
+    Assert.Equal("INTRO", h.Service.GetMasterBonusStatus().Phase);
+    Assert.Equal(BonusGamePhase.Intro, h.Service.GetScoreboard().CurrentRun!.BonusGame!.Phase);
+    Assert.True(!h.Service.TickBonusGame());
+    // Round numbers start from a random base, never 1, so buttons can't mistake this round's
+    // targets for ones they were hit on in an earlier run.
+    var introSequence = h.Service.GetMasterBonusStatus().Sequence;
+    Assert.True(introSequence >= 1_000, $"intro sequence {introSequence} should start from a random base");
+
+    // Two buttons answer the poll; the third (and unknown buttons) are never lit.
+    h.Service.ReceiveBonusPollReply(token, "AABBCCDDEEFF");
+    h.Service.ReceiveBonusPollReply(token, "001122334455");
+    h.Service.ReceiveBonusPollReply(token, "FFFFFFFFFFFF");
+    h.Service.ReceiveBonusPollReply("0000000000000000", "0A0B0C0D0E0F");
+    Assert.Equal(2, Current().BonusGame!.RespondingDeviceIds.Count);
+
+    // After the intro, the chime plays and the first target lights.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+    Assert.True(h.Service.TickBonusGame());
+    Assert.Equal(SoundCue.BonusStart, sounds.Single());
+    var bonus = Current().BonusGame!;
+    Assert.Equal(BonusGamePhase.Target, bonus.Phase);
+    Assert.Equal(4_000L, bonus.TargetWindowMs);
+    Assert.True(bonus.TargetEventId is "first" or "second");
+    var status = h.Service.GetMasterBonusStatus();
+    Assert.Equal("TARGET", status.Phase);
+    Assert.Equal(introSequence + 1, status.Sequence);
+    Assert.Equal(bonus.TargetDeviceId, status.DeviceId);
+    Assert.Equal(4_000L, status.RemainingMs);
+    Assert.Equal(4_000L, h.Service.GetScoreboard().CurrentRun!.BonusGame!.TargetRemainingMs);
+
+    // A button that is not lit does not count.
+    var other = bonus.TargetEventId == "first" ? "second" : "first";
+    Assert.Equal(MessageDisposition.InvalidSignal, h.Service.PressEvent(run.Id, other).Disposition);
+    Assert.Equal(0, Current().BonusGame!.Hits);
+
+    // A virtual tap on the lit button is a hit, and the next target is a different button.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1_000));
+    var firstTarget = bonus.TargetEventId!;
+    Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, firstTarget).Disposition);
+    bonus = Current().BonusGame!;
+    Assert.Equal(1, bonus.Hits);
+    Assert.True(bonus.TargetEventId != firstTarget, "the same button is never lit twice in a row");
+    Assert.True(bonus.TargetEventId != "third", "only buttons that answered are lit");
+
+    // A physical press counts from when it was pressed, and the button is told its event is
+    // still complete (no red "rejected" blink) even for a press that does not count.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(600));
+    var physical = h.Service.ReceivePhysicalSpokePress(
+        new MasterPhysicalPress("boot", token, bonus.TargetDeviceId!, 1, 200), sessionAllowed: true);
+    Assert.Equal(MessageDisposition.Accepted, physical.Disposition);
+    Assert.Equal("COMPLETED", physical.State);
+    bonus = Current().BonusGame!;
+    Assert.Equal(2, bonus.Hits);
+    var wrongDevice = bonus.TargetDeviceId == "AABBCCDDEEFF" ? "001122334455" : "AABBCCDDEEFF";
+    var notCounted = h.Service.ReceivePhysicalSpokePress(new MasterPhysicalPress("boot", token, wrongDevice, 2), sessionAllowed: true);
+    Assert.Equal(MessageDisposition.InvalidSignal, notCounted.Disposition);
+    Assert.Equal("COMPLETED", notCounted.State);
+
+    // Windows shrink every 3 s of bonus time, down to the 2 s minimum.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1_500));
+    h.Service.PressEvent(run.Id, bonus.TargetEventId!); // 3.1 s into the bonus.
+    Assert.Equal(3_000L, Current().BonusGame!.TargetWindowMs);
+    h.Clock.Advance(TimeSpan.FromMilliseconds(2_900));
+    h.Service.PressEvent(run.Id, Current().BonusGame!.TargetEventId!);
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1_900));
+    h.Service.PressEvent(run.Id, Current().BonusGame!.TargetEventId!);
+    Assert.Equal(2_000L, Current().BonusGame!.TargetWindowMs);
+    Assert.Equal(5, Current().BonusGame!.Hits);
+    Assert.Throws<CommandException>(() => h.Service.UndoLastEventPress());
+
+    // Pausing freezes the lit button's time.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1_000));
+    h.Service.Pause();
+    h.Clock.Advance(TimeSpan.FromSeconds(20));
+    Assert.True(!h.Service.TickBonusGame());
+    Assert.Equal(RunStatus.Paused, Current().Status);
+    Assert.Equal("OFF", h.Service.GetMasterBonusStatus().Phase);
+    h.Service.Resume();
+    Assert.Equal(1_000L, h.Service.GetMasterBonusStatus().RemainingMs);
+
+    // A miss (after the radio grace) ends the run where the window closed, with the points.
+    var deadline = Current().BonusGame!.TargetDeadlineElapsedMs!.Value;
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1_000 + RunService.BonusMissGraceMilliseconds));
+    Assert.True(!h.Service.TickBonusGame());
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1));
+    Assert.True(h.Service.TickBonusGame());
+    var finished = Current();
+    Assert.Equal(RunStatus.Finished, finished.Status);
+    Assert.Equal(deadline, finished.ActiveElapsedMs);
+    Assert.Equal(BonusGamePhase.Ended, finished.BonusGame!.Phase);
+    Assert.Equal("miss", finished.BonusGame.EndReason);
+    Assert.Equal<int?>(25, finished.BonusGame.AwardedPoints);
+    Assert.Equal(finished.Events.Sum(e => e.Score) + 25, finished.TotalPoints);
+    Assert.Equal("OFF", h.Service.GetMasterBonusStatus().Phase);
+    Assert.Equal<int?>(25, h.Service.GetScoreboard().CurrentRun!.BonusGame!.AwardedPoints);
+    Assert.Equal(finished.TotalPoints, h.Service.GetScoreboard().CurrentRun!.AwardedPoints);
+
+    // The awarded points reach the standings once recorded, and survive a restart.
+    var recorded = h.Service.Record();
+    Assert.Equal(finished.TotalPoints, h.Service.GetScoreboard().Leaderboard.Single(r => r.RunId == run.Id).Points);
+    var reloaded = h.Store.Load().Runs.Single(r => r.Id == run.Id);
+    Assert.Equal<int?>(25, reloaded.BonusGame!.AwardedPoints);
+    Assert.Equal(recorded.TotalPoints, reloaded.TotalPoints);
+}
+
+static void BonusRoundOtherEndings()
+{
+    // Running out of run time during the bonus is a timeout that keeps the hits.
+    using (var h = new TestHarness(MakeBonusEdition(durationSeconds: 8), NewPath()))
+    {
+        var run = h.ArmAndStart();
+        FinishAllEvents(h, run); // 1.5 s used.
+        // Nothing answered the poll (no master): every event's tile can be lit.
+        h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+        h.Service.TickBonusGame();
+        var seen = new HashSet<string>();
+        for (var hit = 0; hit < 4; hit++)
+        {
+            var target = h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame!.TargetEventId!;
+            seen.Add(target);
+            h.Clock.Advance(TimeSpan.FromMilliseconds(500));
+            Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, target).Disposition);
+        }
+        Assert.True(seen.Count >= 2);
+        h.Clock.Advance(TimeSpan.FromSeconds(10));
+        var timedOut = h.Service.GetOperatorSnapshot().CurrentRun!;
+        Assert.Equal(RunStatus.TimedOut, timedOut.Status);
+        Assert.Equal("timeout", timedOut.BonusGame!.EndReason);
+        Assert.Equal<int?>(20, timedOut.BonusGame.AwardedPoints);
+        Assert.True(!h.Service.TickBonusGame());
+    }
+
+    // The operator finishing during the bonus keeps the hits so far.
+    using (var h = new TestHarness(MakeBonusEdition(), NewPath()))
+    {
+        var run = h.ArmAndStart();
+        FinishAllEvents(h, run);
+        h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+        h.Service.TickBonusGame();
+        h.Service.PressEvent(run.Id, h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame!.TargetEventId!);
+        var finished = h.Service.Finish();
+        Assert.Equal("operator", finished.BonusGame!.EndReason);
+        Assert.Equal<int?>(5, finished.BonusGame.AwardedPoints);
+    }
+
+    // No bonus when the last event finishes with no time left, or when it is turned off.
+    var disabled = MakeBonusEdition();
+    disabled.BonusGame!.Enabled = false;
+    using (var h = new TestHarness(disabled, NewPath()))
+    {
+        var run = h.ArmAndStart();
+        FinishAllEvents(h, run);
+        Assert.Equal(RunStatus.Finished, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+        Assert.Equal<BonusGameRecord?>(null, h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame);
+    }
+}
+
+static void BonusRoundCorrections()
+{
+    using var h = new TestHarness(MakeBonusEdition(), NewPath());
+    var run = h.ArmAndStart();
+    FinishAllEvents(h, run);
+    RunRecord Current() => h.Service.GetOperatorSnapshot().CurrentRun!;
+    EditRunRequest Edit(EventEditRequest bonusEdit) => new()
+    {
+        ExpectedRevision = Current().Revision,
+        Reason = "Scorecard correction",
+        Events = [bonusEdit]
+    };
+    EventEditRequest Bonus() => new() { EventId = RunService.BonusEventId };
+
+    // Not while the round is running.
+    var live = Bonus();
+    live.Hits = 3;
+    Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(Edit(live)));
+
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+    h.Service.TickBonusGame();
+    h.Service.PressEvent(run.Id, Current().BonusGame!.TargetEventId!);
+    h.Service.PressEvent(run.Id, Current().BonusGame!.TargetEventId!);
+    h.Clock.Advance(TimeSpan.FromMilliseconds(4_000 + RunService.BonusMissGraceMilliseconds + 1));
+    h.Service.TickBonusGame();
+    var eventPoints = Current().Events.Sum(e => e.Score);
+    Assert.Equal(eventPoints + 10, Current().TotalPoints);
+
+    // Hits recalculate points; an override replaces them; clearing it restores them.
+    var hits = Bonus();
+    hits.Hits = 4;
+    Assert.Equal(eventPoints + 20, h.Service.EditCurrentRun(Edit(hits)).TotalPoints);
+    var manual = Bonus();
+    manual.ScoreOverride = 50;
+    Assert.Equal(eventPoints + 50, h.Service.EditCurrentRun(Edit(manual)).TotalPoints);
+    Assert.Equal<int?>(50, h.Service.GetScoreboard().CurrentRun!.BonusGame!.AwardedPoints);
+    var restore = Bonus();
+    restore.ClearScoreOverride = true;
+    Assert.Equal(eventPoints + 20, h.Service.EditCurrentRun(Edit(restore)).TotalPoints);
+
+    // Like event times, a later end extends a finished run's timeline, but never past the
+    // run limit; an end before the start is refused.
+    var tooLate = Bonus();
+    tooLate.FinishElapsedMs = Current().Edition.DurationLimitSeconds * 1000L + 1;
+    Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(Edit(tooLate)));
+    var backwards = Bonus();
+    backwards.FinishElapsedMs = Current().BonusGame!.StartedElapsedMs - 1;
+    Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(Edit(backwards)));
+    var negativeHits = Bonus();
+    negativeHits.Hits = -1;
+    Assert.Throws<CommandException>(() => h.Service.EditCurrentRun(Edit(negativeHits)));
+
+    // Recorded results are corrected from history and flow to the standings.
+    h.Service.Record();
+    var historyEdit = Bonus();
+    historyEdit.Hits = 1;
+    var corrected = h.Service.EditHistoricalRun(run.Id, new EditRunRequest
+    {
+        ExpectedRevision = h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).Revision,
+        Reason = "History correction",
+        Events = [historyEdit]
+    });
+    Assert.Equal(eventPoints + 5, corrected.TotalPoints);
+    Assert.Equal(eventPoints + 5, h.Service.GetScoreboard().Leaderboard.Single(r => r.RunId == run.Id).Points);
+
+    // Clear removes the bonus result like an event's.
+    var cleared = h.Service.ClearEvent(run.Id, RunService.BonusEventId, corrected.Revision);
+    Assert.Equal<BonusGameRecord?>(null, cleared.BonusGame);
+    Assert.Equal(eventPoints, cleared.TotalPoints);
+    Assert.Throws<CommandException>(() => h.Service.ClearEvent(run.Id, RunService.BonusEventId, cleared.Revision));
+
+    // A run that never reached the bonus can have one entered from history.
+    var entered = Bonus();
+    entered.StartElapsedMs = 1_000;
+    entered.FinishElapsedMs = 2_000;
+    entered.Hits = 2;
+    var withBonus = h.Service.EditHistoricalRun(run.Id, new EditRunRequest
+    {
+        ExpectedRevision = cleared.Revision,
+        Reason = "Bonus entered by hand",
+        Events = [entered]
+    });
+    Assert.Equal(BonusGamePhase.Ended, withBonus.BonusGame!.Phase);
+    Assert.Equal(eventPoints + 10, withBonus.TotalPoints);
+    Assert.Equal(RunStatus.Completed, withBonus.Status);
+}
+
+static void ScoreboardEventDurations()
+{
+    using var h = NewHarness();
+    var run = h.ArmAndStart();
+    h.Clock.Advance(TimeSpan.FromSeconds(2));
+    h.Service.PressEvent(run.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromMilliseconds(34_600));
+    h.Service.PressEvent(run.Id, "event-01");
+    h.Service.PressEvent(run.Id, "event-04");
+    var events = h.Service.GetScoreboard().CurrentRun!.Events;
+    Assert.Equal<long?>(34_600L, events.Single(e => e.Name == "Event 1").DurationMs);
+    Assert.Equal<long?>(null, events.Single(e => e.Name == "Event 4").DurationMs); // Still running.
+    Assert.Equal<long?>(null, events.Single(e => e.Name == "Keypad").DurationMs); // Not started.
+}
+
+static void UpNextOnTheTv()
+{
+    using var h = NewHarness();
+    var first = h.ArmAndStart();
+    h.Send(first, "station-01", "event-press", "up-next-start", 0);
+    // Not while a run is in progress (or awaiting recording).
+    var next = h.AddCompetitor("Next Up");
+    Assert.Throws<CommandException>(() => h.Service.PrimeNextCompetitor(next.Id, RunCategory.Official, 240));
+    h.Service.Finish();
+    h.Service.Record();
+    Assert.Equal(h.CompetitorName, h.Service.GetScoreboard().CurrentRun!.CompetitorName);
+
+    h.Service.AddToQueue(next.Id, RunCategory.Official);
+    var third = h.AddCompetitor("Third");
+    h.Service.AddToQueue(third.Id, RunCategory.Official);
+    Assert.Throws<CommandException>(() => h.Service.PrimeNextCompetitor(next.Id, RunCategory.Official, null));
+    var primed = h.Service.PrimeNextCompetitor(next.Id, RunCategory.Official, 240);
+    Assert.Equal(240, primed.DurationLimitSeconds);
+    Assert.Equal(primed, h.Service.GetOperatorSnapshot().Primed);
+
+    // The TV shows them with the full clock, every event pending, and no points; the
+    // on-deck list moves past them.
+    var board = h.Service.GetScoreboard();
+    Assert.Equal("Next Up", board.CurrentRun!.CompetitorName);
+    Assert.True(board.CurrentRun.IsPrimed);
+    Assert.Equal(240_000L, board.CurrentRun.RemainingMilliseconds);
+    Assert.Equal(0, board.CurrentRun.AwardedPoints);
+    Assert.Equal(0, board.CurrentRun.CompletedEvents);
+    Assert.True(board.CurrentRun.Events.All(e => e.Status == EventStatus.Pending && e.AwardedPoints == 0));
+    Assert.Equal(240, board.DurationLimitSeconds);
+    Assert.Equal("Third", board.OnDeckName);
+
+    // Arming a run replaces it; after that run, the TV shows that run, not the old prime.
+    h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.First(item => item.CompetitorId == next.Id).Id);
+    Assert.True(!h.Service.GetScoreboard().CurrentRun!.IsPrimed);
+    Assert.Equal<PrimedCompetitor?>(null, h.Service.GetOperatorSnapshot().Primed);
+    h.StartRun();
+    h.Service.Finish();
+    h.Service.Record();
+    Assert.True(!h.Service.GetScoreboard().CurrentRun!.IsPrimed);
+    Assert.Equal("Next Up", h.Service.GetScoreboard().CurrentRun!.CompetitorName);
+}
+
+static void BonusRoundSetup()
+{
+    using var h = new TestHarness(MakeBonusEdition(), NewPath());
+    var setup = h.Service.GetSetup();
+    Assert.Equal(5, setup.BonusGame!.PointsPerPress);
+    setup.BonusGame.PointsPerPress = 12;
+    setup.BonusGame.InitialWindowMs = 6_000;
+    var saved = h.Service.UpdateSetup(setup);
+    Assert.Equal(12, saved.BonusGame!.PointsPerPress);
+    Assert.Equal(setup.EditionId, saved.EditionId); // No recorded runs yet: same edition.
+
+    var run = h.ArmAndStart();
+    Assert.Equal(12, h.Service.GetOperatorSnapshot().CurrentRun!.Edition.BonusGame!.PointsPerPress);
+    h.Service.Finish();
+    h.Service.Record();
+
+    var invalid = h.Service.GetSetup();
+    invalid.BonusGame!.MinimumWindowMs = 7_000; // Longer than the starting window.
+    Assert.Throws<CommandException>(() => h.Service.UpdateSetup(invalid));
+
+    // Renaming the round is not a scoring change: same edition, new name for new runs.
+    var renamed = h.Service.GetSetup();
+    Assert.Equal(BonusGameSettings.DefaultName, renamed.BonusGame!.Name);
+    renamed.BonusGame.Name = "  Lightning Round ";
+    var renamedSaved = h.Service.UpdateSetup(renamed);
+    Assert.Equal(setup.EditionId, renamedSaved.EditionId);
+    Assert.Equal("Lightning Round", renamedSaved.BonusGame!.Name);
+    Assert.Equal("Lightning Round", h.Service.GetOperatorSnapshot().BonusGame!.Name);
+    var tooLong = h.Service.GetSetup();
+    tooLong.BonusGame!.Name = new string('x', BonusGameSettings.MaximumNameLength + 1);
+    Assert.Throws<CommandException>(() => h.Service.UpdateSetup(tooLong));
+
+    var changed = h.Service.GetSetup();
+    changed.BonusGame!.PointsPerPress = 3;
+    var versioned = h.Service.UpdateSetup(changed);
+    Assert.True(versioned.EditionId != setup.EditionId, "changing bonus scoring after recorded runs versions the edition");
+    Assert.Equal(12, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).Edition.BonusGame!.PointsPerPress);
+
+    // New runs carry the name to the TV.
+    h.Service.AddToQueue(h.CompetitorId, RunCategory.Exhibition);
+    var named = h.ArmAndStart(RunCategory.Exhibition);
+    FinishAllEvents(h, named);
+    Assert.Equal("Lightning Round", h.Service.GetScoreboard().CurrentRun!.BonusGame!.Name);
 }
 
 static void DeletedRunsHideAndRestore()
@@ -2252,12 +3340,13 @@ static void SchemaVersion1UpgradesWithBackup()
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "ALTER TABLE runs DROP COLUMN recorded_at; ALTER TABLE runs DROP COLUMN deleted_at; " +
-            "ALTER TABLE runs DROP COLUMN superseded_from_status; UPDATE meta SET value = '1' WHERE key = 'schema_version';";
+            "ALTER TABLE runs DROP COLUMN superseded_from_status; ALTER TABLE run_events DROP COLUMN keypad_json; " +
+            "ALTER TABLE runs DROP COLUMN bonus_game_json; UPDATE meta SET value = '1' WHERE key = 'schema_version';";
         command.ExecuteNonQuery();
     }
 
     var upgradedStore = new RunStore(path);
-    Assert.Equal(1, Directory.GetFiles(Path.Combine(path, "backups"), "garage-games-v2-pre-schema-3-*.db").Length);
+    Assert.Equal(1, Directory.GetFiles(Path.Combine(path, "backups"), "garage-games-v2-pre-schema-5-*.db").Length);
     var upgradedRun = upgradedStore.Load().Runs.Single(r => r.Id == run.Id);
     Assert.True(upgradedRun.RecordedAt is not null);
     Assert.True(!upgradedRun.IsDeleted);
@@ -2268,12 +3357,24 @@ static void SchemaVersion1UpgradesWithBackup()
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT value FROM meta WHERE key = 'schema_version'";
-        Assert.Equal("3", command.ExecuteScalar() as string);
+        Assert.Equal("5", command.ExecuteScalar() as string);
     }
 
     var reopenedStore = new RunStore(path);
-    Assert.Equal(1, Directory.GetFiles(Path.Combine(path, "backups"), "garage-games-v2-pre-schema-3-*.db").Length);
+    Assert.Equal(1, Directory.GetFiles(Path.Combine(path, "backups"), "garage-games-v2-pre-schema-5-*.db").Length);
     reopenedStore.Dispose();
+
+    // A schema 3 database gains the keypad and bonus round columns.
+    using (var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
+    {
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "ALTER TABLE run_events DROP COLUMN keypad_json; ALTER TABLE runs DROP COLUMN bonus_game_json; UPDATE meta SET value = '3' WHERE key = 'schema_version';";
+        command.ExecuteNonQuery();
+    }
+    var fromThree = new RunStore(path);
+    Assert.Equal(run.Id, fromThree.Load().Runs.Single(r => r.Id == run.Id).Id);
+    fromThree.Dispose();
     Cleanup(path);
 }
 
@@ -2515,6 +3616,7 @@ static void EditsAndIsolation()
     using var h = NewHarness();
     var first = h.ArmAndStart();
     Assert.Equal(MessageDisposition.Accepted, h.Send(first, "station-01", "event-press", "history-start").Disposition);
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
     Assert.Equal(MessageDisposition.Accepted, h.Send(first, "station-01", "event-press", "history-finish").Disposition);
     var historical = h.Service.Finish();
     h.Service.Record();
@@ -2679,14 +3781,17 @@ static void BuildIdentityFingerprint()
 
 static void CompleteAllEvents(TestHarness h, RunRecord run)
 {
+    // Finishes land a second after the starts, past the double-press lockout.
+    var finishAt = h.Service.GetOperatorSnapshot().CurrentRun!.ActiveElapsedMs + 1_000;
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
     h.Send(run, "station-01", "event-press", "bonus-e1-start", 0);
-    h.Send(run, "station-01", "event-press", "bonus-e1-finish", 0);
+    h.Send(run, "station-01", "event-press", "bonus-e1-finish", finishAt);
     h.Send(run, "station-02", "event-press", "bonus-key-start", 0);
-    h.Send(run, "station-02", "keypad-success", "bonus-key-success", 0);
+    h.Send(run, "station-02", "keypad-success", "bonus-key-success", finishAt);
     h.Send(run, "station-03", "arcade-start", "bonus-arcade-start", 0);
-    h.Send(run, "station-03", "arcade-finish", "bonus-arcade-finish", 0);
+    h.Send(run, "station-03", "arcade-finish", "bonus-arcade-finish", finishAt);
     h.Send(run, "station-04", "event-press", "bonus-e4-start", 0);
-    h.Send(run, "station-04", "event-press", "bonus-e4-finish", 0);
+    h.Send(run, "station-04", "event-press", "bonus-e4-finish", finishAt);
 }
 
 static TestHarness NewHarness(int durationSeconds = 300, bool simulatedDevicesOnline = true) =>
@@ -2713,6 +3818,7 @@ static EditionDefinition MakeMvpEdition(int durationSeconds = 300) => new()
     Name = "MVP test edition",
     DurationLimitSeconds = durationSeconds,
     Scoring = new ScoringRule(),
+    BonusGame = new BonusGameSettings { Enabled = false },
     Events =
     [
         new EventDefinition { EventId = "event-01", Name = "Perfect Pour", DeviceId = "station-01", Type = EventKind.Standard },
@@ -2749,12 +3855,13 @@ static void Cleanup(string path)
 
 sealed class TestHarness : IDisposable
 {
-    public TestHarness(EditionDefinition edition, string path, bool simulatedDevicesOnline = true)
+    public TestHarness(EditionDefinition edition, string path, bool simulatedDevicesOnline = true,
+        KeypadChallengeSet? keypadChallenges = null)
     {
         Path = path;
         Clock = new TestClock();
         Store = new RunStore(path);
-        Service = new RunService(Store, edition, Clock);
+        Service = new RunService(Store, edition, Clock, keypadChallenges);
         if (simulatedDevicesOnline)
         {
             foreach (var device in Service.GetOperatorSnapshot().Devices)
@@ -2829,6 +3936,12 @@ sealed class TestHarness : IDisposable
             }
         }
     }
+}
+
+sealed class RecordingSoundPlayer : ISoundPlayer
+{
+    public List<SoundCue> Played { get; } = [];
+    public void Play(SoundCue cue) => Played.Add(cue);
 }
 
 static class Assert

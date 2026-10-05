@@ -22,7 +22,7 @@ public sealed class StoreSnapshot
 
 public sealed class RunStore : IDisposable
 {
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 5;
     private readonly string _connectionString;
     private FileStream? _lifetimeLock;
     private bool _disposed;
@@ -234,7 +234,8 @@ public sealed class RunStore : IDisposable
                        bonus_started_elapsed_ms, bonus_result_json, bonus_points_override,
                        created_at, started_at, finished_at,
                        supersedes_run_id, superseded_by_run_id, paused_from_phase,
-                       notes, revision, edition_snapshot_json, recorded_at, deleted_at, superseded_from_status
+                       notes, revision, edition_snapshot_json, recorded_at, deleted_at, superseded_from_status,
+                       bonus_game_json
                 FROM runs ORDER BY created_at, id
                 """;
             using var reader = command.ExecuteReader();
@@ -266,6 +267,7 @@ public sealed class RunStore : IDisposable
                     RecordedAt = reader.IsDBNull(21) ? null : ParseDate(reader.GetString(21)),
                     DeletedAt = reader.IsDBNull(22) ? null : ParseDate(reader.GetString(22)),
                     SupersededFromStatus = reader.IsDBNull(23) ? null : ParseEnum<RunStatus>(reader.GetString(23), "superseded-from status"),
+                    BonusGame = reader.IsDBNull(24) ? null : Deserialize<BonusGameRecord>(reader.GetString(24), "bonus round"),
                     Events = []
                 };
                 snapshot.Runs.Add(run);
@@ -278,7 +280,7 @@ public sealed class RunStore : IDisposable
             command.CommandText = """
                 SELECT event_id, name, device_id, type, prompt, status, start_elapsed_ms,
                        finish_elapsed_ms, score, score_override, measurement_json, notes,
-                       last_signal_elapsed_ms
+                       last_signal_elapsed_ms, keypad_json
                 FROM run_events WHERE run_id = $run_id ORDER BY event_order
                 """;
             command.Parameters.AddWithValue("$run_id", run.Id);
@@ -299,7 +301,8 @@ public sealed class RunStore : IDisposable
                     ScoreOverride = reader.IsDBNull(9) ? null : reader.GetInt32(9),
                     MeasurementJson = reader.IsDBNull(10) ? null : reader.GetString(10),
                     Notes = reader.IsDBNull(11) ? null : reader.GetString(11),
-                    LastSignalElapsedMs = reader.IsDBNull(12) ? null : reader.GetInt64(12)
+                    LastSignalElapsedMs = reader.IsDBNull(12) ? null : reader.GetInt64(12),
+                    Keypad = reader.IsDBNull(13) ? null : JsonSerializer.Deserialize<KeypadProgress>(reader.GetString(13), JsonDefaults.Options)
                 });
             }
         }
@@ -660,12 +663,12 @@ public sealed class RunStore : IDisposable
                 bonus_started_elapsed_ms, bonus_result_json, bonus_points_override,
                 created_at, started_at, finished_at,
                 supersedes_run_id, superseded_by_run_id, paused_from_phase, notes,
-                revision, edition_snapshot_json, recorded_at, deleted_at, superseded_from_status)
+                revision, edition_snapshot_json, recorded_at, deleted_at, superseded_from_status, bonus_game_json)
             VALUES($id, $competitor_id, $edition_id, $category, $status, $phase,
                 $manual_override, $active_elapsed, $last_input, $bonus_started,
                 $bonus_result, $bonus_points_override,
                 $created_at, $started_at, $finished_at, $supersedes, $superseded_by,
-                $paused_from, $notes, $revision, $edition, $recorded_at, $deleted_at, $superseded_from_status)
+                $paused_from, $notes, $revision, $edition, $recorded_at, $deleted_at, $superseded_from_status, $bonus_game)
             ON CONFLICT(id) DO UPDATE SET
                 competitor_id = excluded.competitor_id,
                 edition_id = excluded.edition_id,
@@ -689,7 +692,8 @@ public sealed class RunStore : IDisposable
                 edition_snapshot_json = excluded.edition_snapshot_json,
                 recorded_at = excluded.recorded_at,
                 deleted_at = excluded.deleted_at,
-                superseded_from_status = excluded.superseded_from_status
+                superseded_from_status = excluded.superseded_from_status,
+                bonus_game_json = excluded.bonus_game_json
             """;
         AddRunParameters(command, run);
         command.ExecuteNonQuery();
@@ -701,9 +705,9 @@ public sealed class RunStore : IDisposable
             eventCommand.CommandText = """
                 INSERT INTO run_events(run_id, event_id, event_order, name, device_id, type,
                     prompt, status, start_elapsed_ms, finish_elapsed_ms, score,
-                    score_override, measurement_json, notes, last_signal_elapsed_ms)
+                    score_override, measurement_json, notes, last_signal_elapsed_ms, keypad_json)
                 VALUES($run_id, $event_id, $event_order, $name, $device_id, $type,
-                    $prompt, $status, $start, $finish, $score, $override, $measurement, $notes, $last_signal)
+                    $prompt, $status, $start, $finish, $score, $override, $measurement, $notes, $last_signal, $keypad)
                 ON CONFLICT(run_id, event_id) DO UPDATE SET
                     event_order = excluded.event_order,
                     name = excluded.name,
@@ -717,7 +721,8 @@ public sealed class RunStore : IDisposable
                     score_override = excluded.score_override,
                     measurement_json = excluded.measurement_json,
                     notes = excluded.notes,
-                    last_signal_elapsed_ms = excluded.last_signal_elapsed_ms
+                    last_signal_elapsed_ms = excluded.last_signal_elapsed_ms,
+                    keypad_json = excluded.keypad_json
                 """;
             eventCommand.Parameters.AddWithValue("$run_id", run.Id);
             eventCommand.Parameters.AddWithValue("$event_id", eventResult.EventId);
@@ -732,6 +737,9 @@ public sealed class RunStore : IDisposable
             eventCommand.Parameters.AddWithValue("$score", eventResult.Score);
             eventCommand.Parameters.AddWithValue("$override", ValueOrNull(eventResult.ScoreOverride));
             eventCommand.Parameters.AddWithValue("$measurement", ValueOrNull(eventResult.MeasurementJson));
+            eventCommand.Parameters.AddWithValue("$keypad", eventResult.Keypad is null
+                ? DBNull.Value
+                : JsonSerializer.Serialize(eventResult.Keypad, JsonDefaults.Options));
             eventCommand.Parameters.AddWithValue("$notes", ValueOrNull(eventResult.Notes));
             eventCommand.Parameters.AddWithValue("$last_signal", ValueOrNull(eventResult.LastSignalElapsedMs));
             eventCommand.ExecuteNonQuery();
@@ -891,6 +899,16 @@ public sealed class RunStore : IDisposable
         [
             "ALTER TABLE runs ADD COLUMN deleted_at TEXT NULL",
             "ALTER TABLE runs ADD COLUMN superseded_from_status TEXT NULL"
+        ],
+        // Version 4 keeps each keypad event's drawn messages and solved codes.
+        [4] =
+        [
+            "ALTER TABLE run_events ADD COLUMN keypad_json TEXT NULL"
+        ],
+        // Version 5 keeps each run's bonus speed round (targets, hits, and awarded points).
+        [5] =
+        [
+            "ALTER TABLE runs ADD COLUMN bonus_game_json TEXT NULL"
         ]
     };
 
@@ -933,12 +951,12 @@ public sealed class RunStore : IDisposable
         var statements = new[]
         {
             "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-            "INSERT INTO meta(key, value) VALUES('schema_version', '3')",
+            "INSERT INTO meta(key, value) VALUES('schema_version', '5')",
             "CREATE TABLE competitors(id TEXT PRIMARY KEY, name TEXT NOT NULL, edition_id TEXT NOT NULL, created_at TEXT NOT NULL)",
             "CREATE TABLE queue_items(id TEXT PRIMARY KEY, competitor_id TEXT NOT NULL REFERENCES competitors(id), category TEXT NOT NULL, replace_existing_official INTEGER NOT NULL, replacement_of_run_id TEXT NULL REFERENCES runs(id), reason TEXT NULL, position INTEGER NOT NULL)",
             "CREATE TABLE devices(device_id TEXT PRIMARY KEY, event_id TEXT NOT NULL, availability TEXT NOT NULL, last_seen_at TEXT NULL, led TEXT NOT NULL, last_error TEXT NULL)",
-            "CREATE TABLE runs(id TEXT PRIMARY KEY, competitor_id TEXT NOT NULL REFERENCES competitors(id), edition_id TEXT NOT NULL, category TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, manual_offline_override INTEGER NOT NULL, active_elapsed_ms INTEGER NOT NULL, last_input_elapsed_ms INTEGER NOT NULL, bonus_started_elapsed_ms INTEGER NULL, bonus_result_json TEXT NULL, bonus_points_override INTEGER NULL, created_at TEXT NOT NULL, started_at TEXT NULL, finished_at TEXT NULL, supersedes_run_id TEXT NULL REFERENCES runs(id), superseded_by_run_id TEXT NULL REFERENCES runs(id), paused_from_phase TEXT NULL, notes TEXT NULL, revision INTEGER NOT NULL, edition_snapshot_json TEXT NOT NULL, recorded_at TEXT NULL, deleted_at TEXT NULL, superseded_from_status TEXT NULL)",
-            "CREATE TABLE run_events(run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, event_id TEXT NOT NULL, event_order INTEGER NOT NULL, name TEXT NOT NULL, device_id TEXT NOT NULL, type TEXT NOT NULL, prompt TEXT NULL, status TEXT NOT NULL, start_elapsed_ms INTEGER NULL, finish_elapsed_ms INTEGER NULL, score INTEGER NOT NULL, score_override INTEGER NULL, measurement_json TEXT NULL, notes TEXT NULL, last_signal_elapsed_ms INTEGER NULL, PRIMARY KEY(run_id, event_id))",
+            "CREATE TABLE runs(id TEXT PRIMARY KEY, competitor_id TEXT NOT NULL REFERENCES competitors(id), edition_id TEXT NOT NULL, category TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, manual_offline_override INTEGER NOT NULL, active_elapsed_ms INTEGER NOT NULL, last_input_elapsed_ms INTEGER NOT NULL, bonus_started_elapsed_ms INTEGER NULL, bonus_result_json TEXT NULL, bonus_points_override INTEGER NULL, created_at TEXT NOT NULL, started_at TEXT NULL, finished_at TEXT NULL, supersedes_run_id TEXT NULL REFERENCES runs(id), superseded_by_run_id TEXT NULL REFERENCES runs(id), paused_from_phase TEXT NULL, notes TEXT NULL, revision INTEGER NOT NULL, edition_snapshot_json TEXT NOT NULL, recorded_at TEXT NULL, deleted_at TEXT NULL, superseded_from_status TEXT NULL, bonus_game_json TEXT NULL)",
+            "CREATE TABLE run_events(run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, event_id TEXT NOT NULL, event_order INTEGER NOT NULL, name TEXT NOT NULL, device_id TEXT NOT NULL, type TEXT NOT NULL, prompt TEXT NULL, status TEXT NOT NULL, start_elapsed_ms INTEGER NULL, finish_elapsed_ms INTEGER NULL, score INTEGER NOT NULL, score_override INTEGER NULL, measurement_json TEXT NULL, notes TEXT NULL, last_signal_elapsed_ms INTEGER NULL, keypad_json TEXT NULL, PRIMARY KEY(run_id, event_id))",
             "CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL, run_id TEXT NULL, session_id TEXT NULL, device_id TEXT NOT NULL, type TEXT NOT NULL, elapsed_ms INTEGER NOT NULL, payload_json TEXT NULL, disposition TEXT NOT NULL, reason TEXT NULL, received_at TEXT NOT NULL)",
             "CREATE TABLE edits(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id), created_at TEXT NOT NULL, reason TEXT NOT NULL, before_json TEXT NOT NULL, after_json TEXT NOT NULL, undone_edit_id INTEGER NULL REFERENCES edits(id))",
             "CREATE INDEX idx_runs_competitor_edition ON runs(competitor_id, edition_id)",
@@ -995,6 +1013,9 @@ public sealed class RunStore : IDisposable
         command.Parameters.AddWithValue("$recorded_at", ValueOrNull(run.RecordedAt is null ? null : FormatDate(run.RecordedAt.Value)));
         command.Parameters.AddWithValue("$deleted_at", ValueOrNull(run.DeletedAt is null ? null : FormatDate(run.DeletedAt.Value)));
         command.Parameters.AddWithValue("$superseded_from_status", ValueOrNull(run.SupersededFromStatus?.ToString()));
+        command.Parameters.AddWithValue("$bonus_game", run.BonusGame is null
+            ? DBNull.Value
+            : JsonSerializer.Serialize(run.BonusGame, JsonDefaults.Options));
     }
 
     private static object ValueOrNull(object? value) => value ?? DBNull.Value;
