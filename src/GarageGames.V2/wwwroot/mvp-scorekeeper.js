@@ -2172,11 +2172,16 @@
     return result;
   }
 
+  // The latest status heard from the Chaos Heist shrine with this MAC, if any.
+  function arcadeStation(deviceId) {
+    if (!deviceId) return null;
+    return (state.snapshot?.arcadeStations || [])
+      .find((item) => setupTools.hardwareId(item?.deviceId || "") === deviceId) || null;
+  }
+
   // What the Chaos Heist shrine with this MAC is asking the operator to do, if anything.
   function arcadeAttention(deviceId) {
-    if (!deviceId) return "";
-    const station = (state.snapshot?.arcadeStations || [])
-      .find((item) => setupTools.hardwareId(item?.deviceId || "") === deviceId);
+    const station = arcadeStation(deviceId);
     // Short enough for the one-line hint; the tile's tooltip repeats it.
     if (station?.attention === "replace") return "Lift & replace 1 emerald";
     if (station?.attention === "clear") {
@@ -2917,10 +2922,32 @@
     );
   }
 
+  // Before a new run, warn when a Chaos Heist shrine still has emeralds on it: the event
+  // can't start from the shrine until it reads empty. The operator can still go ahead.
+  function confirmShrinesClear(verb) {
+    const lines = (state.snapshot?.events || [])
+      .filter((event) => event.type === "magneticArcade")
+      .map((event) => {
+        const station = arcadeStation(setupTools.hardwareId(event.deviceId || ""));
+        if (station?.attention !== "clear") return "";
+        const count = Number(station.emeralds) || 0;
+        return `${event.name}: ${count} Chaos Emerald${count === 1 ? " is" : "s are"} still on the shrine.`;
+      })
+      .filter(Boolean);
+    if (!lines.length) return true;
+    return window.confirm(
+      `${lines.join("\n")}\n\n` +
+      "Take them all off before the competitor gets there. The event can't start from the shrine until it reads empty.\n\n" +
+      `${verb} the run anyway?`
+    );
+  }
+
   async function startRun() {
     const current = state.snapshot?.currentRun;
     const redo = current?.status === "armed" ? null : confirmOfficialRedo(ui.competitor.value, ui.category.value);
     if (redo === false) return false;
+    // An armed run was already checked when it was armed.
+    if (current?.status !== "armed" && !confirmShrinesClear("Start")) return false;
     const started = await masterActions.startVirtually(request, {
       master: state.master,
       currentRun: current,
@@ -2949,6 +2976,7 @@
   async function armPhysicalRun() {
     const redo = confirmOfficialRedo(ui.competitor.value, ui.category.value);
     if (redo === false) return false;
+    if (!confirmShrinesClear("Arm")) return false;
     state.armScanRequestVersion += 1;
     state.armScanPending = true;
     state.armScanAfterSnapshotRequestId = null;
