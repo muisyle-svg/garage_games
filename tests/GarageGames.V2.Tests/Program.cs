@@ -2484,7 +2484,7 @@ static void PhysicalArcadeStationFlow()
     Assert.Equal(MessageDisposition.Accepted, arcadeResult!.Disposition);
     Assert.Equal("COMPLETED", arcadeResult.State);
     Assert.Equal<long?>(14_000L, Arcade().FinishElapsedMs);
-    Assert.True(Arcade().Score is not null, "A finished arcade event is scored like any timed event.");
+    Assert.True(Arcade().Score > 0,"A finished arcade event is scored like any timed event.");
     var finishedRevision = h.Service.GetOperatorSnapshot().CurrentRun!.Revision;
     Line($"GG1 ARCADE boot {token} {arcadeMac} 7 F 50");
     Assert.Equal(MessageDisposition.Duplicate, arcadeResult!.Disposition);
