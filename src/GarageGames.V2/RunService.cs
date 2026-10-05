@@ -3166,6 +3166,13 @@ public sealed class RunService
                 reason = "Arcade completion timestamp precedes its start.";
                 return MessageDisposition.StaleTimestamp;
             }
+            // Same double-press guard as a button finish. It matters for the operator's
+            // fallback tile: a double tap would otherwise score a near-zero time.
+            if (envelope.ElapsedMilliseconds - start < FinishPressLockoutMilliseconds)
+            {
+                reason = "Arcade finish ignored: it came too soon after the start (a double tap).";
+                return MessageDisposition.TooSoon;
+            }
 
             eventResult.FinishElapsedMs = envelope.ElapsedMilliseconds;
             eventResult.Status = EventStatus.Completed;

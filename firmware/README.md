@@ -125,6 +125,7 @@ F at the ring goal. The master prints `GG1 ARCADE <bootToken> <runToken> <mac>
 <seq> <S|F> <ageMs>` for the current run only, adding its own relay delay to
 the age. The app's `GG1 RESULT` reply is forwarded as the usual `GRESULT`
 packet. The shrine also answers a Garage Games device scan (only when Garage
-status packets are flowing, so it never joins the Speed game) and can send
+status packets are flowing, so it never joins the Speed game, and only while
+the ChaosHeist app is in Garage Games Mode) and can send
 `GTEST` for Setup's press-to-assign. Reflash the master for this; button spokes
 are unaffected.

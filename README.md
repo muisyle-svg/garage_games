@@ -523,12 +523,16 @@ Setup:
    **Chaos Heist (emeralds + rings)**. To assign the shrine's MAC, click
    **Assign** on that event and press **Send ID to Garage Games** in the
    ChaosHeist control panel, or type the MAC shown in that panel. Save setup.
-   The shrine must be on and in range; with no run underway, it answers
-   **Scan devices** like a button.
-4. On the shrine's PC, start ChaosHeist and press **Garage Games Mode**.
+   The shrine must be on and in range.
+4. On the shrine's PC, start ChaosHeist and press **Garage Games Mode**. Only
+   then does the shrine answer **Scan devices** (and the arm-time scan) like a
+   button, so "responding" in Garage Games means ChaosHeist is ready to play.
+   If the shrine shows as not responding, check that ChaosHeist is open and in
+   Garage Games Mode.
 
 During a run the event's tile works as an operator fallback, as it does for a
-keypad event. The first tap starts the event and the second finishes it, so a
+keypad event. The first tap starts the event and the second finishes it (a
+second tap within half a second is ignored as a double tap), so a
 failed sensor or radio never blocks a run. The Chaos Heist event counts toward
 "every event done": finishing it (with all the others) starts the bonus speed
 round when the bonus round is enabled in Setup, or finishes the run when it is

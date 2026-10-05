@@ -64,7 +64,7 @@ var tests = new (string Name, Action Run)[]
     ("keypad protocol lines parse strictly and '*' is never part of an entry", KeypadProtocolParsing),
     ("arcade station lines parse strictly and answer with the shared RESULT line", ArcadeProtocolParsing),
     ("the Chaos Heist arcade station starts on emeralds, finishes on rings, once each, via the master", PhysicalArcadeStationFlow),
-    ("arcade signals respect pause and late arrival, and the tile is an operator fallback", ArcadePauseLateAndVirtualFallback),
+    ("arcade signals respect pause and late arrival, and the tile is an operator fallback with a double-tap guard", ArcadePauseLateAndVirtualFallback),
     ("an arcade event counts toward the bonus round but is never a bonus target", ArcadeEventStartsBonusButIsNeverATarget),
     ("physical keypad spoke starts, rejects wrong codes, shows typing on the TV, and finishes on the code", PhysicalKeypadCodeFlow),
     ("operator tap overrides a running keypad event and keypad runs auto-finish", KeypadOperatorOverrideAndAutoFinish),
@@ -2533,7 +2533,11 @@ static void ArcadePauseLateAndVirtualFallback()
     var virtualRun = v.ArmAndStart();
     Assert.Equal(MessageDisposition.Accepted, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
     Assert.Equal(EventStatus.Active, v.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "chaos").Status);
-    v.Clock.Advance(TimeSpan.FromSeconds(4));
+    // A double tap on the tile is ignored rather than scoring a near-zero time.
+    v.Clock.Advance(TimeSpan.FromMilliseconds(300));
+    Assert.Equal(MessageDisposition.TooSoon, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
+    Assert.Equal(EventStatus.Active, v.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "chaos").Status);
+    v.Clock.Advance(TimeSpan.FromMilliseconds(3_700));
     Assert.Equal(MessageDisposition.Accepted, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
     var virtualEvent = v.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "chaos");
     Assert.Equal(EventStatus.Completed, virtualEvent.Status);
