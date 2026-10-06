@@ -2528,6 +2528,16 @@ public sealed class RunService
             }
 
             _bonusBeatAtMonotonicMs[deviceId] = _clock.MonotonicMilliseconds;
+            // A beating button is clearly taking part, so it counts as an answer to the intro
+            // poll. Each button answers the poll with a single unacknowledged radio packet; if
+            // that one packet was lost, no button had answered and the round lit every event,
+            // virtual tiles included. Beats come several times during the intro, so one lost
+            // packet no longer matters, and a button heard only later joins the next targets.
+            var beatingEvent = run.Events.First(e => string.Equals(e.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+            if (!bonus.RespondingDeviceIds.Contains(beatingEvent.DeviceId, StringComparer.OrdinalIgnoreCase))
+            {
+                bonus.RespondingDeviceIds.Add(beatingEvent.DeviceId);
+            }
             if (bonus is { Phase: BonusGamePhase.Target, TargetAwaitingReady: true } &&
                 string.Equals(bonus.TargetDeviceId, deviceId, StringComparison.OrdinalIgnoreCase) &&
                 shownSequence == (uint)bonus.Sequence)

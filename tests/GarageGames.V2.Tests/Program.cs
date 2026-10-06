@@ -26,6 +26,7 @@ var tests = new (string Name, Action Run)[]
     ("button states go to the master when they change, twice, then one button a second in rotation", MasterEventLinesSendChangesAndRotate),
     ("the polled snapshot leaves out edit copies the page never uses; the export keeps them", SnapshotLeavesOutEditCopies),
     ("a bonus button that dies is swapped out like the Speed game, not counted as a miss", BonusRoundSwapsDeadButtons),
+    ("a bonus heartbeat counts as an answer to the intro poll, so a lost answer doesn't light every event", BonusHeartbeatCountsAsPollAnswer),
     ("HTTP arm request duration flows into the saved run and ten-second timeout", ArmRequestDurationHandoff),
     ("custom run duration snapshots timeout and preserves edition leaderboard identity", PerRunDurationSnapshot),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
@@ -3124,6 +3125,33 @@ static void BonusRoundSwapsDeadButtons()
     Assert.Equal("no-buttons", ended.BonusGame.EndReason);
     Assert.Equal(1, ended.BonusGame.Hits);
     Assert.Equal(RunStatus.Finished, ended.Status);
+}
+
+static void BonusHeartbeatCountsAsPollAnswer()
+{
+    const string physical = "001122334455", late = "AABBCCDDEEFF";
+    using var h = new TestHarness(MakeBonusEdition(), NewPath());
+    var run = h.ArmAndStart();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    FinishAllEvents(h, run);
+    BonusGameRecord Bonus() => h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame!;
+
+    // The button's single poll answer was lost over the radio, but its heartbeats arrive
+    // during the intro: it still counts, so only it is lit (not every event, virtual or not).
+    h.Service.ReceiveBonusBeat(token, physical, 0);
+    Assert.Equal(physical, Bonus().RespondingDeviceIds.Single());
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+    Assert.True(h.Service.TickBonusGame());
+    Assert.Equal(physical, Bonus().TargetDeviceId);
+
+    // A button first heard after the intro joins the later targets; beats repeat harmlessly.
+    h.Service.ReceiveBonusBeat(token, late, 0);
+    h.Service.ReceiveBonusBeat(token, late, 0);
+    Assert.Equal(2, Bonus().RespondingDeviceIds.Count);
+    Assert.True(Bonus().RespondingDeviceIds.Contains(late));
+    // A button from no event in this run never joins.
+    h.Service.ReceiveBonusBeat(token, "FFFFFFFFFFFF", 0);
+    Assert.Equal(2, Bonus().RespondingDeviceIds.Count);
 }
 
 static void FinishAllEvents(TestHarness h, RunRecord run)
