@@ -184,7 +184,10 @@
       <section class="on-deck-panel sheet-card" aria-labelledby="on-deck-heading">
         <div class="card-heading">
           <div><p class="mvp-kicker">Next up</p><h2 id="on-deck-heading">On deck</h2></div>
-          <span id="on-deck-count" class="small-note">0 queued</span>
+          <div class="on-deck-heading-actions">
+            <span id="on-deck-count" class="small-note">0 queued</span>
+            <button id="shuffle-queue-button" class="button button-quiet" type="button" disabled title="Put the whole on-deck list in a random order">Shuffle order</button>
+          </div>
         </div>
         <form id="on-deck-form" class="on-deck-form">
           <label for="on-deck-competitor-select">Competitor
@@ -238,6 +241,10 @@
       </div>
       <div class="history-filters" role="search" aria-label="Filter run history">
         <input id="history-search" type="search" autocomplete="off" placeholder="Search player…" aria-label="Search run history by player name">
+        <select id="history-edition-filter" class="history-edition-filter" aria-label="Filter by rules edition">
+          <option value="current">Current rules</option>
+          <option value="">All rules editions</option>
+        </select>
         <select id="history-category-filter" aria-label="Filter by run type">
           <option value="">All run types</option>
           <option value="official">Official</option>
@@ -254,7 +261,15 @@
       <div class="history-layout">
         <div id="history-list" class="history-list"><p class="empty-state">Saved runs will appear here.</p></div>
         <section id="history-editor" class="history-editor" aria-labelledby="history-editor-title">
-          <div class="history-editor-heading"><h3 id="history-editor-title">Select a saved run</h3><span id="history-editor-status" class="status-tag">—</span></div>
+          <div class="history-editor-heading"><h3 id="history-editor-title">Select a saved run</h3>
+            <label class="history-run-type" for="history-run-type">Run type
+              <select id="history-run-type" disabled>
+                <option value="official">Official</option>
+                <option value="playoff">Playoff</option>
+                <option value="exhibition">Exhibition</option>
+              </select>
+            </label>
+            <span id="history-editor-status" class="status-tag">—</span></div>
           <p id="history-editor-meta" class="small-note">Choose a history entry to review or correct its event times and points.</p>
           <div class="table-scroll history-table-wrap">
             <table class="score-table">

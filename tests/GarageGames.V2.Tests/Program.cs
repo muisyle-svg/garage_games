@@ -84,6 +84,8 @@ var tests = new (string Name, Action Run)[]
     ("schema version 1 databases upgrade once after a backup", SchemaVersion1UpgradesWithBackup),
     ("deleted runs leave history and standings, persist, and can be restored", DeletedRunsHideAndRestore),
     ("deleting a recorded redo restores the result it replaced", DeletingRedoRestoresOriginal),
+    ("a saved run's type can be changed in history, with official results kept consistent", ChangingRunTypeInHistory),
+    ("the on-deck list can be shuffled into a new random order", ShufflingOnDeck),
     ("category exclusion and shared tie rank", CategoryAndTieRank),
     ("leaderboard preference persists and playoffs precede official and exhibition rows", LeaderboardPreferenceAndCategories),
     ("persistent recovery and exclusive data lock", RecoveryAndLock),
@@ -3622,6 +3624,84 @@ static void DeletingRedoRestoresOriginal()
     h.Service.RestoreRun(redo.Id);
     Assert.Equal(RunStatus.Superseded, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == original.Id).Status);
     Assert.Equal(redo.Id, h.Service.GetScoreboard().Leaderboard.Single().RunId);
+}
+
+static void ChangingRunTypeInHistory()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+    var original = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 300);
+    h.StartRun();
+    h.Service.Finish();
+    h.Service.Record();
+    var redo = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 300, replaceExistingOfficial: true);
+    h.StartRun();
+    h.Service.Finish();
+    redo = h.Service.Record();
+    RunRecord History(string id) => h.Service.GetOperatorSnapshot().History.Single(r => r.Id == id);
+    Assert.Equal(RunStatus.Superseded, History(original.Id).Status);
+
+    // The official redo becomes a playoff run: the result it replaced counts again.
+    var changed = h.Service.EditRun(redo.Id, new EditRunRequest
+    {
+        ExpectedRevision = redo.Revision, Reason = "Changed the run type from Official to Playoff.", Category = RunCategory.Playoff
+    });
+    Assert.Equal(RunCategory.Playoff, changed.Category);
+    Assert.Equal<string?>(null, changed.SupersedesRunId);
+    Assert.Equal(RunStatus.Completed, History(original.Id).Status);
+    Assert.Equal<string?>(null, History(original.Id).SupersededByRunId);
+    Assert.Equal(RunStatus.Completed, h.Store.Load().Runs.Single(r => r.Id == original.Id).Status);
+    Assert.Equal(RunCategory.Playoff, h.Store.Load().Runs.Single(r => r.Id == redo.Id).Category);
+
+    // Back to Official: refused while another official result stands, unless it replaces it.
+    Assert.Throws<CommandException>(() => h.Service.EditRun(redo.Id, new EditRunRequest
+    {
+        ExpectedRevision = changed.Revision, Reason = "Changed the run type from Playoff to Official.", Category = RunCategory.Official
+    }));
+    var official = h.Service.EditRun(redo.Id, new EditRunRequest
+    {
+        ExpectedRevision = changed.Revision, Reason = "Changed the run type from Playoff to Official.",
+        Category = RunCategory.Official, ReplaceExistingOfficial = true
+    });
+    Assert.Equal(RunCategory.Official, official.Category);
+    Assert.Equal(RunStatus.Superseded, History(original.Id).Status);
+    Assert.Equal(redo.Id, History(original.Id).SupersededByRunId);
+
+    // A plain type change with no official involved just changes the type.
+    var exhibition = h.Service.EditRun(original.Id, new EditRunRequest
+    {
+        ExpectedRevision = History(original.Id).Revision, Reason = "Changed the run type from Official to Exhibition.",
+        Category = RunCategory.Exhibition
+    });
+    Assert.Equal(RunCategory.Exhibition, exhibition.Category);
+    Assert.Equal(RunStatus.Superseded, exhibition.Status);
+}
+
+static void ShufflingOnDeck()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+    h.Service.ShuffleQueue(); // empty: nothing to do
+    var first = h.Service.AddToQueue(h.CompetitorId, RunCategory.Official);
+    h.Service.ShuffleQueue(); // one entry: nothing to do
+    Assert.Equal(first.Id, h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    for (var index = 0; index < 4; index++)
+    {
+        var competitor = h.Service.AddCompetitor($"Shuffle {index}");
+        h.Service.AddToQueue(competitor.Id, RunCategory.Exhibition);
+    }
+    var before = h.Service.GetOperatorSnapshot().Queue.OrderBy(q => q.Position).Select(q => q.Id).ToList();
+    for (var attempt = 0; attempt < 20; attempt++)
+    {
+        h.Service.ShuffleQueue();
+        var after = h.Service.GetOperatorSnapshot().Queue.OrderBy(q => q.Position).ToList();
+        // Same entries, positions 0..n-1, and never the same order twice in a row.
+        Assert.True(!after.Select(q => q.Id).SequenceEqual(before), "a shuffle always changes the order");
+        Assert.True(after.Select(q => q.Id).OrderBy(id => id).SequenceEqual(before.OrderBy(id => id)));
+        Assert.True(after.Select(q => q.Position).SequenceEqual(Enumerable.Range(0, before.Count)));
+        before = after.Select(q => q.Id).ToList();
+    }
+    Assert.True(h.Store.Load().Queue.OrderBy(q => q.Position).Select(q => q.Id).SequenceEqual(before), "the shuffled order is saved");
 }
 
 static void SchemaVersion1UpgradesWithBackup()

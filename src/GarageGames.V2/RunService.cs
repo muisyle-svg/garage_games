@@ -1270,6 +1270,42 @@ public sealed class RunService
         }
     }
 
+    // Puts the whole on-deck list in a random order. With two or more entries the order always
+    // changes, so the operator sees that it worked.
+    public void ShuffleQueue()
+    {
+        lock (_gate)
+        {
+            var original = _data.Queue.OrderBy(q => q.Position).ToArray();
+            if (original.Length < 2)
+            {
+                return;
+            }
+
+            var shuffled = original.ToArray();
+            do
+            {
+                Random.Shared.Shuffle(shuffled);
+            }
+            while (shuffled.SequenceEqual(original));
+
+            for (var index = 0; index < shuffled.Length; index++)
+            {
+                shuffled[index].Position = index;
+            }
+
+            try
+            {
+                _store.SaveQueue(_data.Queue);
+            }
+            catch
+            {
+                ReloadInMemoryAfterPersistenceFailure();
+                throw;
+            }
+        }
+    }
+
     public IReadOnlyList<PreflightResult> Preflight()
     {
         lock (_gate)
@@ -2890,6 +2926,18 @@ public sealed class RunService
             }
             HandleOfficialConflict(run, candidate, request.ReplaceExistingOfficial, out var replaced);
 
+            // An official redo changed to another run type no longer replaces anything: the
+            // result it had replaced counts again (as when the redo is deleted).
+            RunRecord? restoredSource = null;
+            if (run.Category == RunCategory.Official && candidate.Category != RunCategory.Official &&
+                candidate.SupersedesRunId is string sourceId)
+            {
+                restoredSource = candidate.SupersededByRunId is null
+                    ? _data.Runs.SingleOrDefault(r => r.Id == sourceId && r.SupersededByRunId == run.Id && !r.IsDeleted)
+                    : null;
+                candidate.SupersedesRunId = null;
+            }
+
             var before = Serialize(run);
             candidate.Revision = run.Revision + 1;
             var after = Serialize(candidate);
@@ -2902,9 +2950,17 @@ public sealed class RunService
                 AfterJson = after
             };
             ReplaceRun(run, candidate);
+            if (restoredSource is not null)
+            {
+                restoredSource.Status = restoredSource.SupersededFromStatus ?? InferStatusBeforeSupersede(restoredSource);
+                restoredSource.SupersededByRunId = null;
+                restoredSource.SupersededFromStatus = null;
+                restoredSource.Revision++;
+            }
+            var otherRuns = replaced is not null && replaced.Id != candidate.Id ? replaced : restoredSource;
             try
             {
-                _store.AddEdit(candidate, edit, replaced is not null && replaced.Id != candidate.Id ? [replaced] : null);
+                _store.AddEdit(candidate, edit, otherRuns is null ? null : [otherRuns]);
             }
             catch
             {

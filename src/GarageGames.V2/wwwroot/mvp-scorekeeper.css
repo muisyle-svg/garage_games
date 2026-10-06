@@ -307,6 +307,10 @@ select:disabled, input:disabled { opacity: .58; }
 .history-filters { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; padding: 0 .95rem .75rem; }
 .history-filters input { flex: 1 1 220px; min-width: 0; max-width: 360px; }
 .history-filters select { flex: 0 1 170px; width: auto; }
+.history-filters .history-edition-filter { flex: 0 1 300px; }
+.history-run-type { display: flex; align-items: center; gap: .4rem; margin-left: auto; font-size: .8rem; color: var(--muted); white-space: nowrap; }
+.history-run-type select { width: auto; }
+.on-deck-heading-actions { display: flex; align-items: center; gap: .6rem; }
 .history-filters .button[hidden] { display: none; }
 
 /* Deleted runs are restorable from a collapsed list at the bottom of Run history. */

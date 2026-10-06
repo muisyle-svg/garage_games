@@ -237,6 +237,11 @@ app.MapPost("/api/queue/reorder", (ReorderQueueRequest request, RunService runs)
     runs.ReorderQueue(request.QueueIds);
     return Results.Ok(runs.GetOperatorSnapshot(simulationMode));
 });
+app.MapPost("/api/queue/shuffle", (RunService runs) =>
+{
+    runs.ShuffleQueue();
+    return Results.Ok(runs.GetOperatorSnapshot(simulationMode));
+});
 app.MapPost("/api/queue/{queueId}/arm", async (string queueId, ArmRequest request, RunService runs,
     PhysicalMasterSerialService master, CancellationToken cancellationToken) =>
     Results.Ok(await master.ArmQueueAsync(runs, queueId, request.ManualOfflineOverride, cancellationToken)));

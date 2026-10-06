@@ -106,6 +106,7 @@
     queueForm: $("on-deck-form"),
     queueAdd: $("add-to-queue-button"),
     queueCount: $("on-deck-count"),
+    queueShuffle: $("shuffle-queue-button"),
     queueList: $("on-deck-list"),
     addForm: $("add-competitor-form"),
     newCompetitor: $("new-competitor-name"),
@@ -175,6 +176,8 @@
     historyRecord: $("record-history-run"),
     historyDelete: $("delete-history-run"),
     historySearch: $("history-search"),
+    historyEditionFilter: $("history-edition-filter"),
+    historyRunType: $("history-run-type"),
     historyCategoryFilter: $("history-category-filter"),
     historyStatusFilter: $("history-status-filter"),
     historyClearFilters: $("history-clear-filters"),
@@ -2314,7 +2317,9 @@
   function renderQueue() {
     const queue = (state.snapshot?.queue || []).slice().sort((a, b) => Number(a.position) - Number(b.position));
     ui.queueCount.textContent = `${queue.length} queued`;
-    const signature = `${state.busy}:${queue.map((item) => `${item.id}:${item.position}:${item.competitorId}:${item.category}`).join("|")}`;
+    // Always shown (so nothing moves); only usable with two or more to put in order.
+    ui.queueShuffle.disabled = state.busy || queue.length < 2;
+    const signature =`${state.busy}:${queue.map((item) => `${item.id}:${item.position}:${item.competitorId}:${item.category}`).join("|")}`;
     if (signature === state.queueSignature) return;
     ui.queueList.replaceChildren();
     if (!queue.length) {
@@ -2608,6 +2613,56 @@
     });
   }
 
+  // Changes a saved run's type (Official, Playoff, Exhibition) after asking. Making it Official
+  // when the player already has an official result (under the same rules) replaces that one;
+  // taking an official redo off Official lets the result it replaced count again.
+  async function changeHistoryRunType() {
+    const run = (state.snapshot?.history || []).find((item) => item.id === state.selectedHistoryId);
+    const category = ui.historyRunType.value;
+    if (!run || !category || category === run.category) return;
+    const name = competitorName(run.competitorId);
+    const from = categoryLabel(run.category);
+    const to = categoryLabel(category);
+    let replaceExistingOfficial = false;
+    let message = `Change ${name}'s run from ${shortDate(run.createdAt)} from ${from} to ${to}?`;
+    if (category === "official") {
+      const existing = (state.snapshot?.history || []).find((item) =>
+        item.id !== run.id && item.competitorId === run.competitorId && item.editionId === run.editionId &&
+        item.category === "official" && item.isRecorded && !item.supersededByRunId &&
+        item.status !== "aborted" && item.status !== "superseded");
+      if (existing) {
+        replaceExistingOfficial = true;
+        message += `\n\n${name} already has an official result (${tableTotal(existing)} pts, ${shortDate(existing.createdAt)}). ` +
+          "This run replaces it as the official result, even if it scores lower; the other run is kept in history as replaced.";
+      }
+    } else if (run.category === "official" && run.supersedesRunId) {
+      message += `\n\nThis run had replaced an earlier official result for ${name}; that result counts as official again.`;
+    } else if (run.category === "official") {
+      message += `\n\n${name} will no longer have an official result from this run.`;
+    }
+    if (!window.confirm(message)) {
+      ui.historyRunType.value = run.category;
+      return;
+    }
+    await performAction(async () => {
+      await request(`/api/runs/${encodeURIComponent(run.id)}/edit`, {
+        method: "PUT",
+        body: JSON.stringify({
+          expectedRevision: run.revision,
+          reason: `Changed the run type from ${from} to ${to}.`,
+          category,
+          replaceExistingOfficial,
+          events: []
+        })
+      });
+      state.historySignature = "";
+      state.historyTableKey = null;
+    }, `${name}'s run is now ${to}.`);
+    // A failed change leaves the select showing the run's real type again.
+    const latest = (state.snapshot?.history || []).find((item) => item.id === run.id);
+    if (latest) ui.historyRunType.value = latest.category;
+  }
+
   async function deleteHistoricalRun() {
     const run = (state.snapshot?.history || []).find((item) => item.id === state.selectedHistoryId);
     if (!run) return false;
@@ -2635,32 +2690,83 @@
   function historyFilter() {
     return {
       query: normalizedCompetitorName(ui.historySearch.value).toLowerCase(),
+      edition: ui.historyEditionFilter.value,
       category: ui.historyCategoryFilter.value,
       status: ui.historyStatusFilter.value
     };
   }
 
   function filterHistory(history, filter) {
+    const currentEditionId = state.snapshot?.editionId;
     return history.filter((run) =>
       (!filter.query || normalizedCompetitorName(competitorName(run.competitorId)).toLowerCase().includes(filter.query)) &&
+      (!filter.edition || run.editionId === (filter.edition === "current" ? currentEditionId : filter.edition)) &&
       (!filter.category || run.category === filter.category) &&
       (!filter.status || (filter.status === "recorded") === Boolean(run.isRecorded)));
+  }
+
+  function shortDay(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "?" : date.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+
+  // Each Setup save starts a new rules edition (usually with the same name), so earlier ones
+  // are told apart by when their runs were played. "Current rules" follows the edition in use,
+  // even if Setup is saved again while this page is open.
+  function renderHistoryEditionOptions(history) {
+    const currentEditionId = state.snapshot?.editionId;
+    const editions = new Map();
+    history.forEach((run) => {
+      const edition = editions.get(run.editionId) ||
+        { id: run.editionId, name: run.edition?.name || "Rules", first: run.createdAt, last: run.createdAt, count: 0 };
+      edition.count += 1;
+      if (run.createdAt < edition.first) edition.first = run.createdAt;
+      if (run.createdAt > edition.last) edition.last = run.createdAt;
+      editions.set(run.editionId, edition);
+    });
+    const runs = (count) => `${count} run${count === 1 ? "" : "s"}`;
+    const current = editions.get(currentEditionId);
+    const options = [
+      ["current", `Current rules · ${runs(current?.count || 0)}`],
+      ["", `All rules editions · ${runs(history.length)}`],
+      ...[...editions.values()]
+        .filter((edition) => edition.id !== currentEditionId)
+        .sort((a, b) => String(b.last).localeCompare(String(a.last)))
+        .map((edition) => {
+          const first = shortDay(edition.first);
+          const last = shortDay(edition.last);
+          return [edition.id, `${edition.name} · ${first === last ? first : `${first} – ${last}`} · ${runs(edition.count)}`];
+        })
+    ];
+    const key = JSON.stringify(options);
+    if (key === state.historyEditionOptionsKey) return;
+    state.historyEditionOptionsKey = key;
+    const selected = ui.historyEditionFilter.value;
+    ui.historyEditionFilter.replaceChildren(...options.map(([value, label]) => {
+      const option = make("option", "", label);
+      option.value = value;
+      return option;
+    }));
+    // An edition that no longer has runs (all deleted) falls back to the current rules.
+    ui.historyEditionFilter.value = options.some(([value]) => value === selected) ? selected : "current";
   }
 
   function renderHistory() {
     renderDeletedRuns();
     const allHistory = state.snapshot?.history || [];
+    renderHistoryEditionOptions(allHistory);
     const filter = historyFilter();
-    const filtering = Boolean(filter.query || filter.category || filter.status);
+    // Showing the current rules is the default, not a filter to clear.
+    const filtering = Boolean(filter.query || filter.category || filter.status || filter.edition !== "current");
     const history = filterHistory(allHistory, filter);
-    ui.historyCount.textContent = filtering
+    ui.historyCount.textContent = history.length !== allHistory.length
       ? `${history.length} of ${allHistory.length} ${allHistory.length === 1 ? "run" : "runs"}`
       : `${allHistory.length} ${allHistory.length === 1 ? "run" : "runs"}`;
     ui.historyClearFilters.hidden = !filtering;
     if (!history.some((run) => run.id === state.selectedHistoryId)) {
       state.selectedHistoryId = history[0]?.id || null;
     }
-    const signature = `${filter.query}|${filter.category}|${filter.status}|` +
+    const signature = `${filter.query}|${filter.edition}|${filter.category}|${filter.status}|` +
       history.map((run) => `${run.id}:${run.revision}:${run.status}`).join("|");
     if (signature !== state.historySignature) {
       ui.historyList.replaceChildren();
@@ -2702,6 +2808,8 @@
       ui.historyMeta.textContent = "Choose a history entry to review or correct its event times and points.";
       ui.historyRecord.disabled = true;
       ui.historyDelete.disabled = true;
+      ui.historyRunType.disabled = true;
+      ui.historyRunType.title = "";
       if (state.historyTableKey !== "no-history") {
         renderScoreTable(null, ui.historyBody, "history", false);
         state.historyTableKey = "no-history";
@@ -2727,6 +2835,17 @@
     // The run in progress is discarded from the scorekeeping tab instead.
     ui.historyDelete.disabled = state.busy || isLiveLock(selected);
     ui.historyDelete.title = isLiveLock(selected) ? "The run in progress can't be deleted; use Discard on the scorekeeping tab." : "";
+    // The run type changes on its own (it asks first), separately from the scorecard edits.
+    const runTypeBlock = isLiveLock(selected)
+      ? "The run in progress keeps its type; change it here once it has finished."
+      : selected.status === "superseded"
+        ? "This result was replaced by a later official run."
+        : hasDrafts(selected.id) || hasBonusDraft(selected.id)
+          ? "Save or discard the scorecard edits first."
+          : "";
+    if (document.activeElement !== ui.historyRunType) ui.historyRunType.value = selected.category;
+    ui.historyRunType.disabled = state.busy || Boolean(runTypeBlock);
+    ui.historyRunType.title = runTypeBlock || "Change this run's type (it asks first)";
   }
 
   function shortDate(value) {
@@ -3460,10 +3579,13 @@
     ui.historyDelete.addEventListener("click", () => performAction(deleteHistoricalRun, "Run deleted. It can be restored from Deleted runs."));
     const refilterHistory = () => { state.historyTableKey = null; renderHistory(); setSaveStates(); };
     ui.historySearch.addEventListener("input", refilterHistory);
+    ui.historyEditionFilter.addEventListener("change", refilterHistory);
     ui.historyCategoryFilter.addEventListener("change", refilterHistory);
     ui.historyStatusFilter.addEventListener("change", refilterHistory);
+    ui.historyRunType.addEventListener("change", () => void changeHistoryRunType());
     ui.historyClearFilters.addEventListener("click", () => {
       ui.historySearch.value = "";
+      ui.historyEditionFilter.value = "current";
       ui.historyCategoryFilter.value = "";
       ui.historyStatusFilter.value = "";
       refilterHistory();
@@ -3540,6 +3662,15 @@
           body: JSON.stringify({ competitorId, category })
         }),
         "Added to on deck."
+      );
+    });
+    ui.queueShuffle.addEventListener("click", () => {
+      const count = (state.snapshot?.queue || []).length;
+      if (count < 2) return;
+      if (!window.confirm(`Shuffle the whole on-deck list (${count} entries) into a random order?\n\nThe TV shows the new order straight away. This can't be undone, though you can still move entries up and down by hand.`)) return;
+      performAction(
+        () => request("/api/queue/shuffle", { method: "POST" }),
+        "On-deck order shuffled."
       );
     });
     ui.competitor.addEventListener("change", updateControls);
