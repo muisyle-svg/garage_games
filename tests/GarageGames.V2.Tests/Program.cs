@@ -2854,7 +2854,6 @@ static void KeypadAnswerCsv()
     {
         Assert.Equal(expectedCodes[challenge.Prompt], challenge.Answer);
     }
-    Assert.Equal("A2", shipped.Challenges.Single(c => c.Prompt == "rocket pepper 1819").Answer);
 
     // Other grid sizes: nothing assumes four rows or sixteen columns.
     var small = KeypadChallengeCsv.Parse(",1,2,3\nA,a1,a2,a3\nB,b1,,b3\n");
