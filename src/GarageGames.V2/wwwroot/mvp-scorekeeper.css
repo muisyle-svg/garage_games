@@ -303,6 +303,18 @@ select:disabled, input:disabled { opacity: .58; }
 /* The result box already shows a finished event's duration; drop the repeat below it. */
 .virtual-button.is-complete .virtual-action-hint { display: none; }
 
+/* With a run on the desk, event progress colours the tile: unstarted is dark and quiet, a
+   started event amber, a finished one green. The device label keeps its own colour, and a
+   button that isn't responding keeps its red border. */
+.virtual-button.is-unstarted:not(.is-bonus-target) { border-color: rgba(255, 255, 255, .1); background: rgba(0, 0, 0, .16); }
+.virtual-button.is-unstarted .virtual-button-name { color: var(--muted); }
+.virtual-button.is-unstarted:hover:not(:disabled):not(.is-bonus-target) { border-color: rgba(244, 189, 96, .65); background: rgba(244, 189, 96, .07); }
+.virtual-button.is-unstarted.device-not-responding:not(.is-bonus-target) { border-color: rgba(240, 135, 121, .58); }
+.virtual-button.is-unstarted.device-unverified:not(.is-bonus-target) { border-color: rgba(244, 189, 96, .45); }
+.virtual-button.is-in-progress:not(.is-bonus-target) { border-color: rgba(244, 189, 96, .75); background: rgba(244, 189, 96, .1); }
+.virtual-button.is-complete:not(.is-bonus-target), .virtual-button.is-complete:disabled:not(.is-bonus-target) { border-color: rgba(104, 214, 164, .75); background: rgba(104, 214, 164, .17); }
+.virtual-button.is-complete .virtual-button-name, .virtual-button.is-complete:disabled .virtual-button-name { color: var(--ink); }
+
 /* Run history search and filters. */
 .history-filters { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; padding: 0 .95rem .75rem; }
 .history-filters input { flex: 1 1 220px; min-width: 0; max-width: 360px; }

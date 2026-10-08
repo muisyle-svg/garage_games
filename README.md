@@ -379,6 +379,10 @@ only shows the countdown and reports Go as a backup.
 | Keypad chime | A keypad message appears on the TV | `wwwroot/sounds/keypad-message.wav` |
 | Bonus chime | The bonus round's first button lights | `wwwroot/sounds/bonus-start.wav` |
 | Keypad buzzer | A wrong code is entered on a keypad | `wwwroot/sounds/keypad-wrong.wav` |
+| Keypad success | The keypad event's last required message is solved | `wwwroot/sounds/keypad-success.mp3` |
+| Minutes remaining | The clock passes 4:00, 3:00, 2:00 and 1:00 | `wwwroot/sounds/four-minutes-remaining.wav` … `one-minute-remaining.wav` |
+| Final countdown | The clock passes 0:05 | `wwwroot/sounds/5-second-countdown.mp3` |
+| Time-up buzzer | The clock reaches 0:00, or a bonus-round button is missed | `wwwroot/sounds/time-up-buzzer.wav` |
 
 Replace a file (same name, WAV or MP3) to change a sound; add a `SoundCue` in
 `SoundService.cs` with its file to add one. Set the volume with Windows' volume

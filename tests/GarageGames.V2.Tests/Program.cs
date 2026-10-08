@@ -74,6 +74,7 @@ var tests = new (string Name, Action Run)[]
     ("keypad answer CSV maps each message to its row and column code", KeypadAnswerCsv),
     ("keypad events draw unrepeated messages, need several codes, and undo one code at a time", KeypadMultipleCodes),
     ("the app plays the countdown and starts the run at Go without a browser", ServerCountdownAndSounds),
+    ("time-remaining callouts and the final countdown play once each as the clock passes them", TimeRemainingCallouts),
     ("an unrecorded timed-out run can be discarded; a recorded one cannot", DiscardTimedOutRun),
     ("the bonus round polls, lights targets, counts hits, shrinks windows, and ends the run on a miss", BonusRoundMissEndsRun),
     ("the bonus round ends on timeout, on operator finish, and uses every tile when nothing answers", BonusRoundOtherEndings),
@@ -2970,6 +2971,56 @@ static void KeypadMultipleCodes()
     Cleanup(path);
 }
 
+static void TimeRemainingCallouts()
+{
+    using var h = new TestHarness(MakeMvpEdition(300), NewPath());
+    var sounds = new RecordingSoundPlayer();
+    h.Service.SoundCueRequested += cue => sounds.Play(cue);
+    h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
+    h.StartRun();
+    sounds.Played.Clear();
+
+    // Ticked like RunTimingHostedService: each callout once, as the clock passes it.
+    void RunFor(long milliseconds)
+    {
+        for (var step = 0L; step < milliseconds; step += 15)
+        {
+            h.Clock.Advance(TimeSpan.FromMilliseconds(15));
+            h.Service.TickBonusGame();
+        }
+    }
+    RunFor(59_985);
+    Assert.Equal(0, sounds.Played.Count);
+    RunFor(30);
+    Assert.Equal(SoundCue.FourMinutesRemaining, sounds.Played.Single());
+
+    // Paused time doesn't count toward a callout.
+    h.Service.Pause();
+    h.Clock.Advance(TimeSpan.FromMinutes(5));
+    h.Service.TickBonusGame();
+    h.Service.Resume();
+    Assert.Equal(1, sounds.Played.Count);
+
+    RunFor(240_100);
+    Assert.Equal(string.Join(",", new[]
+        {
+            SoundCue.FourMinutesRemaining, SoundCue.ThreeMinutesRemaining, SoundCue.TwoMinutesRemaining, SoundCue.OneMinuteRemaining,
+            SoundCue.FinalCountdown, SoundCue.TimeUp
+        }), string.Join(",", sounds.Played));
+    Assert.Equal(RunStatus.TimedOut, h.Service.GetScoreboard().CurrentRun!.Status);
+
+    // A stall skips the callouts it jumped past instead of stacking them late.
+    using var stalled = new TestHarness(MakeMvpEdition(300), NewPath());
+    var stalledSounds = new RecordingSoundPlayer();
+    stalled.Service.SoundCueRequested += cue => stalledSounds.Play(cue);
+    stalled.Service.ArmCompetitor(stalled.CompetitorId, RunCategory.Official);
+    stalled.StartRun();
+    stalledSounds.Played.Clear();
+    stalled.Clock.Advance(TimeSpan.FromSeconds(150));
+    stalled.Service.TickBonusGame();
+    Assert.Equal(0, stalledSounds.Played.Count);
+}
+
 static void ServerCountdownAndSounds()
 {
     using var h = new TestHarness(MakeKeypadSpokeEdition(), NewPath());
@@ -3009,6 +3060,15 @@ static void ServerCountdownAndSounds()
     Assert.Equal(SoundCue.KeypadWrong, sounds.Played.Last());
     h.Service.ReceivePhysicalKeypadInput(wrongCode, true);
     Assert.Equal(3, sounds.Played.Count);
+
+    // Solving the last required message finishes the keypad event with its own chime.
+    while (h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad").Status != EventStatus.Completed)
+    {
+        h.Clock.Advance(TimeSpan.FromSeconds(1));
+        h.Service.PressEvent(run.Id, "keypad");
+    }
+    Assert.Equal(SoundCue.KeypadComplete, sounds.Played.Last());
+    Assert.Equal(1, sounds.Played.Count(cue => cue == SoundCue.KeypadComplete));
 
     // A countdown first noticed well after it began still starts on time, but without a
     // voice that would be out of step with Go.
@@ -3278,6 +3338,8 @@ static void BonusRoundMissEndsRun()
     Assert.Equal(deadline, finished.ActiveElapsedMs);
     Assert.Equal(BonusGamePhase.Ended, finished.BonusGame!.Phase);
     Assert.Equal("miss", finished.BonusGame.EndReason);
+    Assert.Equal(SoundCue.TimeUp, sounds.Last());
+    Assert.Equal(1, sounds.Count(cue => cue == SoundCue.TimeUp));
     Assert.Equal<int?>(25, finished.BonusGame.AwardedPoints);
     Assert.Equal(finished.Events.Sum(e => e.Score) + 25, finished.TotalPoints);
     Assert.Equal("OFF", h.Service.GetMasterBonusStatus().Phase);

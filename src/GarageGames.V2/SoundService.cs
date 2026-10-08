@@ -16,7 +16,18 @@ public enum SoundCue
     // The bonus speed round's first button lights.
     BonusStart,
     // A wrong code was entered on a keypad.
-    KeypadWrong
+    KeypadWrong,
+    // The last required keypad message was solved, finishing the keypad event.
+    KeypadComplete,
+    // Time-remaining voice callouts.
+    FourMinutesRemaining,
+    ThreeMinutesRemaining,
+    TwoMinutesRemaining,
+    OneMinuteRemaining,
+    // The "5, 4, 3, 2, 1" voice, starting with five seconds left.
+    FinalCountdown,
+    // The run clock reached 0:00.
+    TimeUp
 }
 
 public interface ISoundPlayer
@@ -42,7 +53,14 @@ public sealed class WindowsSoundPlayer : ISoundPlayer, IDisposable
         [SoundCue.Countdown] = "3-seconds-countdown-deep-voice-game.mp3",
         [SoundCue.KeypadMessage] = "keypad-message.wav",
         [SoundCue.BonusStart] = "bonus-start.wav",
-        [SoundCue.KeypadWrong] = "keypad-wrong.wav"
+        [SoundCue.KeypadWrong] = "keypad-wrong.wav",
+        [SoundCue.KeypadComplete] = "keypad-success.mp3",
+        [SoundCue.FourMinutesRemaining] = "four-minutes-remaining.wav",
+        [SoundCue.ThreeMinutesRemaining] = "three-minutes-remaining.wav",
+        [SoundCue.TwoMinutesRemaining] = "two-minutes-remaining.wav",
+        [SoundCue.OneMinuteRemaining] = "one-minute-remaining.wav",
+        [SoundCue.FinalCountdown] = "5-second-countdown.mp3",
+        [SoundCue.TimeUp] = "time-up-buzzer.wav"
     };
 
     private readonly string _soundsDirectory;

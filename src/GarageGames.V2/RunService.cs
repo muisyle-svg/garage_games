@@ -2498,8 +2498,9 @@ public sealed class RunService
                 return ReplaceBonusTarget(run, now);
             }
 
-            // Missed: the run ends at the moment the window closed.
+            // Missed: the run ends at the moment the window closed, with the time-up buzzer.
             EndBonusRoundAndRun(run, "miss", Math.Max(deadline, run.LastAcceptedInputElapsedMs));
+            SoundCueRequested?.Invoke(SoundCue.TimeUp);
             return true;
         }
     }
@@ -3378,6 +3379,7 @@ public sealed class RunService
             eventResult.Status = EventStatus.Completed;
             eventResult.Score = CalculateScore(eventResult, run.Edition);
             _keypadEntries.Remove(eventResult.EventId);
+            SoundCueRequested?.Invoke(SoundCue.KeypadComplete);
             return required == 1
                 ? $"{who} '{current.Prompt}'; the keypad event is complete."
                 : $"{who} '{current.Prompt}' ({solved} of {required}); the keypad event is complete.";
@@ -3478,9 +3480,16 @@ public sealed class RunService
         }
 
         _clockAnchorMilliseconds = now;
+        var limitMs = _current.Edition.DurationLimitSeconds * 1000L;
+        var remainingBefore = limitMs - _current.ActiveElapsedMs;
         _current.ActiveElapsedMs += delta;
-        if (_current.ActiveElapsedMs >= _current.Edition.DurationLimitSeconds * 1000L)
+        AnnounceTimeRemaining(remainingBefore, limitMs - _current.ActiveElapsedMs);
+        if (_current.ActiveElapsedMs >= limitMs)
         {
+            if (_current.ActiveElapsedMs - limitMs <= LateTimeCalloutLimitMilliseconds)
+            {
+                SoundCueRequested?.Invoke(SoundCue.TimeUp);
+            }
             TimeoutCurrent();
         }
         else if (persist)
@@ -3493,6 +3502,36 @@ public sealed class RunService
             {
                 ReloadInMemoryAfterPersistenceFailure();
                 throw;
+            }
+        }
+    }
+
+    // Time-remaining voice callouts, each played as the clock passes its moment. The clock is
+    // ticked every 15 ms by RunTimingHostedService; a moment passed by longer than the late
+    // limit (a stall, or a run shorter than the callout) is skipped rather than played late.
+    private const long LateTimeCalloutLimitMilliseconds = 1_000;
+    private static readonly (long RemainingMs, SoundCue Cue)[] TimeCallouts =
+    [
+        (240_000, SoundCue.FourMinutesRemaining),
+        (180_000, SoundCue.ThreeMinutesRemaining),
+        (120_000, SoundCue.TwoMinutesRemaining),
+        (60_000, SoundCue.OneMinuteRemaining),
+        (5_000, SoundCue.FinalCountdown)
+    ];
+
+    private void AnnounceTimeRemaining(long remainingBefore, long remainingNow)
+    {
+        // Only the latest callout passed in this step plays, so a stall never stacks voices.
+        for (var index = TimeCallouts.Length - 1; index >= 0; index--)
+        {
+            var (remainingMs, cue) = TimeCallouts[index];
+            if (remainingBefore > remainingMs && remainingNow <= remainingMs)
+            {
+                if (remainingMs - remainingNow <= LateTimeCalloutLimitMilliseconds)
+                {
+                    SoundCueRequested?.Invoke(cue);
+                }
+                return;
             }
         }
     }

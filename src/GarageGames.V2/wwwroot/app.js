@@ -1090,6 +1090,9 @@
         : "Enter the code, then press ✱");
   }
 
+  // Plain words for the audience on the TV event tiles.
+  const tvEventStatusLabels = { pending: "Unstarted", active: "Started" };
+
   function renderScoreboardEvents(run) {
     const container = q("#scoreboard-events"); clear(container);
     if (!run || !run.events || !run.events.length) { container.appendChild(make("div", "tv-empty", "Events will appear when a run is armed.")); return; }
@@ -1102,7 +1105,7 @@
       const finished = event.status === "completed" && Number.isFinite(event.durationMs);
       meta.appendChild(finished
         ? make("span", "tv-event-time", scorekeeperTime.formatClockMs(event.durationMs))
-        : make("span", "tv-event-status", pretty(event.status)));
+        : make("span", "tv-event-status", tvEventStatusLabels[event.status] || pretty(event.status)));
       meta.appendChild(make("strong", "tv-event-points", event.awardedPoints || 0));
       card.appendChild(meta);
       container.appendChild(card);

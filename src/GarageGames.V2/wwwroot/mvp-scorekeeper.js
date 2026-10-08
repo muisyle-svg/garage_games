@@ -2021,6 +2021,8 @@
       // height and a start press never shifts the rows below.
       button.append(virtualTileResult(run, event, unsaved));
       if (event.status === "completed") button.classList.add("is-complete");
+      else if (run && event.status === "active") button.classList.add("is-in-progress");
+      else if (run) button.classList.add("is-unstarted");
       if (unsaved) button.classList.add("is-unsaved");
       button.append(metadata);
       button.addEventListener("click", () => identificationMode
