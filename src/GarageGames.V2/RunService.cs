@@ -874,11 +874,15 @@ public sealed class RunService
                 };
             }
 
-            // The primed competitor is shown as competing, so not also as on deck.
+            // A primed or armed competitor is shown as competing, so not also as on deck.
+            // (Starting the run consumes their queue entry.)
             var queue = _data.Queue.OrderBy(q => q.Position).ToList();
-            var primedEntry = primed is null ? null : queue.FirstOrDefault(item =>
-                item.CompetitorId == primed.CompetitorId && item.Category == primed.Category);
-            if (primedEntry is not null) queue.Remove(primedEntry);
+            var competing = primed is not null
+                ? (primed.CompetitorId, primed.Category)
+                : _current is { Status: RunStatus.Armed } armed ? (armed.CompetitorId, armed.Category) : default;
+            var competingEntry = competing.CompetitorId is null ? null : queue.FirstOrDefault(item =>
+                item.CompetitorId == competing.CompetitorId && item.Category == competing.Category);
+            if (competingEntry is not null) queue.Remove(competingEntry);
             var onDeck = queue.Take(4)
                 .Select(item => new ScoreboardOnDeck(
                     competitorNames.GetValueOrDefault(item.CompetitorId, "Unknown competitor"), item.Category))
@@ -2092,15 +2096,11 @@ public sealed class RunService
             replacedSource.Revision++;
         }
 
-        // Only recording the run on screen advances the on-deck queue; recording an
-        // older run from history must not consume the next competitor.
+        // Only recording the run on screen preselects the next on-deck competitor; recording
+        // an older run from history leaves the selection alone. The entry stays queued (and
+        // on deck on the TV) until that competitor's run actually starts.
         var promotesQueue = _current?.Id == run.Id || (_current is null && _lastDisplayedRun?.Id == run.Id);
         var promoted = promotesQueue ? _data.Queue.OrderBy(item => item.Position).FirstOrDefault() : null;
-        if (promoted is not null)
-        {
-            _data.Queue.Remove(promoted);
-            NormalizeQueue();
-        }
         var selectedCompetitorId = promotesQueue ? promoted?.CompetitorId : _data.SelectedCompetitorId;
         var selectedRunCategory = promotesQueue ? promoted?.Category : _data.SelectedRunCategory;
         var runsToSave = replacedSource is null ? new[] { run } : new[] { replacedSource, run };

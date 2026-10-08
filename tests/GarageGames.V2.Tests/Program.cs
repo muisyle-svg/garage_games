@@ -1520,13 +1520,17 @@ static void RecordPromotesNextCompetitor()
     Assert.Equal(RunStatus.Completed, recorded.Status);
     Assert.Equal(nextCompetitor.Id, selected.SelectedCompetitorId);
     Assert.Equal(RunCategory.Playoff, selected.SelectedRunCategory);
-    Assert.Equal(0, selected.Queue.Count);
+    Assert.Equal(1, selected.Queue.Count);
     Assert.True(!h.Service.IsCurrentRun(firstRun.Id), "Promotion must select the next competitor without starting their run.");
+    // The recorded run stays on the TV and the selected competitor stays on deck until they start.
+    var board = h.Service.GetScoreboard();
+    Assert.Equal("Next competitor", board.OnDeckName);
+    Assert.Equal(RunStatus.Completed, board.CurrentRun!.Status);
 
     var persisted = h.Store.Load();
     Assert.Equal(nextCompetitor.Id, persisted.SelectedCompetitorId);
     Assert.Equal(RunCategory.Playoff, persisted.SelectedRunCategory);
-    Assert.Equal(0, persisted.Queue.Count);
+    Assert.Equal(1, persisted.Queue.Count);
 
     h.Store.Dispose();
     using var reopenedStore = new RunStore(h.Path);
@@ -1537,7 +1541,10 @@ static void RecordPromotesNextCompetitor()
     Assert.True(!reopenedService.IsCurrentRun(firstRun.Id), "Reloading the selected competitor must not start a run.");
 
     var nextRun = reopenedService.ArmCompetitor(nextCompetitor.Id, RunCategory.Playoff);
+    Assert.Equal(null, reopenedService.GetScoreboard().OnDeckName);
+    Assert.Equal(1, reopenedService.GetOperatorSnapshot().Queue.Count);
     reopenedService.CompleteCountdown(reopenedService.StartMaster().Id);
+    Assert.Equal(0, reopenedService.GetOperatorSnapshot().Queue.Count);
     reopenedService.Finish();
     reopenedService.Record();
     selected = reopenedService.GetOperatorSnapshot();
@@ -3779,10 +3786,10 @@ static void CategoryAndTieRank()
     h.Service.Record();
     var promoted = h.Service.GetOperatorSnapshot();
     Assert.Equal(second.Id, promoted.SelectedCompetitorId);
-    Assert.Equal(0, promoted.Queue.Count);
-    Assert.DoesNotContain(promoted.Queue, item => item.Id == officialTwo.Id);
+    Assert.Contains(promoted.Queue, item => item.Id == officialTwo.Id);
     h.Service.ArmCompetitor(second.Id, RunCategory.Official);
     h.StartRun();
+    Assert.DoesNotContain(h.Service.GetOperatorSnapshot().Queue, item => item.Id == officialTwo.Id);
     h.Service.Finish();
     h.Service.Record();
     var leaderboard = h.Service.GetScoreboard().Leaderboard;
