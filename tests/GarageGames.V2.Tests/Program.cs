@@ -10,6 +10,7 @@ var tests = new (string Name, Action Run)[]
     ("per-event scoring snapshots persist and keep the edition when scoring changes", PerEventScoringPersistenceAndVersioning),
     ("each per-event scoring change keeps recorded runs on the same leaderboard", PerEventScoringVersioning),
     ("mid-competition setup changes keep the leaderboard and apply only to new runs", MidCompetitionSetupChanges),
+    ("a turned-off event doesn't count toward the bonus round and is never lit, even if its button answers", DisabledEventSkipsBonusRound),
     ("legacy config and snapshots keep their persisted global scoring floors", LegacyScoringFallback),
     ("pause freezes time and timeout precedence", PauseAndTimeout),
     ("physical master protocol validates boot tokens and SPEED interlock", MasterProtocolAndSpeedInterlock),
@@ -3340,6 +3341,49 @@ static void BonusHeartbeatCountsAsPollAnswer()
     // A button from no event in this run never joins.
     h.Service.ReceiveBonusBeat(token, "FFFFFFFFFFFF", 0);
     Assert.Equal(2, Bonus().RespondingDeviceIds.Count);
+}
+
+static void DisabledEventSkipsBonusRound()
+{
+    const string first = "AABBCCDDEEFF", second = "001122334455", third = "0A0B0C0D0E0F";
+    using var h = new TestHarness(MakeBonusEdition(), NewPath());
+    var setup = h.Service.GetSetup();
+    setup.Events.Single(e => e.EventId == "third").Disabled = true;
+    h.Service.UpdateSetup(setup);
+
+    var run = h.ArmAndStart();
+    Assert.True(run.Events.Select(e => e.EventId).SequenceEqual(["first", "second"]));
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    foreach (var eventId in new[] { "first", "second" })
+    {
+        h.Service.PressEvent(run.Id, eventId);
+        h.Clock.Advance(TimeSpan.FromMilliseconds(500));
+        h.Service.PressEvent(run.Id, eventId);
+    }
+    // Two of two events done is all of them: the bonus round starts.
+    Assert.Equal(RunPhase.Bonus, h.Service.GetOperatorSnapshot().CurrentRun!.Phase);
+    Assert.Throws<CommandException>(() => h.Service.PressEvent(run.Id, "third"));
+
+    // The turned-off button is still powered and answers, but is never lit.
+    BonusGameRecord Bonus() => h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame!;
+    void BeatAll()
+    {
+        foreach (var mac in new[] { first, second, third }) h.Service.ReceiveBonusBeat(token, mac, 0);
+    }
+    foreach (var mac in new[] { first, second, third }) h.Service.ReceiveBonusPollReply(token, mac);
+    BeatAll();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+    BeatAll();
+    Assert.True(h.Service.TickBonusGame());
+    for (var hit = 0; hit < 12; hit++)
+    {
+        var lit = Bonus().TargetDeviceId!;
+        Assert.True(lit != third, "a turned-off event's button must never be a bonus target");
+        Assert.True(h.Service.ReceiveBonusBeat(token, lit, (uint)Bonus().Sequence));
+        Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, lit == first ? "first" : "second").Disposition);
+        BeatAll();
+    }
+    Assert.Equal(12, Bonus().Hits);
 }
 
 static void FinishAllEvents(TestHarness h, RunRecord run)

@@ -172,7 +172,10 @@ with the edition-wide defaults, which Setup's **Default scoring** section edits
 optional in a PUT request; leaving it out keeps the current defaults. Each event
 also has a **Play this event** switch (`disabled: true` in the API): a turned-off
 event stays in Setup with its button assignment but is left out of new runs, the
-scorecard, the TV, and its event leaderboard. At least one event must stay on.
+scorecard, the TV, and its event leaderboard. New runs finish (and start the
+bonus round) once their remaining events are done, and a turned-off event's
+button is never lit in the bonus round even if it is powered and answering.
+At least one event must stay on.
 
 To match physical buttons to MAC addresses, connect the master (Garage idle
 mode, no run underway) and press a button: its MAC is added to Setup's
