@@ -1070,6 +1070,17 @@
   const bonusBlink = { target: null, windowMs: null, on: false, nextToggleAt: 0 };
   const buttonTargetLook = (remainingMs) => scorekeeperTime.buttonTargetLook(remainingMs);
 
+  // Wall-D's keypad answers are disc coordinates, so its TV panel talks about discs and
+  // coordinates instead of codes. Matched by name ("Wall-D", "Wall D", "WALLD").
+  function keypadWording(eventName) {
+    const wallD = String(eventName || "").toLowerCase().replace(/[^a-z0-9]/g, "") === "walld";
+    return wallD
+      ? { found: (solved, required) => `${solved} of ${required} disc${required === 1 ? "" : "s"} found`,
+        enter: "Enter the coordinates, then press ✱", wrong: "Wrong coordinates — try again", progress: "Discs found" }
+      : { found: (solved, required) => `${solved} of ${required} code${required === 1 ? "" : "s"} solved`,
+        enter: "Enter the code, then press ✱", wrong: "Wrong code — try again", progress: "Codes solved" };
+  }
+
   function renderKeypadChallenge(challenge) {
     const panel = q("#scoreboard-keypad");
     if (!panel) return;
@@ -1085,13 +1096,15 @@
     const solved = Math.min(required, Math.max(0, Number(challenge.successes) || 0));
     const pips = q("#scoreboard-keypad-pips"); clear(pips);
     for (let index = 0; index < required; index += 1) pips.appendChild(make("span", `tv-keypad-pip${index < solved ? " is-solved" : ""}`));
-    text(q("#scoreboard-keypad-count"), `${solved} of ${required} code${required === 1 ? "" : "s"} solved`);
+    const wording = keypadWording(challenge.eventName);
+    pips.parentElement?.setAttribute("aria-label", wording.progress);
+    text(q("#scoreboard-keypad-count"), wording.found(solved, required));
     const correct = !!challenge.showCorrect && !challenge.showWrong;
     panel.classList.toggle("is-wrong", !!challenge.showWrong);
     panel.classList.toggle("is-correct", correct);
-    text(q("#scoreboard-keypad-hint"), challenge.showWrong ? "Wrong code — try again"
+    text(q("#scoreboard-keypad-hint"), challenge.showWrong ? wording.wrong
       : correct ? `Correct! ${required - solved} more to go`
-        : "Enter the code, then press ✱");
+        : wording.enter);
   }
 
   // Plain words for the audience on the TV event tiles.
