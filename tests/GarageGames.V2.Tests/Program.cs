@@ -75,6 +75,7 @@ var tests = new (string Name, Action Run)[]
     ("keypad events draw unrepeated messages, need several codes, and undo one code at a time", KeypadMultipleCodes),
     ("the app plays the countdown and starts the run at Go without a browser", ServerCountdownAndSounds),
     ("time-remaining callouts and the final countdown play once each as the clock passes them", TimeRemainingCallouts),
+    ("keypad typing still shows on the TV after the keypad button restarts its numbering", KeypadTypingSurvivesSpokeReset),
     ("an unrecorded timed-out run can be discarded; a recorded one cannot", DiscardTimedOutRun),
     ("the bonus round polls, lights targets, counts hits, shrinks windows, and ends the run on a miss", BonusRoundMissEndsRun),
     ("the bonus round ends on timeout, on operator finish, and uses every tile when nothing answers", BonusRoundOtherEndings),
@@ -2743,6 +2744,31 @@ static void PhysicalKeypadCodeFlow()
     Line($"GG1 KEYPAD boot {token} {regularMac} 2 S D5 0");
     Assert.Equal("REJECTED", keypadResult!.State);
     Assert.Equal(EventStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == regularMac).Status);
+}
+
+static void KeypadTypingSurvivesSpokeReset()
+{
+    const string keypadMac = "001122334455";
+    using var h = new TestHarness(MakeKeypadSpokeEdition(), NewPath());
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    h.Service.PressEvent(run.Id, "keypad");
+    string Shown() => h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Entry;
+    void Type(uint sequence, string entry) =>
+        h.Service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, sequence, false, entry), true);
+
+    Type(500_000, "1");
+    Type(500_001, "12");
+    Assert.Equal("12", Shown());
+    // A late, out-of-order copy of an earlier update is ignored.
+    Type(500_000, "1");
+    Assert.Equal("12", Shown());
+    // The button rebooted (or lost its status) and restarted from a much lower number.
+    Type(42, "7");
+    Assert.Equal("7", Shown());
+    Type(43, "78");
+    Assert.Equal("78", Shown());
 }
 
 static void KeypadOperatorOverrideAndAutoFinish()

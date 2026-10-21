@@ -2081,7 +2081,8 @@
     }
     state.bonusPollInFlight = true;
     try {
-      const board = await request("/api/scoreboard", { cache: "no-store" });
+      // Timed out so one request that never answers can't hold bonusPollInFlight forever.
+      const board = await request("/api/scoreboard", { cache: "no-store", signal: AbortSignal.timeout(4000) });
       const bonus = board?.currentRun?.bonusGame || null;
       state.bonusLive = bonus ? { ...bonus, receivedAt: performance.now(), running: board.currentRun.status === "active" } : null;
       renderBonusLive();

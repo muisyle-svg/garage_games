@@ -918,8 +918,12 @@
     window.setInterval(() => pollOperator(), 1000);
   }
 
+  // The next poll is scheduled only once this one settles, so a request that never answers
+  // would freeze the TV; give up on it after a few seconds and try again.
+  const SCOREBOARD_REQUEST_TIMEOUT_MS = 4000;
+
   function pollScoreboard() {
-    return request(API.scoreboard).then((snapshot) => {
+    return request(API.scoreboard, { signal: AbortSignal.timeout(SCOREBOARD_REQUEST_TIMEOUT_MS) }).then((snapshot) => {
       state.scoreboard = snapshot;
       state.lastGoodAt = new Date();
       setConnection(true, state.lastGoodAt);

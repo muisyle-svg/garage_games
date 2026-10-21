@@ -1555,7 +1555,7 @@ public sealed class RunService
                 string.Equals(MasterProtocolCodec.GetGarageRunToken(run.Id), input.RunToken, StringComparison.Ordinal) &&
                 eventResult is { Type: EventKind.Keypad, Status: EventStatus.Active };
             var entryState = liveKeypadEvent ? KeypadEntryFor(run!, eventResult!) : null;
-            if (entryState is not null && input.Sequence > entryState.Sequence)
+            if (entryState is not null && IsNewerKeypadSequence(input.Sequence, entryState.Sequence))
             {
                 entryState.Sequence = input.Sequence;
                 entryState.Entry = input.Submit ? "" : input.Entry;
@@ -1578,6 +1578,15 @@ public sealed class RunService
                 }, sessionAllowed);
         }
     }
+
+    // A keypad's updates count up by one per key, so a slightly lower number is a late, out-of-
+    // order copy. A button that reboots or loses its run status for a moment starts again from
+    // a new random number, usually far lower; that is a fresh start, not an old update, or the
+    // TV would stop showing its typing for the rest of the run.
+    internal const uint KeypadSequenceResetGap = 1_000;
+
+    private static bool IsNewerKeypadSequence(uint sequence, uint last) =>
+        sequence > last || last - sequence > KeypadSequenceResetGap;
 
     // The shrine repeats its status about once a second; anything older is no longer shown.
     public const long ArcadeStatusFreshMilliseconds = 4_000;
