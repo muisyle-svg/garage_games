@@ -484,6 +484,8 @@ assign the special button's MAC to that event as usual. During a run:
   back the latest solved code (its message returns to the TV and any message
   drawn after it is dropped), and finally the start. Wrong codes are never
   undone; they stay in the raw messages.
+- An event named Wall-D (or "Wall D") words its TV panel for discs: "1 of 3
+  discs found", "Enter the coordinates", and "Wrong coordinates".
 
 
 Codes are checked by the app, not the button, and every submitted code is
