@@ -7,8 +7,10 @@ var tests = new (string Name, Action Run)[]
     ("automatic event-score cutoffs", ScoreBoundaries),
     ("per-event scoring parameters and grace boundaries", PerEventScoringBoundaries),
     ("per-event base points flow through live scoring, edits, history, and leaderboard", PerEventBasePoints),
-    ("per-event scoring snapshots persist and version editions", PerEventScoringPersistenceAndVersioning),
-    ("each per-event scoring parameter versions recorded editions", PerEventScoringVersioning),
+    ("per-event scoring snapshots persist and keep the edition when scoring changes", PerEventScoringPersistenceAndVersioning),
+    ("each per-event scoring change keeps recorded runs on the same leaderboard", PerEventScoringVersioning),
+    ("mid-competition setup changes keep the leaderboard and apply only to new runs", MidCompetitionSetupChanges),
+    ("a turned-off event doesn't count toward the bonus round and is never lit, even if its button answers", DisabledEventSkipsBonusRound),
     ("legacy config and snapshots keep their persisted global scoring floors", LegacyScoringFallback),
     ("pause freezes time and timeout precedence", PauseAndTimeout),
     ("physical master protocol validates boot tokens and SPEED interlock", MasterProtocolAndSpeedInterlock),
@@ -46,7 +48,7 @@ var tests = new (string Name, Action Run)[]
     ("duplicate and per-event stale input", DuplicateAndStale),
     ("keypad and arcade completion rules", SpecialCompletion),
     ("manual offline override remains optional and station packets stay guarded", ManualOverride),
-    ("setup persists safely, versions changed rosters, and preserves run snapshots", SetupPersistenceAndRosterIsolation),
+    ("setup persists safely, keeps the edition, and preserves run snapshots", SetupPersistenceAndRosterIsolation),
     ("setup is locked during an unrecorded run and validates device mappings", SetupLockAndValidation),
     ("device scan readiness distinguishes responding, missing, and unassigned stations", DeviceScanReadiness),
     ("device scan protocol accepts only correlated 12-hex node replies", DeviceScanProtocol),
@@ -75,6 +77,7 @@ var tests = new (string Name, Action Run)[]
     ("keypad events draw unrepeated messages, need several codes, and undo one code at a time", KeypadMultipleCodes),
     ("the app plays the countdown and starts the run at Go without a browser", ServerCountdownAndSounds),
     ("time-remaining callouts and the final countdown play once each as the clock passes them", TimeRemainingCallouts),
+    ("keypad typing still shows on the TV after the keypad button restarts its numbering", KeypadTypingSurvivesSpokeReset),
     ("an unrecorded timed-out run can be discarded; a recorded one cannot", DiscardTimedOutRun),
     ("the bonus round polls, lights targets, counts hits, shrinks windows, and ends the run on a miss", BonusRoundMissEndsRun),
     ("the bonus round ends on timeout, on operator finish, and uses every tile when nothing answers", BonusRoundOtherEndings),
@@ -274,7 +277,7 @@ static void PerEventBasePoints()
     var setup = h.Service.GetSetup();
     setup.Events[0].BasePoints = 80;
     var changedSetup = h.Service.UpdateSetup(setup);
-    Assert.True(changedSetup.EditionId != recorded.EditionId);
+    Assert.Equal(recorded.EditionId, changedSetup.EditionId);
     Assert.Equal(80, changedSetup.Events[0].BasePoints);
 
     var correctedHistory = h.Service.EditHistoricalRun(recorded.Id, new EditRunRequest
@@ -285,7 +288,7 @@ static void PerEventBasePoints()
     });
     Assert.Equal(35, correctedHistory.Events.Single(e => e.EventId == "event-01").Score);
     Assert.Equal(40, correctedHistory.Edition.Events.Single(e => e.EventId == "event-01").BasePoints);
-    Assert.Equal(0, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+    Assert.Equal(61, h.Service.GetOperatorSnapshot().Leaderboard.Single().Points);
 }
 
 static void PerEventScoringPersistenceAndVersioning()
@@ -327,7 +330,7 @@ static void PerEventScoringPersistenceAndVersioning()
     var priorEditionId = setup.EditionId;
     setup.Events[0].MinimumPoints = 10;
     var changed = h.Service.UpdateSetup(setup);
-    Assert.True(changed.EditionId != priorEditionId, "Changing one event scoring field after a result must create a new edition.");
+    Assert.Equal(priorEditionId, changed.EditionId);
     var historical = h.Service.GetOperatorSnapshot().History.Single(item => item.Id == recorded.Id);
     Assert.Equal(11, historical.Edition.Events[0].MinimumPoints);
     Assert.Equal(46, historical.Events.Single(item => item.EventId == "event-01").Score);
@@ -348,11 +351,22 @@ static void PerEventScoringPersistenceAndVersioning()
     Assert.Equal(25, changed.Scoring.MinimumPoints);
     var requestWithGlobalScoring = h.Service.GetSetup();
     requestWithGlobalScoring.Scoring = new ScoringRule { BasePoints = 900, MinimumPoints = 1, DecayPoints = 0, DecayEverySeconds = 1 };
-    var ignoredGlobalScoring = h.Service.UpdateSetup(requestWithGlobalScoring);
-    Assert.Equal(50, ignoredGlobalScoring.Scoring!.BasePoints);
-    Assert.Equal(25, ignoredGlobalScoring.Scoring.MinimumPoints);
-    Assert.Equal(5, ignoredGlobalScoring.Scoring.DecayPoints);
-    Assert.Equal(5, ignoredGlobalScoring.Scoring.DecayEverySeconds);
+    var appliedGlobalScoring = h.Service.UpdateSetup(requestWithGlobalScoring);
+    Assert.Equal(900, appliedGlobalScoring.Scoring!.BasePoints);
+    Assert.Equal(1, appliedGlobalScoring.Scoring.MinimumPoints);
+    Assert.Equal(0, appliedGlobalScoring.Scoring.DecayPoints);
+    Assert.Equal(1, appliedGlobalScoring.Scoring.DecayEverySeconds);
+    Assert.Equal(priorEditionId, appliedGlobalScoring.EditionId);
+    // The run already played keeps the defaults it was scored under.
+    Assert.Equal(50, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == recorded.Id).Edition.Scoring.BasePoints);
+
+    var setupWithoutScoring = h.Service.GetSetup();
+    setupWithoutScoring.Scoring = null;
+    Assert.Equal(900, h.Service.UpdateSetup(setupWithoutScoring).Scoring!.BasePoints);
+
+    var invalidGlobalScoring = h.Service.GetSetup();
+    invalidGlobalScoring.Scoring = new ScoringRule { BasePoints = 10, MinimumPoints = 11, DecayPoints = 1, DecayEverySeconds = 1 };
+    Assert.Throws<CommandException>(() => h.Service.UpdateSetup(invalidGlobalScoring));
 }
 
 static void PerEventScoringVersioning()
@@ -378,10 +392,92 @@ static void PerEventScoringVersioning()
         var setup = h.Service.GetSetup();
         change.Apply(setup.Events[0]);
         var updated = h.Service.UpdateSetup(setup);
-        Assert.True(updated.EditionId != recorded.EditionId,
-            $"Changing event {change.Name} after a recorded run must create a new edition.");
-        Assert.Equal(recorded.EditionId, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == recorded.Id).EditionId);
+        Assert.True(updated.EditionId == recorded.EditionId,
+            $"Changing event {change.Name} after a recorded run must keep the edition.");
+        var board = h.Service.GetOperatorSnapshot().Leaderboard.Single();
+        Assert.Equal(recorded.Id, board.RunId);
+        Assert.Equal(recorded.TotalPoints, board.Points);
     }
+}
+
+static void MidCompetitionSetupChanges()
+{
+    using var h = NewHarness();
+    var first = h.ArmAndStart();
+    h.Service.PressEvent(first.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    h.Service.PressEvent(first.Id, "event-01");
+    h.Service.PressEvent(first.Id, "event-04");
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    h.Service.PressEvent(first.Id, "event-04");
+    h.Service.Finish();
+    var recorded = h.Service.Record();
+    Assert.Equal(90, recorded.TotalPoints);
+
+    // Mid-competition: a new button for event 1, event 4 turned off, new default scoring.
+    var setup = h.Service.GetSetup();
+    setup.Events[0].DeviceId = "aabbccddeeff";
+    setup.Events[3].Disabled = true;
+    setup.Scoring = new ScoringRule { BasePoints = 100, MinimumPoints = 50, DecayPoints = 5, DecayEverySeconds = 5 };
+    var saved = h.Service.UpdateSetup(setup);
+    Assert.Equal(recorded.EditionId, saved.EditionId);
+    Assert.Equal(true, saved.Events[3].Disabled);
+    Assert.Equal("AABBCCDDEEFF", saved.Events[0].DeviceId);
+
+    // The run already played is untouched and stays on the leaderboard.
+    var history = h.Service.GetOperatorSnapshot().History.Single(item => item.Id == recorded.Id);
+    Assert.Equal(4, history.Events.Count);
+    Assert.Equal("station-01", history.Events.Single(e => e.EventId == "event-01").DeviceId);
+    Assert.Equal(90, history.TotalPoints);
+    Assert.Equal(90, h.Service.GetOperatorSnapshot().Leaderboard.Single().Points);
+
+    // New runs skip the turned-off event, use the new button, and score with the new defaults.
+    Assert.True(h.Service.GetOperatorSnapshot().Events.Select(e => e.EventId).SequenceEqual(["event-01", "event-02", "event-03"]));
+    Assert.True(h.Service.Preflight().All(result => result.EventId != "event-04"));
+    var second = h.AddCompetitor("Second competitor");
+    var next = h.Service.ArmCompetitor(second.Id, RunCategory.Official);
+    Assert.True(next.Events.Select(e => e.EventId).SequenceEqual(["event-01", "event-02", "event-03"]));
+    Assert.Equal("AABBCCDDEEFF", next.Events.Single(e => e.EventId == "event-01").DeviceId);
+    Assert.Equal(100, next.Edition.Scoring.BasePoints);
+    h.StartRun();
+    h.Service.PressEvent(next.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    h.Service.PressEvent(next.Id, "event-01");
+    Assert.Throws<CommandException>(() => h.Service.PressEvent(next.Id, "event-04"));
+    h.Service.Finish();
+    var nextRecorded = h.Service.Record();
+    Assert.Equal(95, nextRecorded.TotalPoints);
+
+    var leaderboard = h.Service.GetOperatorSnapshot().Leaderboard;
+    Assert.True(leaderboard.Select(row => row.Points).SequenceEqual([95, 90]));
+    // One official run per competitor still holds across the change.
+    Assert.Throws<CommandException>(() => h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official));
+
+    // A historical correction still uses the old run's own rules.
+    var corrected = h.Service.EditHistoricalRun(recorded.Id, new EditRunRequest
+    {
+        ExpectedRevision = history.Revision,
+        Reason = "Correct timing after the setup change",
+        Events = [new EventEditRequest { EventId = "event-04", FinishElapsedMs = history.Events.Single(e => e.EventId == "event-04").StartElapsedMs!.Value + 10_000 }]
+    });
+    Assert.Equal(40, corrected.Events.Single(e => e.EventId == "event-04").Score);
+
+    // Setup keeps the turned-off event after a restart, and it can be turned back on.
+    var path = h.Path;
+    h.Store.Dispose();
+    using var reopenedStore = new RunStore(path);
+    var reopened = new RunService(reopenedStore, MakeEdition(), new TestClock());
+    var persisted = reopened.GetSetup();
+    Assert.Equal(true, persisted.Events[3].Disabled);
+    Assert.Equal(100, persisted.Scoring!.BasePoints);
+    Assert.True(reopened.GetOperatorSnapshot().Events.All(e => e.EventId != "event-04"));
+    persisted.Events[3].Disabled = false;
+    reopened.UpdateSetup(persisted);
+    Assert.True(reopened.GetOperatorSnapshot().Events.Any(e => e.EventId == "event-04"));
+
+    var allOff = reopened.GetSetup();
+    allOff.Events.ForEach(e => e.Disabled = true);
+    Assert.Throws<CommandException>(() => reopened.UpdateSetup(allOff));
 }
 
 static void LegacyScoringFallback()
@@ -1811,12 +1907,12 @@ static void SetupPersistenceAndRosterIsolation()
     setup.Events[0].GraceSeconds = 0;
     var saved = h.Service.UpdateSetup(setup);
 
-    Assert.True(saved.EditionId != priorEditionId, "Changing event points after recorded runs must start a separate leaderboard edition.");
+    Assert.Equal(priorEditionId, saved.EditionId);
     Assert.Equal(40, saved.Events[0].BasePoints);
     Assert.Equal(null, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Edition.Events[0].BasePoints);
     Assert.Equal(45, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Events[0].Score);
     Assert.Equal(saved.EditionId, h.Service.GetOperatorSnapshot().EditionId);
-    Assert.Equal(0, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+    Assert.Equal(45, h.Service.GetOperatorSnapshot().Leaderboard.Single().Points);
     Assert.True(Directory.GetFiles(System.IO.Path.Combine(h.Path, "backups"), "*.db").Length >= 1,
         "Changing setup should create a pre-change database backup.");
 
@@ -2745,6 +2841,31 @@ static void PhysicalKeypadCodeFlow()
     Assert.Equal(EventStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == regularMac).Status);
 }
 
+static void KeypadTypingSurvivesSpokeReset()
+{
+    const string keypadMac = "001122334455";
+    using var h = new TestHarness(MakeKeypadSpokeEdition(), NewPath());
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    h.Service.PressEvent(run.Id, "keypad");
+    string Shown() => h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Entry;
+    void Type(uint sequence, string entry) =>
+        h.Service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, sequence, false, entry), true);
+
+    Type(500_000, "1");
+    Type(500_001, "12");
+    Assert.Equal("12", Shown());
+    // A late, out-of-order copy of an earlier update is ignored.
+    Type(500_000, "1");
+    Assert.Equal("12", Shown());
+    // The button rebooted (or lost its status) and restarted from a much lower number.
+    Type(42, "7");
+    Assert.Equal("7", Shown());
+    Type(43, "78");
+    Assert.Equal("78", Shown());
+}
+
 static void KeypadOperatorOverrideAndAutoFinish()
 {
     const string keypadMac = "001122334455";
@@ -3222,6 +3343,49 @@ static void BonusHeartbeatCountsAsPollAnswer()
     Assert.Equal(2, Bonus().RespondingDeviceIds.Count);
 }
 
+static void DisabledEventSkipsBonusRound()
+{
+    const string first = "AABBCCDDEEFF", second = "001122334455", third = "0A0B0C0D0E0F";
+    using var h = new TestHarness(MakeBonusEdition(), NewPath());
+    var setup = h.Service.GetSetup();
+    setup.Events.Single(e => e.EventId == "third").Disabled = true;
+    h.Service.UpdateSetup(setup);
+
+    var run = h.ArmAndStart();
+    Assert.True(run.Events.Select(e => e.EventId).SequenceEqual(["first", "second"]));
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    foreach (var eventId in new[] { "first", "second" })
+    {
+        h.Service.PressEvent(run.Id, eventId);
+        h.Clock.Advance(TimeSpan.FromMilliseconds(500));
+        h.Service.PressEvent(run.Id, eventId);
+    }
+    // Two of two events done is all of them: the bonus round starts.
+    Assert.Equal(RunPhase.Bonus, h.Service.GetOperatorSnapshot().CurrentRun!.Phase);
+    Assert.Throws<CommandException>(() => h.Service.PressEvent(run.Id, "third"));
+
+    // The turned-off button is still powered and answers, but is never lit.
+    BonusGameRecord Bonus() => h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame!;
+    void BeatAll()
+    {
+        foreach (var mac in new[] { first, second, third }) h.Service.ReceiveBonusBeat(token, mac, 0);
+    }
+    foreach (var mac in new[] { first, second, third }) h.Service.ReceiveBonusPollReply(token, mac);
+    BeatAll();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+    BeatAll();
+    Assert.True(h.Service.TickBonusGame());
+    for (var hit = 0; hit < 12; hit++)
+    {
+        var lit = Bonus().TargetDeviceId!;
+        Assert.True(lit != third, "a turned-off event's button must never be a bonus target");
+        Assert.True(h.Service.ReceiveBonusBeat(token, lit, (uint)Bonus().Sequence));
+        Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, lit == first ? "first" : "second").Disposition);
+        BeatAll();
+    }
+    Assert.Equal(12, Bonus().Hits);
+}
+
 static void FinishAllEvents(TestHarness h, RunRecord run)
 {
     foreach (var eventId in new[] { "first", "second", "third" })
@@ -3585,7 +3749,7 @@ static void BonusRoundSetup()
     var changed = h.Service.GetSetup();
     changed.BonusGame!.PointsPerPress = 3;
     var versioned = h.Service.UpdateSetup(changed);
-    Assert.True(versioned.EditionId != setup.EditionId, "changing bonus scoring after recorded runs versions the edition");
+    Assert.Equal(setup.EditionId, versioned.EditionId); // Bonus scoring changes keep the leaderboard too.
     Assert.Equal(12, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).Edition.BonusGame!.PointsPerPress);
 
     // New runs carry the name to the TV.

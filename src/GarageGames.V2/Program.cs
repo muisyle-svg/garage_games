@@ -44,6 +44,10 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
 });
+// A background loop that fails must not take the app down mid-event (the .NET default stops
+// the host); each loop logs its own errors and carries on.
+builder.Services.Configure<HostOptions>(options =>
+    options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 builder.Services.AddSingleton(store);
 builder.Services.AddSingleton<IMonotonicClock>(clock);
 builder.Services.AddSingleton(service);

@@ -348,9 +348,18 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         {
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
-                ReopenIfMasterSilent();
-                TryReconnect();
-                await SendStatusAsync(stoppingToken);
+                // A failure here (a serial write timing out, a database write refused) must
+                // never end the loop: it would stop status, reconnects, and the whole app.
+                try
+                {
+                    ReopenIfMasterSilent();
+                    TryReconnect();
+                    await SendStatusAsync(stoppingToken);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    _logger.LogError(exception, "Physical master upkeep failed; it will try again in a second.");
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -473,7 +482,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
-        catch (Exception exception) when (exception is IOException or InvalidOperationException)
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException)
         {
             _logger.LogInformation("Physical master serial connection ended ({ErrorType}).", exception.GetType().Name);
         }
@@ -697,7 +706,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
-        catch (Exception exception) when (exception is IOException or InvalidOperationException)
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException)
         {
             _logger.LogInformation("Physical master status write failed ({ErrorType}).", exception.GetType().Name);
             var connectionEnded = false;

@@ -200,6 +200,7 @@
     setupContent: $("setup-content"),
     setupEditionName: $("setup-edition-name"),
     setupBonus: $("setup-bonus"),
+    setupScoring: $("setup-scoring"),
     setupScanAll: $("setup-scan-all"),
     setupSave: $("setup-save"),
     setupSaveBottom: $("setup-save-bottom"),
@@ -552,6 +553,7 @@
     ui.setupAddEvent.disabled = busy;
     ui.setupScanAll.disabled = busy || state.setupScanLoading || state.setupDirty;
     ui.setupEditionName.disabled = busy;
+    ui.setupScoring?.querySelectorAll("input").forEach((input) => { input.disabled = busy; });
     ui.setupEventList.querySelectorAll("input").forEach((input) => { input.disabled = busy; });
     ui.setupEventList.querySelectorAll("button[data-setup-action]").forEach((button) => {
       const action = button.dataset.setupAction;
@@ -934,8 +936,20 @@
       readiness.appendChild(checkedLabel);
       deviceRow.append(assignmentLabel, assignNext, unassign, identify, readiness);
 
+      // Turning an event off leaves it out of new runs only; runs already played keep it.
+      const play = make("label", "setup-event-play");
+      const playInput = make("input");
+      playInput.type = "checkbox";
+      playInput.checked = !event.disabled;
+      playInput.dataset.setupField = "enabled";
+      playInput.dataset.setupEventId = event.eventId;
+      playInput.setAttribute("aria-label", `Play ${event.name || event.eventId} in new runs`);
+      play.append(playInput, make("span", "", "Play this event"),
+        make("small", "", event.disabled ? "Off: new runs skip it; runs already played keep their points for it." : "New runs include it."));
+      row.classList.toggle("is-disabled", Boolean(event.disabled));
+
       const internalId = make("p", "setup-event-id", `Event ID · ${event.eventId}`);
-      row.append(top, scoring, deviceRow);
+      row.append(top, play, scoring, deviceRow);
       if (event.type === "keypad") row.appendChild(setupKeypadFields(event));
       row.appendChild(internalId);
       ui.setupEventList.appendChild(row);
@@ -956,7 +970,9 @@
     if (!ui.setupPreviewList) return;
     const events = state.setupDraft?.events || [];
     ui.setupPreviewList.replaceChildren();
-    ui.setupPreviewSummary.textContent = `${events.length} ${events.length === 1 ? "event" : "events"} · order shown is the scorekeeper button order. Changes here are previews until you save setup.`;
+    const playing = events.filter((event) => !event.disabled).length;
+    const off = events.length - playing;
+    ui.setupPreviewSummary.textContent = `${playing} ${playing === 1 ? "event" : "events"} in new runs${off ? ` (${off} turned off)` : ""} · order shown is the scorekeeper button order. Changes here are previews until you save setup.`;
     events.forEach((event, index) => {
       const effectiveNumber = (value, fallback) => {
         const candidate = value ?? fallback;
@@ -970,8 +986,8 @@
       const firstDrop = grace > 0 ? grace : interval;
       const deviceId = setupTools.hardwareId(event.assignmentValue || "");
       const kind = ({ standard: "Regular", keypad: "Keypad", magneticArcade: "Arcade" })[event.type] || titleCase(event.type);
-      const details = `${kind} · ${starting ?? "—"} start · −${decay ?? "—"} at ${firstDrop ?? "—"}s, then every ${interval ?? "—"}s · min ${minimum ?? "—"} · ${deviceId ? `Button ${deviceId}` : "Virtual only"}`;
-      const row = make("li", "setup-preview-item");
+      const details = `${event.disabled ? "Off · " : ""}${kind} · ${starting ?? "—"} start · −${decay ?? "—"} at ${firstDrop ?? "—"}s, then every ${interval ?? "—"}s · min ${minimum ?? "—"} · ${deviceId ? `Button ${deviceId}` : "Virtual only"}`;
+      const row = make("li", `setup-preview-item${event.disabled ? " is-disabled" : ""}`);
       row.append(make("span", "setup-preview-order", String(index + 1)), make("span", "setup-preview-event"));
       row.querySelector(".setup-preview-event").append(make("strong", "", event.name || `Event ${index + 1}`), make("small", "", details));
       ui.setupPreviewList.appendChild(row);
@@ -991,6 +1007,7 @@
     }
     if (document.activeElement !== ui.setupEditionName) ui.setupEditionName.value = state.setupDraft.name;
     renderSetupBonus();
+    renderSetupScoring();
     renderSetupEvents();
     renderSetupDiscovery();
     renderSetupControls();
@@ -1020,6 +1037,30 @@
     });
   }
 
+  function renderSetupScoring() {
+    const defaults = state.setupDraft?.scoringDefaults;
+    if (!ui.setupScoring || !defaults) return;
+    ui.setupScoring.querySelectorAll("input[data-scoring-field]").forEach((input) => {
+      if (document.activeElement !== input) input.value = defaults[input.dataset.scoringField] ?? "";
+    });
+  }
+
+  // Events that inherit a default show the new value as it is typed.
+  function onSetupScoringInput(event) {
+    const input = event.target.closest("input[data-scoring-field]");
+    if (!input || !state.setupDraft) return;
+    setupTools.updateScoringDefault(state.setupDraft, input.dataset.scoringField, input.value);
+    ui.setupEventList.querySelectorAll(".setup-event-row").forEach((row) => {
+      const target = setupEvent(row.dataset.eventId);
+      if (!target) return;
+      row.querySelectorAll("input[data-setup-field]").forEach((field) => {
+        const name = field.dataset.setupField;
+        if (target[`${name}Inherited`] && document.activeElement !== field) field.value = target[name] ?? "";
+      });
+    });
+    markSetupChanged();
+  }
+
   function onSetupBonusInput(event) {
     const input = event.target.closest("input[data-bonus-field]");
     const bonus = state.setupDraft?.bonusGame;
@@ -1040,6 +1081,12 @@
     if (!input) return;
     const target = setupEvent(input.dataset.setupEventId);
     if (!target) return;
+    if (input.dataset.setupField === "enabled") {
+      target.disabled = !input.checked;
+      markSetupChanged();
+      renderSetupEvents();
+      return;
+    }
     if (input.dataset.setupField === "name") target.name = input.value;
     else if (input.dataset.setupField === "assignment") target.assignmentValue = input.value;
     else if (input.dataset.setupField === "requiredSuccesses") target.requiredSuccesses = input.value;
@@ -1425,18 +1472,12 @@
     return Number(event.hits || 0);
   }
 
+  // A run shows the events it was played with: Setup can change between runs (a new button,
+  // an event turned off), and the last run stays on the scorecard after it is recorded.
   function currentEditionEvents(run) {
     const configured = state.snapshot?.events || [];
-    if (!run) return configured.map(emptyEvent);
-    const byId = new Map((run.events || []).map((event) => [event.eventId, event]));
-    return configured.map((definition) => ({
-      ...emptyEvent(definition),
-      ...(byId.get(definition.eventId) || {}),
-      eventId: definition.eventId,
-      name: definition.name,
-      deviceId: definition.deviceId,
-      type: definition.type
-    }));
+    if (!run?.events?.length) return configured.map(emptyEvent);
+    return run.events.map((event) => ({ ...emptyEvent(event), ...event }));
   }
 
   function eventRosterSignature() {
@@ -2081,7 +2122,8 @@
     }
     state.bonusPollInFlight = true;
     try {
-      const board = await request("/api/scoreboard", { cache: "no-store" });
+      // Timed out so one request that never answers can't hold bonusPollInFlight forever.
+      const board = await request("/api/scoreboard", { cache: "no-store", signal: AbortSignal.timeout(4000) });
       const bonus = board?.currentRun?.bonusGame || null;
       state.bonusLive = bonus ? { ...bonus, receivedAt: performance.now(), running: board.currentRun.status === "active" } : null;
       renderBonusLive();
@@ -3465,6 +3507,7 @@
     ui.setupEditionName.addEventListener("input", onSetupInput);
     ui.setupBonus?.addEventListener("input", onSetupBonusInput);
     ui.setupBonus?.addEventListener("change", onSetupBonusInput);
+    ui.setupScoring?.addEventListener("input", onSetupScoringInput);
     ui.setupEventList.addEventListener("input", onSetupInput);
     ui.setupEventList.addEventListener("focusin", (event) => {
       const input = event.target.closest("[data-setup-event-id]");

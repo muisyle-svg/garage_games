@@ -373,6 +373,16 @@
             <p id="setup-last-pressed" class="setup-last-pressed" role="status" aria-live="polite">Press a physical button (with no run underway) to light up its MAC here, or use Flash to blink a button.</p>
             <div id="setup-discovered-devices" class="setup-discovered-devices"><span class="small-note">No fresh scan results.</span></div>
           </section>
+          <section id="setup-scoring" class="setup-bonus setup-scoring" aria-labelledby="setup-scoring-heading">
+            <div><p class="mvp-kicker">Every event unless it sets its own</p><h3 id="setup-scoring-heading">Default scoring</h3></div>
+            <p class="small-note">Events marked default below follow these. Changes apply to runs started after you save; runs already played keep the scoring they were played under, and the leaderboard carries on.</p>
+            <div class="setup-bonus-fields">
+              <label>Starting points<input id="setup-scoring-base" type="number" min="0" max="1000000" step="1" inputmode="numeric" data-scoring-field="basePoints"></label>
+              <label>Minimum points<input id="setup-scoring-minimum" type="number" min="0" max="1000000" step="1" inputmode="numeric" data-scoring-field="minimumPoints"></label>
+              <label>Points lost / step<input id="setup-scoring-decay" type="number" min="0" max="1000000" step="1" inputmode="numeric" data-scoring-field="decayPoints"></label>
+              <label>Seconds / step<input id="setup-scoring-every" type="number" min="1" max="86400" step="1" inputmode="numeric" data-scoring-field="decayEverySeconds"></label>
+            </div>
+          </section>
           <div class="setup-list-heading">
             <div><p class="mvp-kicker">Event stations</p><h3>Configured events</h3></div>
             <button id="setup-add-event" class="button button-quiet" type="button">Add event</button>
