@@ -216,7 +216,18 @@ public sealed class RunService
                 EditionId = request.EditionId?.Trim() ?? "",
                 Name = request.Name?.Trim() ?? "",
                 DurationLimitSeconds = _edition.DurationLimitSeconds,
-                Scoring = _edition.Scoring.Clone(),
+                // The edition-wide defaults are editable too; manual-points mode isn't on Setup,
+                // so it keeps its current value.
+                Scoring = request.Scoring is { } scoring
+                    ? new ScoringRule
+                    {
+                        ManualEventPoints = _edition.Scoring.ManualEventPoints,
+                        BasePoints = scoring.BasePoints,
+                        MinimumPoints = scoring.MinimumPoints,
+                        DecayPoints = scoring.DecayPoints,
+                        DecayEverySeconds = scoring.DecayEverySeconds
+                    }
+                    : _edition.Scoring.Clone(),
                 Events = (request.Events ?? []).Select(CloneEventDefinition).ToList(),
                 BonusGame = (request.BonusGame ?? _edition.BonusGame)?.Clone()
             };
@@ -236,16 +247,9 @@ public sealed class RunService
                 throw new CommandException(exception.Message);
             }
 
-            // Bonus round points and timing score runs too, so they version the edition like
-            // event scoring does.
-            // (Renaming the round alone does not.)
-            var eventSetupChanged = !SameEventSetup(_edition.Events, candidate.Events) ||
-                !(_edition.BonusGame ?? new BonusGameSettings()).SameScoringAs(candidate.BonusGame ?? new BonusGameSettings());
-            if (eventSetupChanged && string.Equals(candidate.EditionId, _edition.EditionId, StringComparison.Ordinal) &&
-                _data.Runs.Any(run => run.EditionId == _edition.EditionId && run.IsRecorded))
-            {
-                candidate.EditionId = NewId("edition");
-            }
+            // Setup changes keep the edition, so the leaderboard carries on mid-competition: a
+            // swapped button, a disabled event, or new scoring applies to new runs, while each
+            // run already played keeps (and is rescored by) its own saved copy of the rules.
 
             if (string.Equals(Serialize(candidate), Serialize(_edition), StringComparison.Ordinal))
             {
@@ -869,8 +873,8 @@ public sealed class RunService
                     Phase = RunPhase.Normal,
                     IsPrimed = true,
                     RemainingMilliseconds = primed.DurationLimitSeconds * 1000L,
-                    TotalEvents = _edition.Events.Count,
-                    Events = _edition.Events.Select(e => new ScoreboardEvent { Name = e.Name, Status = EventStatus.Pending }).ToList()
+                    TotalEvents = _edition.ActiveEvents.Count(),
+                    Events = _edition.ActiveEvents.Select(e => new ScoreboardEvent { Name = e.Name, Status = EventStatus.Pending }).ToList()
                 };
             }
 
@@ -1314,7 +1318,7 @@ public sealed class RunService
     {
         lock (_gate)
         {
-            return _edition.Events.Select(eventDefinition =>
+            return _edition.ActiveEvents.Select(eventDefinition =>
             {
                 var device = _data.Devices.Single(d => string.Equals(d.DeviceId, eventDefinition.DeviceId, StringComparison.OrdinalIgnoreCase));
                 return new PreflightResult
@@ -4339,7 +4343,8 @@ public sealed class RunService
         GraceSeconds = eventDefinition.GraceSeconds,
         Prompt = eventDefinition.Prompt,
         Answer = eventDefinition.Answer,
-        RequiredSuccesses = eventDefinition.RequiredSuccesses
+        RequiredSuccesses = eventDefinition.RequiredSuccesses,
+        Disabled = eventDefinition.Disabled
     };
 
     private EditionSetup ToSetup(EditionDefinition edition) => new()
@@ -4353,21 +4358,6 @@ public sealed class RunService
         KeypadMessageSource = _keypadChallenges.Source,
         KeypadMessageError = _keypadChallenges.Error
     };
-
-    private static bool SameEventSetup(IReadOnlyList<EventDefinition> left, IReadOnlyList<EventDefinition> right) =>
-        left.Count == right.Count && left.Zip(right).All(pair =>
-            string.Equals(pair.First.EventId, pair.Second.EventId, StringComparison.Ordinal) &&
-            string.Equals(pair.First.Name, pair.Second.Name, StringComparison.Ordinal) &&
-            string.Equals(pair.First.DeviceId, pair.Second.DeviceId, StringComparison.OrdinalIgnoreCase) &&
-            pair.First.Type == pair.Second.Type &&
-            pair.First.BasePoints == pair.Second.BasePoints &&
-            pair.First.MinimumPoints == pair.Second.MinimumPoints &&
-            pair.First.DecayPoints == pair.Second.DecayPoints &&
-            pair.First.DecayEverySeconds == pair.Second.DecayEverySeconds &&
-            pair.First.GraceSeconds == pair.Second.GraceSeconds &&
-            string.Equals(pair.First.Prompt, pair.Second.Prompt, StringComparison.Ordinal) &&
-            string.Equals(pair.First.Answer, pair.Second.Answer, StringComparison.Ordinal) &&
-            pair.First.RequiredSuccesses == pair.Second.RequiredSuccesses);
 
     private static string RequireReason(string reason) => string.IsNullOrWhiteSpace(reason) ? throw new CommandException("A correction reason is required.") : reason.Trim();
     private static string Serialize<T>(T value) => JsonSerializer.Serialize(value, JsonDefaults.Options);

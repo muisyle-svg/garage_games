@@ -392,3 +392,66 @@ test("bonus round settings edit in seconds, save in milliseconds, and validate",
   draft.bonusGame.pointsPerPress = "2.5";
   assert.throws(() => setup.buildSetupPayload(draft), /points per press must be a whole number/);
 });
+
+test("an event can be turned off for new runs, but not every event", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-off",
+    name: "Edition",
+    events: [
+      { eventId: "event-01", name: "First", deviceId: "AABBCCDDEE01", disabled: true },
+      { eventId: "event-02", name: "Second", deviceId: "AABBCCDDEE02" }
+    ]
+  });
+  assert.equal(draft.events[0].disabled, true);
+  assert.equal(draft.events[1].disabled, false);
+  const payload = setup.buildSetupPayload(draft);
+  assert.equal(payload.events[0].disabled, true);
+  assert.equal("disabled" in payload.events[1], false);
+  // The turned-off event keeps its button, so it can be turned back on as it was.
+  assert.equal(payload.events[0].deviceId, "AABBCCDDEE01");
+
+  draft.events[1].disabled = true;
+  assert.throws(() => setup.buildSetupPayload(draft), /at least one event turned on/);
+});
+
+test("default scoring is saved and inherited event fields follow it", () => {
+  const draft = setup.normalizeSetup({
+    editionId: "edition-defaults",
+    name: "Edition",
+    scoring: { basePoints: 50, minimumPoints: 25, decayPoints: 5, decayEverySeconds: 5 },
+    events: [
+      { eventId: "event-01", name: "Inherits", deviceId: "unassigned-1" },
+      { eventId: "event-02", name: "Own start", deviceId: "unassigned-2", basePoints: 80 },
+      { eventId: "event-03", name: "Own decay", deviceId: "unassigned-3", decayPoints: 2 }
+    ]
+  });
+
+  setup.updateScoringDefault(draft, "basePoints", "60");
+  setup.updateScoringDefault(draft, "minimumPoints", "30");
+  setup.updateScoringDefault(draft, "decayPoints", "10");
+  assert.equal(draft.events[0].basePoints, "60");
+  assert.equal(draft.events[0].minimumPoints, "30");
+  assert.equal(draft.events[0].decayPoints, "10");
+  assert.equal(draft.events[1].basePoints, 80);
+  assert.equal(draft.events[1].minimumPoints, 40); // Half its own start, not the default.
+  assert.equal(draft.events[2].decayPoints, 2);
+
+  const payload = setup.buildSetupPayload(draft);
+  assert.deepEqual(payload.scoring, { basePoints: 60, minimumPoints: 30, decayPoints: 10, decayEverySeconds: 5 });
+  assert.equal(payload.events[0].basePoints, null);
+  assert.equal(payload.events[0].decayPoints, null);
+  assert.equal(payload.events[2].decayPoints, 2);
+
+  setup.updateScoringDefault(draft, "minimumPoints", "70");
+  assert.throws(() => setup.buildSetupPayload(draft), /minimum points/);
+});
+
+test("Setup shows default scoring and a per-event on/off switch", () => {
+  const html = fs.readFileSync(require.resolve("../../src/GarageGames.V2/wwwroot/index.html"), "utf8");
+  const source = fs.readFileSync(require.resolve("../../src/GarageGames.V2/wwwroot/mvp-scorekeeper.js"), "utf8");
+  for (const field of ["basePoints", "minimumPoints", "decayPoints", "decayEverySeconds"]) {
+    assert.match(html, new RegExp(`data-scoring-field="${field}"`));
+  }
+  assert.match(source, /playInput\.dataset\.setupField = "enabled"/);
+  assert.match(source, /target\.disabled = !input\.checked/);
+});

@@ -117,6 +117,10 @@ public sealed class EventDefinition
     public string? Answer { get; set; }
     // Keypad events: how many messages must be answered correctly to finish (default 1).
     public int? RequiredSuccesses { get; set; }
+    // A disabled event stays in Setup (and in the runs already played with it) but is left
+    // out of new runs, so it can be turned off for the rest of a competition.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Disabled { get; set; }
 }
 
 // The bonus speed round played after the last event when time remains. Timing mirrors the
@@ -152,11 +156,6 @@ public sealed class BonusGameSettings
 
     [JsonIgnore]
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? DefaultName : Name.Trim();
-
-    // Two settings score runs the same way when they differ at most in name.
-    public bool SameScoringAs(BonusGameSettings other) =>
-        Enabled == other.Enabled && PointsPerPress == other.PointsPerPress && InitialWindowMs == other.InitialWindowMs &&
-        StepMs == other.StepMs && StepEveryMs == other.StepEveryMs && MinimumWindowMs == other.MinimumWindowMs;
 
     // The time allowed for a target chosen this far into the bonus round.
     public long WindowForBonusElapsed(long bonusElapsedMs)
@@ -199,6 +198,10 @@ public sealed class EditionDefinition
     // Absent in older configurations; then the bonus round uses its defaults.
     public BonusGameSettings? BonusGame { get; set; }
 
+    // The events new runs play: every event not disabled in Setup.
+    [JsonIgnore]
+    public IEnumerable<EventDefinition> ActiveEvents => Events.Where(e => !e.Disabled);
+
     public EditionSnapshot ToSnapshot() => new()
     {
         EditionId = EditionId,
@@ -206,7 +209,7 @@ public sealed class EditionDefinition
         DurationLimitSeconds = DurationLimitSeconds,
         Scoring = Scoring.Clone(),
         BonusGame = (BonusGame ?? new BonusGameSettings()).Clone(),
-        Events = Events.Select(e => new EventSnapshot
+        Events = ActiveEvents.Select(e => new EventSnapshot
         {
             EventId = e.EventId,
             Name = e.Name,
@@ -257,6 +260,11 @@ public sealed class EditionDefinition
             edition.Events.GroupBy(e => e.DeviceId, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1))
         {
             throw new InvalidDataException($"Edition '{source}' must contain between 1 and 64 events with unique event and device identifiers.");
+        }
+
+        if (edition.Events.All(e => e.Disabled))
+        {
+            throw new InvalidDataException($"Edition '{source}' must keep at least one event turned on.");
         }
 
         foreach (var eventDefinition in edition.Events)

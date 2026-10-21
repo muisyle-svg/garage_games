@@ -167,9 +167,12 @@ fields are optional nullable integers. Effective base, minimum, and decay
 values must be within 0–1,000,000 points; intervals and grace periods must be
 within 1–86,400 and 0–86,400 seconds respectively. The minimum cannot exceed
 the effective base. `GET /api/setup` and the `PUT` response include `scoring`
-with the actual edition-wide defaults. For compatibility, `scoring` is optional
-in a PUT request and any submitted value is ignored; only per-event fields are
-editable through setup.
+with the edition-wide defaults, which Setup's **Default scoring** section edits
+(starting points, minimum, points lost per step, seconds per step). `scoring` is
+optional in a PUT request; leaving it out keeps the current defaults. Each event
+also has a **Play this event** switch (`disabled: true` in the API): a turned-off
+event stays in Setup with its button assignment but is left out of new runs, the
+scorecard, the TV, and its event leaderboard. At least one event must stay on.
 
 To match physical buttons to MAC addresses, connect the master (Garage idle
 mode, no run underway) and press a button: its MAC is added to Setup's
@@ -183,11 +186,12 @@ a MAC (in the list or on an event row) blinks that physical button.
 The active setup is stored transactionally in SQLite metadata; a database
 backup is created before a changed setup is saved. Setup is locked while a run
 is in progress or waiting to be recorded. Each run keeps its own edition
-snapshot, so editing setup never rewrites historical results. If the event
-roster or any per-event scoring setting changes while recorded runs exist in
-the current edition, the saved setup gets a new edition ID and the leaderboard
-starts a separate edition; earlier scores remain in history and are not
-deleted.
+snapshot (events, button MACs, and scoring), so editing setup never rewrites
+historical results, and corrections to an earlier run use the rules it was
+played under. Setup changes keep the edition ID, so the leaderboard and the
+one-official-run rule carry on mid-competition: swapping a broken button for a
+new MAC, turning an event off, or changing scoring applies to runs started
+afterwards, while runs already played keep their events and points.
 
 Use **Scan devices** or arm a run while the physical master is connected. The
 server sends `GG1 STATUS` immediately before `GG1 SCAN <id>`; the master
@@ -432,12 +436,11 @@ them, adjust the times, or Clear it. Entering a start time and hits on a run tha
 never reached the bonus records one. The Leaderboards tab has a Bonus round board
 that ranks by points (ties share a rank; round length doesn't matter), with runs
 that never reached it listed as DNF. Set the round up in Setup under **Bonus
-speed round**: its name (shown on the TV, scorecards, and leaderboards; renaming it
-doesn't start a new edition version), whether it plays, points per press, the starting seconds per press,
+speed round**: its name (shown on the TV, scorecards, and leaderboards), whether it plays, points per press, the starting seconds per press,
 how much and how often that drops, and the minimum. The defaults match the
 standalone Speed game (10 s, dropping 1 s every 10 s, to 2 s) at 5 points per
-press. Changing them after runs are recorded starts a new edition version, like
-changing event scoring. The standalone Speed game on the master (five-second hold)
+press. Changing them mid-competition applies to new runs only; runs already
+played keep their bonus settings and the leaderboard carries on. The standalone Speed game on the master (five-second hold)
 is unchanged and still runs on its own. Flash the master and spokes together for
 the bonus round.
 

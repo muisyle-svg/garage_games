@@ -498,6 +498,11 @@ select:disabled, input:disabled { opacity: .58; }
 .setup-readiness.detected { border-color: rgba(244, 189, 96, .3); color: var(--amber); }
 .setup-readiness.unassigned { color: var(--dim); }
 .setup-event-id { margin: .38rem 0 0; color: var(--dim); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .54rem; }
+.setup-event-play { display: flex; align-items: center; gap: .45rem; margin-top: .45rem; font-size: .66rem; font-weight: 850; }
+.setup-event-play small { color: var(--muted); font-weight: 600; }
+.setup-event-row.is-disabled { border-style: dashed; }
+.setup-event-row.is-disabled > :not(.setup-event-play):not(.setup-event-top) { opacity: .45; }
+.setup-preview-item.is-disabled { opacity: .5; }
 .setup-bonus { display: grid; gap: .45rem; margin: .85rem .95rem 0; padding: .75rem; border: 1px solid rgba(104, 214, 164, .28); border-radius: 10px; background: rgba(104, 214, 164, .05); }
 .setup-bonus h3 { margin: .1rem 0 0; }
 .setup-bonus-toggle { display: flex; align-items: center; gap: .45rem; font-size: .72rem; font-weight: 850; }
