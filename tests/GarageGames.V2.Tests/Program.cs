@@ -3062,7 +3062,7 @@ static void KeypadHints()
     Assert.Equal<string?>(HintFor(first.Prompt), first.Hint);
 
     var answer = h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad").Keypad!.Current!.Answer;
-    Assert.Equal("ACTIVE", Submit(answer).State);
+    Assert.Equal("NEXT", Submit(answer).State);
     var second = Shown();
     Assert.True(second.Prompt != first.Prompt);
     Assert.Equal<string?>(null, second.Hint);
