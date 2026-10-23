@@ -3068,6 +3068,31 @@ static void KeypadHints()
     Assert.Equal<string?>(null, second.Hint);
     h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.KeypadHintDelayMilliseconds));
     Assert.Equal<string?>(HintFor(second.Prompt), Shown().Hint);
+
+    // A short bong plays once as each hint appears (ticked like RunTimingHostedService).
+    using var ticked = new TestHarness(edition, NewPath(), keypadChallenges: pool);
+    var sounds = new RecordingSoundPlayer();
+    ticked.Service.SoundCueRequested += cue => sounds.Play(cue);
+    var tickedRun = ticked.Service.Arm(ticked.Service.GetOperatorSnapshot().Queue.Single().Id);
+    ticked.StartRun();
+    ticked.Service.PressEvent(tickedRun.Id, "keypad");
+    void RunFor(long milliseconds)
+    {
+        for (var step = 0L; step < milliseconds; step += 15)
+        {
+            ticked.Clock.Advance(TimeSpan.FromMilliseconds(15));
+            ticked.Service.TickBonusGame();
+        }
+    }
+    int Bongs() => sounds.Played.Count(cue => cue == SoundCue.KeypadHint);
+    RunFor(RunService.KeypadHintDelayMilliseconds - 30);
+    Assert.Equal(0, Bongs());
+    Assert.Equal<string?>(null, ticked.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Hint);
+    RunFor(60);
+    Assert.Equal(1, Bongs());
+    Assert.True(ticked.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Hint is not null);
+    RunFor(5_000);
+    Assert.Equal(1, Bongs());
 }
 
 static void KeypadMultipleCodes()
