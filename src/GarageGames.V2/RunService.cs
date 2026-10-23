@@ -3504,6 +3504,7 @@ public sealed class RunService
         var remainingBefore = limitMs - _current.ActiveElapsedMs;
         _current.ActiveElapsedMs += delta;
         AnnounceTimeRemaining(remainingBefore, limitMs - _current.ActiveElapsedMs);
+        AnnounceKeypadHint(_current, _current.ActiveElapsedMs - delta, _current.ActiveElapsedMs);
         if (_current.ActiveElapsedMs >= limitMs)
         {
             if (_current.ActiveElapsedMs - limitMs <= LateTimeCalloutLimitMilliseconds)
@@ -3551,6 +3552,27 @@ public sealed class RunService
                 {
                     SoundCueRequested?.Invoke(cue);
                 }
+                return;
+            }
+        }
+    }
+
+    // A short bong as the clock passes the moment an unsolved keypad message's hint appears on
+    // the TV (see BuildKeypadChallenge), skipped like a late time callout.
+    private void AnnounceKeypadHint(RunRecord run, long elapsedBefore, long elapsedNow)
+    {
+        foreach (var eventResult in run.Events)
+        {
+            if (eventResult.Type != EventKind.Keypad || eventResult.Status != EventStatus.Active
+                || eventResult.Keypad?.Current is not { Hint.Length: > 0 } current)
+            {
+                continue;
+            }
+
+            var hintAt = current.DrawnElapsedMs + KeypadHintDelayMilliseconds;
+            if (elapsedBefore < hintAt && elapsedNow >= hintAt && elapsedNow - hintAt <= LateTimeCalloutLimitMilliseconds)
+            {
+                SoundCueRequested?.Invoke(SoundCue.KeypadHint);
                 return;
             }
         }

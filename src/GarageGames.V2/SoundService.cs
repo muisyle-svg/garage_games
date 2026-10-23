@@ -19,6 +19,8 @@ public enum SoundCue
     KeypadWrong,
     // The last required keypad message was solved, finishing the keypad event.
     KeypadComplete,
+    // An unsolved keypad message's hint has appeared on the TV.
+    KeypadHint,
     // Time-remaining voice callouts.
     FourMinutesRemaining,
     ThreeMinutesRemaining,
@@ -55,6 +57,7 @@ public sealed class WindowsSoundPlayer : ISoundPlayer, IDisposable
         [SoundCue.BonusStart] = "bonus-start.wav",
         [SoundCue.KeypadWrong] = "keypad-wrong.wav",
         [SoundCue.KeypadComplete] = "keypad-success.mp3",
+        [SoundCue.KeypadHint] = "keypad-hint.wav",
         [SoundCue.FourMinutesRemaining] = "four-minutes-remaining.wav",
         [SoundCue.ThreeMinutesRemaining] = "three-minutes-remaining.wav",
         [SoundCue.TwoMinutesRemaining] = "two-minutes-remaining.wav",

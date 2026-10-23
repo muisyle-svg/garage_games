@@ -467,7 +467,7 @@ Hints: when `config/keypad-answers-hints.csv` exists the app loads it instead of
 answer rows; each hint cell belongs to the message directly above it. A message
 shows on the TV as usual, and if it is still unsolved after 15 seconds of run
 time (pauses don't count, wrong codes don't reset it) the TV adds its hint under
-it. The next message starts its own 15 seconds. A hint with no message above
+it, with a short bong (`sounds/keypad-hint.wav`). The next message starts its own 15 seconds. A hint with no message above
 it, or two hint rows under one answer row, is reported in Setup.
 
 In Setup, set an event's type to **Keypad code**, choose **Codes to pass**, and
