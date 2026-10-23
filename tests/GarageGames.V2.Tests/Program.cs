@@ -74,6 +74,7 @@ var tests = new (string Name, Action Run)[]
     ("operator tap overrides a running keypad event and keypad runs auto-finish", KeypadOperatorOverrideAndAutoFinish),
     ("keypad events undo their code finish and their start like regular events", KeypadEventUndo),
     ("keypad answer CSV maps each message to its row and column code", KeypadAnswerCsv),
+    ("keypad hint rows attach to the message above and show on the TV after 15 seconds unsolved", KeypadHints),
     ("keypad events draw unrepeated messages, need several codes, and undo one code at a time", KeypadMultipleCodes),
     ("the app plays the countdown and starts the run at Go without a browser", ServerCountdownAndSounds),
     ("time-remaining callouts and the final countdown play once each as the clock passes them", TimeRemainingCallouts),
@@ -2994,6 +2995,79 @@ static void KeypadAnswerCsv()
     Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\n,orphan\n"));
     Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\n"));
     Assert.True(KeypadChallengeSet.LoadOrReportError(Path.Combine(NewPath(), "missing.csv")).Error is not null);
+}
+
+static void KeypadHints()
+{
+    // Each "Hint" row gives hints to the answer row directly above it, column by column.
+    var parsed = KeypadChallengeCsv.Parse(",1,2,3\r\nA,a1,a2,a3\r\nHint,first,,\"third, quoted\"\r\nB,b1,b2,\r\nhint,,bee two,\r\n,,,\r\n##,any,,\r\n");
+    Assert.Equal(6, parsed.Count);
+    Assert.Equal<string?>("first", parsed.Single(c => c.Prompt == "a1").Hint);
+    Assert.Equal<string?>(null, parsed.Single(c => c.Prompt == "a2").Hint);
+    Assert.Equal<string?>("third, quoted", parsed.Single(c => c.Prompt == "a3").Hint);
+    Assert.Equal<string?>("bee two", parsed.Single(c => c.Prompt == "b2").Hint);
+    Assert.Equal("B2", parsed.Single(c => c.Prompt == "b2").Answer);
+    Assert.Equal<string?>(null, parsed.Single(c => c.Prompt == "any").Hint);
+    Assert.True(parsed.All(c => c.Prompt is not ("first" or "bee two")), "hints are not messages");
+    Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\nHint,nothing above\nA,a1\n"));
+    Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1,2\nA,a1,\nHint,,no message above\n"));
+    Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\nA,a1\nHint,one\nHint,two\n"));
+
+    // The shipped hints file loads, with a hint for every lettered message.
+    var shipped = KeypadChallengeSet.LoadOrReportError(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..", "config", "keypad-answers-hints.csv")));
+    if (!File.Exists(shipped.Source))
+    {
+        shipped = KeypadChallengeSet.LoadOrReportError(Path.Combine(AppContext.BaseDirectory, "config", "keypad-answers-hints.csv"));
+    }
+    Assert.Equal<string?>(null, shipped.Error);
+    Assert.True(shipped.Challenges.Where(c => c.Answer != "##").All(c => !string.IsNullOrWhiteSpace(c.Hint)));
+    Assert.Equal<string?>("Column", shipped.Challenges.Single(c => c.Answer == "A1").Hint);
+
+    // On the TV the hint appears once the message has gone unsolved for 15 seconds of run time,
+    // and the next message starts its own 15 seconds.
+    const string keypadMac = "001122334455";
+    var edition = MakeKeypadSpokeEdition();
+    var keypadDefinition = edition.Events.Single(e => e.EventId == "keypad");
+    keypadDefinition.Prompt = null;
+    keypadDefinition.Answer = null;
+    keypadDefinition.RequiredSuccesses = 2;
+    var pool = new KeypadChallengeSet(
+        Enumerable.Range(1, 3).Select(i => new KeypadChallengeDefinition { Prompt = $"message {i}", Answer = $"A{i}", Hint = $"hint {i}" }).ToList(),
+        "test", null);
+    using var h = new TestHarness(edition, NewPath(), keypadChallenges: pool);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    uint sequence = 0;
+    ScoreboardKeypadChallenge Shown() => h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!;
+    MasterPhysicalPressResult Submit(string code) =>
+        h.Service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, ++sequence, true, code), true)!;
+    string HintFor(string prompt) => pool.Challenges.Single(c => c.Prompt == prompt).Hint!;
+
+    h.Service.PressEvent(run.Id, "keypad");
+    Assert.Equal<string?>(null, Shown().Hint);
+    h.Clock.Advance(TimeSpan.FromSeconds(10));
+    Submit("99"); // A wrong code does not restart the wait.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.KeypadHintDelayMilliseconds - 10_001));
+    Assert.Equal<string?>(null, Shown().Hint);
+
+    // Paused time does not count toward the wait.
+    h.Service.Pause();
+    h.Clock.Advance(TimeSpan.FromSeconds(30));
+    Assert.Equal<string?>(null, Shown().Hint);
+    h.Service.Resume();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1));
+    var first = Shown();
+    Assert.Equal<string?>(HintFor(first.Prompt), first.Hint);
+
+    var answer = h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad").Keypad!.Current!.Answer;
+    Assert.Equal("NEXT", Submit(answer).State);
+    var second = Shown();
+    Assert.True(second.Prompt != first.Prompt);
+    Assert.Equal<string?>(null, second.Hint);
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.KeypadHintDelayMilliseconds));
+    Assert.Equal<string?>(HintFor(second.Prompt), Shown().Hint);
 }
 
 static void KeypadMultipleCodes()

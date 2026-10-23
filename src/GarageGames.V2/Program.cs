@@ -24,7 +24,13 @@ if (!File.Exists(editionPath))
 var edition = EditionDefinition.FromJson(editionPath);
 // Keypad messages and their codes. A missing or invalid file is reported in Setup rather
 // than stopping the app; keypad events then fall back to operator overrides.
-var keypadAnswersPath = GetOption(args, "--keypad-answers") ?? Path.Combine(Path.GetDirectoryName(editionPath)!, "keypad-answers.csv");
+// The file with hint rows is used when it exists; otherwise the plain answer grid.
+var configDirectory = Path.GetDirectoryName(editionPath)!;
+var keypadAnswersPath = GetOption(args, "--keypad-answers")
+    ?? new[] { "keypad-answers-hints.csv", "keypad-answers.csv" }
+        .Select(name => Path.Combine(configDirectory, name))
+        .FirstOrDefault(File.Exists)
+    ?? Path.Combine(configDirectory, "keypad-answers.csv");
 var keypadChallenges = KeypadChallengeSet.LoadOrReportError(keypadAnswersPath);
 var store = new RunStore(dataPath);
 var clock = new SimulationClock();

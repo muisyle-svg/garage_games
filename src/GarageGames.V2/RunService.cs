@@ -89,6 +89,9 @@ public sealed class RunService
     private PrimedCompetitor? _primed;
 
     public const long KeypadWrongDisplayMilliseconds = 2_000;
+    // How long a keypad message stays unsolved (run time, so pauses don't count) before the
+    // TV adds its hint.
+    public const long KeypadHintDelayMilliseconds = 15_000;
     private readonly KeypadChallengeSet _keypadChallenges;
 
     // Raised (under the service lock) when the game calls for a sound; the host plays it
@@ -941,7 +944,8 @@ public sealed class RunService
             .Where(e => e.Type == EventKind.Keypad && e.Status == EventStatus.Active)
             .OrderByDescending(e => e.StartElapsedMs ?? 0)
             .FirstOrDefault();
-        var prompt = eventResult?.Keypad?.Current?.Prompt ?? eventResult?.Prompt;
+        var current = eventResult?.Keypad?.Current;
+        var prompt = current?.Prompt ?? eventResult?.Prompt;
         if (eventResult is null || string.IsNullOrWhiteSpace(prompt))
         {
             return null;
@@ -958,6 +962,9 @@ public sealed class RunService
         {
             EventName = eventResult.Name,
             Prompt = prompt,
+            Hint = current is { Hint: { Length: > 0 } hint } && run.ActiveElapsedMs - current.DrawnElapsedMs >= KeypadHintDelayMilliseconds
+                ? hint
+                : null,
             Entry = entry?.Entry ?? "",
             ShowWrong = entry?.WrongAtMonotonicMs is long wrongAt && now - wrongAt < KeypadWrongDisplayMilliseconds,
             ShowCorrect = entry?.CorrectAtMonotonicMs is long correctAt && now - correctAt < KeypadWrongDisplayMilliseconds,
@@ -3354,7 +3361,7 @@ public sealed class RunService
         }
 
         var chosen = candidates[Random.Shared.Next(candidates.Count)];
-        var attempt = new KeypadAttemptRecord { Prompt = chosen.Prompt, Answer = chosen.Answer, DrawnElapsedMs = elapsedMs };
+        var attempt = new KeypadAttemptRecord { Prompt = chosen.Prompt, Answer = chosen.Answer, Hint = chosen.Hint, DrawnElapsedMs = elapsedMs };
         progress.Challenges.Add(attempt);
         eventResult.Prompt = attempt.Prompt;
         SoundCueRequested?.Invoke(SoundCue.KeypadMessage);
@@ -4094,7 +4101,7 @@ public sealed class RunService
         if (snapshot.Events.Any(e => e.Type == EventKind.Keypad) && _keypadChallenges.Challenges.Count > 0)
         {
             snapshot.KeypadChallenges = _keypadChallenges.Challenges
-                .Select(challenge => new KeypadChallengeDefinition { Prompt = challenge.Prompt, Answer = challenge.Answer })
+                .Select(challenge => new KeypadChallengeDefinition { Prompt = challenge.Prompt, Answer = challenge.Answer, Hint = challenge.Hint })
                 .ToList();
         }
         return new RunRecord

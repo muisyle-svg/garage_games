@@ -1089,6 +1089,9 @@
     if (!challenge) { panel.classList.remove("is-wrong", "is-correct"); return; }
     text(q("#scoreboard-keypad-event"), challenge.eventName || "Keypad");
     text(q("#scoreboard-keypad-prompt"), challenge.prompt);
+    // The server adds the hint once the message has gone unsolved for 15 seconds of run time.
+    const clue = q("#scoreboard-keypad-clue");
+    if (clue) { clue.hidden = !challenge.hint; text(clue, challenge.hint ? `Hint: ${challenge.hint}` : ""); }
     const keys = q("#scoreboard-keypad-keys"); clear(keys);
     Array.from(challenge.entry || "").forEach((key) => keys.appendChild(make("span", "tv-keypad-key", key)));
     keys.appendChild(make("span", "tv-keypad-caret"));
