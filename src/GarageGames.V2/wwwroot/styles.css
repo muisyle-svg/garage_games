@@ -405,6 +405,8 @@ select { cursor: pointer; }
 .tv-keypad-challenge { position: absolute; inset: 0; z-index: 2; display: flex; container-type: inline-size; flex-direction: column; align-items: center; justify-content: center; gap: clamp(.6rem, 2.5vh, 1.6rem); padding: clamp(1rem, 3vw, 2.5rem); border: 3px solid var(--amber); border-radius: var(--radius); background: rgba(10, 16, 26, .96); box-shadow: 0 0 0 6px rgba(246, 184, 77, .12), var(--shadow); text-align: center; }
 .tv-keypad-label { margin: 0; color: var(--amber); font-size: clamp(1rem, 2.4cqi, 1.7rem); font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }
 .tv-keypad-prompt { margin: 0; max-width: 100%; color: var(--cream); font-size: min(10cqi, 17vh); font-weight: 950; letter-spacing: -.03em; line-height: 1; overflow-wrap: anywhere; text-wrap: balance; }
+.tv-keypad-clue { margin: 0; max-width: 100%; color: var(--amber); font-size: min(5cqi, 8vh); font-weight: 900; line-height: 1.1; overflow-wrap: anywhere; text-wrap: balance; animation: tv-keypad-clue-in .4s ease-out; }
+@keyframes tv-keypad-clue-in { from { opacity: 0; transform: translateY(.3em); } to { opacity: 1; transform: none; } }
 .tv-keypad-entry { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .5rem 1rem; min-height: 1em; font-size: min(5cqi, 8vh); }
 .tv-keypad-keys { display: flex; gap: .2em; }
 .tv-keypad-key { display: grid; place-items: center; min-width: 1.15em; height: 1.35em; padding: 0 .12em; border: 2px solid rgba(246, 184, 77, .55); border-radius: .18em; background: rgba(246, 184, 77, .12); color: var(--amber); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-weight: 900; line-height: 1; }
