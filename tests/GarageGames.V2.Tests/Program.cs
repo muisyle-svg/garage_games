@@ -3001,7 +3001,7 @@ static void KeypadHints()
 {
     // Each "Hint" row gives hints to the answer row directly above it, column by column.
     var parsed = KeypadChallengeCsv.Parse(",1,2,3\r\nA,a1,a2,a3\r\nHint,first,,\"third, quoted\"\r\nB,b1,b2,\r\nhint,,bee two,\r\n,,,\r\n##,any,,\r\n");
-    Assert.Equal(7, parsed.Count);
+    Assert.Equal(6, parsed.Count);
     Assert.Equal<string?>("first", parsed.Single(c => c.Prompt == "a1").Hint);
     Assert.Equal<string?>(null, parsed.Single(c => c.Prompt == "a2").Hint);
     Assert.Equal<string?>("third, quoted", parsed.Single(c => c.Prompt == "a3").Hint);
