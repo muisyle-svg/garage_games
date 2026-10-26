@@ -958,13 +958,13 @@ public sealed class RunService
         }
 
         var now = _clock.MonotonicMilliseconds;
+        var hintShown = current is { Hint: not null } && run.ActiveElapsedMs - current.DrawnElapsedMs >= KeypadHintDelayMilliseconds;
         return new ScoreboardKeypadChallenge
         {
             EventName = eventResult.Name,
             Prompt = prompt,
-            Hint = current is { Hint: { Length: > 0 } hint } && run.ActiveElapsedMs - current.DrawnElapsedMs >= KeypadHintDelayMilliseconds
-                ? hint
-                : null,
+            Hint = hintShown ? current!.Hint : null,
+            HintDisc = hintShown ? (current!.ColoredDisc ? "colored" : "white") : null,
             Entry = entry?.Entry ?? "",
             ShowWrong = entry?.WrongAtMonotonicMs is long wrongAt && now - wrongAt < KeypadWrongDisplayMilliseconds,
             ShowCorrect = entry?.CorrectAtMonotonicMs is long correctAt && now - correctAt < KeypadWrongDisplayMilliseconds,
@@ -3361,7 +3361,7 @@ public sealed class RunService
         }
 
         var chosen = candidates[Random.Shared.Next(candidates.Count)];
-        var attempt = new KeypadAttemptRecord { Prompt = chosen.Prompt, Answer = chosen.Answer, Hint = chosen.Hint, DrawnElapsedMs = elapsedMs };
+        var attempt = new KeypadAttemptRecord { Prompt = chosen.Prompt, Answer = chosen.Answer, Hint = chosen.Hint, ColoredDisc = chosen.ColoredDisc, DrawnElapsedMs = elapsedMs };
         progress.Challenges.Add(attempt);
         eventResult.Prompt = attempt.Prompt;
         SoundCueRequested?.Invoke(SoundCue.KeypadMessage);
@@ -3564,7 +3564,7 @@ public sealed class RunService
         foreach (var eventResult in run.Events)
         {
             if (eventResult.Type != EventKind.Keypad || eventResult.Status != EventStatus.Active
-                || eventResult.Keypad?.Current is not { Hint.Length: > 0 } current)
+                || eventResult.Keypad?.Current is not { Hint: not null } current)
             {
                 continue;
             }
@@ -4123,7 +4123,7 @@ public sealed class RunService
         if (snapshot.Events.Any(e => e.Type == EventKind.Keypad) && _keypadChallenges.Challenges.Count > 0)
         {
             snapshot.KeypadChallenges = _keypadChallenges.Challenges
-                .Select(challenge => new KeypadChallengeDefinition { Prompt = challenge.Prompt, Answer = challenge.Answer, Hint = challenge.Hint })
+                .Select(challenge => new KeypadChallengeDefinition { Prompt = challenge.Prompt, Answer = challenge.Answer, Hint = challenge.Hint, ColoredDisc = challenge.ColoredDisc })
                 .ToList();
         }
         return new RunRecord

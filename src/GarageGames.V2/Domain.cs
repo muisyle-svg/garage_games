@@ -429,6 +429,7 @@ public sealed class KeypadAttemptRecord
     public required string Prompt { get; set; }
     public required string Answer { get; set; }
     public string? Hint { get; set; }
+    public bool ColoredDisc { get; set; }
     public long DrawnElapsedMs { get; set; }
     public long? SolvedElapsedMs { get; set; }
     // The accepted code submission or operator override that solved it, so undo can
@@ -686,8 +687,11 @@ public sealed class ScoreboardKeypadChallenge
 {
     public required string EventName { get; set; }
     public required string Prompt { get; set; }
-    // Set once the message has gone unsolved for RunService.KeypadHintDelayMilliseconds.
+    // Set once the message has gone unsolved for RunService.KeypadHintDelayMilliseconds; may be
+    // empty when the hint only marks the disc's color.
     public string? Hint { get; set; }
+    // "white" or "colored", shown before the hint; set with Hint.
+    public string? HintDisc { get; set; }
     public string Entry { get; set; } = "";
     public bool ShowWrong { get; set; }
     // Briefly true after a correct code that was not the last one needed.

@@ -469,6 +469,9 @@ shows on the TV as usual, and if it is still unsolved after 15 seconds of run
 time (pauses don't count, wrong codes don't reset it) the TV adds its hint under
 it, with a short bong (`sounds/keypad-hint.wav`). The next message starts its own 15 seconds. A hint with no message above
 it, or two hint rows under one answer row, is reported in Setup.
+The hint shows as "◯ - hint", where the circle is the disc: plain white for a
+hint as written, or a color wheel when the hint ends in `*` (`Column*` shows the
+color wheel and "Column"; a cell of just `*` shows only the color wheel).
 
 In Setup, set an event's type to **Keypad code**, choose **Codes to pass**, and
 assign the special button's MAC to that event as usual. During a run:

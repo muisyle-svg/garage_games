@@ -3009,6 +3009,18 @@ static void KeypadHints()
     Assert.Equal("B2", parsed.Single(c => c.Prompt == "b2").Answer);
     Assert.Equal<string?>(null, parsed.Single(c => c.Prompt == "any").Hint);
     Assert.True(parsed.All(c => c.Prompt is not ("first" or "bee two")), "hints are not messages");
+    Assert.True(parsed.All(c => !c.ColoredDisc), "a hint without '*' is a white disc");
+
+    // A hint ending in '*' marks a colored disc; the '*' is not shown, and '*' alone is a colored
+    // disc with no hint text.
+    var discs = KeypadChallengeCsv.Parse(",1,2,3\nA,a1,a2,a3\nHint,Column*,*,5*star\n");
+    Assert.Equal<string?>("Column", discs.Single(c => c.Prompt == "a1").Hint);
+    Assert.True(discs.Single(c => c.Prompt == "a1").ColoredDisc);
+    Assert.Equal<string?>("", discs.Single(c => c.Prompt == "a2").Hint);
+    Assert.True(discs.Single(c => c.Prompt == "a2").ColoredDisc);
+    Assert.Equal<string?>("5*star", discs.Single(c => c.Prompt == "a3").Hint);
+    Assert.True(!discs.Single(c => c.Prompt == "a3").ColoredDisc);
+
     Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\nHint,nothing above\nA,a1\n"));
     Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1,2\nA,a1,\nHint,,no message above\n"));
     Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\nA,a1\nHint,one\nHint,two\n"));
@@ -3021,7 +3033,7 @@ static void KeypadHints()
         shipped = KeypadChallengeSet.LoadOrReportError(Path.Combine(AppContext.BaseDirectory, "config", "keypad-answers-hints.csv"));
     }
     Assert.Equal<string?>(null, shipped.Error);
-    Assert.True(shipped.Challenges.Where(c => c.Answer != "##").All(c => !string.IsNullOrWhiteSpace(c.Hint)));
+    Assert.True(shipped.Challenges.Where(c => c.Answer != "##").All(c => c.Hint is not null));
     Assert.Equal<string?>("Column", shipped.Challenges.Single(c => c.Answer == "A1").Hint);
 
     // On the TV the hint appears once the message has gone unsolved for 15 seconds of run time,
@@ -3033,7 +3045,7 @@ static void KeypadHints()
     keypadDefinition.Answer = null;
     keypadDefinition.RequiredSuccesses = 2;
     var pool = new KeypadChallengeSet(
-        Enumerable.Range(1, 3).Select(i => new KeypadChallengeDefinition { Prompt = $"message {i}", Answer = $"A{i}", Hint = $"hint {i}" }).ToList(),
+        Enumerable.Range(1, 3).Select(i => new KeypadChallengeDefinition { Prompt = $"message {i}", Answer = $"A{i}", Hint = $"hint {i}", ColoredDisc = i == 2 }).ToList(),
         "test", null);
     using var h = new TestHarness(edition, NewPath(), keypadChallenges: pool);
     var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
@@ -3060,6 +3072,7 @@ static void KeypadHints()
     h.Clock.Advance(TimeSpan.FromMilliseconds(1));
     var first = Shown();
     Assert.Equal<string?>(HintFor(first.Prompt), first.Hint);
+    Assert.Equal<string?>(pool.Challenges.Single(c => c.Prompt == first.Prompt).ColoredDisc ? "colored" : "white", first.HintDisc);
 
     var answer = h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad").Keypad!.Current!.Answer;
     Assert.Equal("NEXT", Submit(answer).State);
