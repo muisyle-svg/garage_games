@@ -4296,8 +4296,11 @@ public sealed class RunService
             })
             .ToList();
 
-        rows = rows.OrderBy(row => row.Category switch { RunCategory.Playoff => 0, RunCategory.Official => 1, _ => 2 })
+        // Playoffs are their own standings. Exhibition runs sit among the official results by
+        // points (after an official run on the same points) instead of in a block below them.
+        rows = rows.OrderBy(row => row.Category == RunCategory.Playoff ? 0 : 1)
             .ThenByDescending(row => row.Points)
+            .ThenBy(row => row.Category == RunCategory.Exhibition ? 1 : 0)
             .ThenBy(row => row.CompetitorName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -4315,26 +4318,33 @@ public sealed class RunService
             }
         }
 
-        // Ranks restart within each category (playoff, official, exhibition), since each
-        // category is shown as its own standings; tied points share a rank.
+        // Ranks restart for the official standings after the playoff ones; tied points share a
+        // rank. Exhibition rows get no rank and are skipped, so official ranks run 1, 2, 3.
         var lastPoints = int.MinValue;
-        RunCategory? lastCategory = null;
+        var lastPlayoff = (bool?)null;
         var lastRank = 0;
-        var categoryStart = 0;
-        for (var index = 0; index < rows.Count; index++)
+        var ranked = 0;
+        foreach (var row in rows)
         {
-            if (rows[index].Category != lastCategory)
+            var playoff = row.Category == RunCategory.Playoff;
+            if (playoff != lastPlayoff)
             {
-                categoryStart = index;
-                lastCategory = rows[index].Category;
+                lastPlayoff = playoff;
                 lastPoints = int.MinValue;
+                ranked = 0;
             }
-            if (rows[index].Points != lastPoints)
+            if (row.Category == RunCategory.Exhibition)
             {
-                lastRank = index - categoryStart + 1;
-                lastPoints = rows[index].Points;
+                row.Rank = null;
+                continue;
             }
-            rows[index].Rank = lastRank;
+            ranked++;
+            if (row.Points != lastPoints)
+            {
+                lastRank = ranked;
+                lastPoints = row.Points;
+            }
+            row.Rank = lastRank;
         }
         return rows;
     }

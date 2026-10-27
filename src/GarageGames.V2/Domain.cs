@@ -712,7 +712,8 @@ public sealed class ScoreboardEvent
 
 public sealed class LeaderboardRow
 {
-    public int Rank { get; set; }
+    // Null for exhibition rows, which are listed by points but never ranked.
+    public int? Rank { get; set; }
     public required string CompetitorName { get; set; }
     public string? DisplayName { get; set; }
     public int Points { get; set; }

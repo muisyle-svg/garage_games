@@ -2446,7 +2446,8 @@
     rows.forEach((item) => {
       const row = make("tr");
       row.append(
-        make("td", "leaderboard-rank", String(item.rank)),
+        // Exhibition rows sit among the official ones by points but have no rank.
+        make("td", "leaderboard-rank", item.rank == null ? "" : String(item.rank)),
         make("td", "leaderboard-player", item.displayName || item.competitorName),
         make("td", `leaderboard-category category-${String(item.category).toLowerCase()}`, categoryLabel(item.category)),
         make("td", "leaderboard-points", String(item.points))

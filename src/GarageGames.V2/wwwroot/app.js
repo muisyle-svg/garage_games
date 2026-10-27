@@ -1147,7 +1147,7 @@
     const container = q(selector); if (!container) return; clear(container);
     if (!rows.length) { container.appendChild(make("div", "tv-empty", "No results yet.")); return; }
     rows.forEach((row) => {
-      const line = make("div", `tv-rank-row${row.rank === 1 ? " is-leader" : ""}`); line.appendChild(make("span", "tv-rank", row.rank));
+      const line = make("div", `tv-rank-row${row.rank === 1 ? " is-leader" : ""}`); line.appendChild(make("span", "tv-rank", row.rank == null ? "" : row.rank));
       const name = make("div", "tv-rank-identity"); name.appendChild(make("div", "tv-rank-name", row.displayName || row.competitorName));
       // Only exhibition rows need a label; the board title already names the category.
       if (row.category === "exhibition") name.appendChild(make("div", "tv-rank-meta", "Exhibition"));
