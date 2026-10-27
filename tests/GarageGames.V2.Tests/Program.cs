@@ -93,6 +93,7 @@ var tests = new (string Name, Action Run)[]
     ("the on-deck list can be shuffled into a new random order", ShufflingOnDeck),
     ("category exclusion and shared tie rank", CategoryAndTieRank),
     ("leaderboard preference persists and playoffs precede official and exhibition rows", LeaderboardPreferenceAndCategories),
+    ("exhibition rows sit among official rows by points without a rank", ExhibitionRowsInterleaveByPointsWithoutRank),
     ("persistent recovery and exclusive data lock", RecoveryAndLock),
     ("danger-zone clear backs up first and resets persisted and runtime state", ClearDatabaseSafety),
     ("failed backup prevents database clearing", ClearDatabaseBackupFailurePreservesData),
@@ -4182,10 +4183,52 @@ static void LeaderboardPreferenceAndCategories()
         [RunCategory.Playoff, RunCategory.Official, RunCategory.Exhibition, RunCategory.Exhibition]));
     Assert.True(included.Leaderboard.Skip(2).Select(row => row.DisplayName).ToHashSet(StringComparer.Ordinal)
         .SetEquals(["Primary competitor (Exhibition 1)", "Primary competitor (Exhibition 2)"]));
+    Assert.True(included.Leaderboard.Select(row => row.Rank).SequenceEqual([1, 1, null, null]));
     Assert.Equal(true, h.Store.Load().ShowExhibitionsOnLeaderboard);
 
     h.Service.SetLeaderboardPreference(false);
     Assert.Equal(2, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+}
+
+static void ExhibitionRowsInterleaveByPointsWithoutRank()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    h.Service.SetLeaderboardPreference(true);
+
+    RunRecord Record(RunRecord run, int bonus)
+    {
+        h.Service.Finish();
+        h.Service.Record();
+        var recorded = h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id);
+        h.Service.EditHistoricalRun(run.Id, new EditRunRequest
+        {
+            ExpectedRevision = recorded.Revision,
+            Reason = "Test points",
+            BonusPointsOverride = bonus
+        });
+        return run;
+    }
+
+    RunRecord Official(string name, int bonus)
+    {
+        var competitor = h.AddCompetitor(name);
+        foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+        h.Service.AddToQueue(competitor.Id, RunCategory.Official);
+        h.Service.ArmCompetitor(competitor.Id, RunCategory.Official);
+        return Record(h.StartRun(), bonus);
+    }
+
+    var low = Official("Low official", 100);
+    var high = Official("High official", 300);
+    var tied = Official("Tied official", 300);
+    var top = Record(h.ArmAndStart(RunCategory.Exhibition), 500);
+    var middle = Record(h.ArmAndStart(RunCategory.Exhibition), 200);
+    var even = Record(h.ArmAndStart(RunCategory.Exhibition), 300);
+
+    var rows = h.Service.GetScoreboard().Leaderboard;
+    Assert.True(rows.Select(row => row.RunId).SequenceEqual([top.Id, high.Id, tied.Id, even.Id, middle.Id, low.Id]));
+    // Exhibitions have no rank and don't push official ranks down; tied officials share one.
+    Assert.True(rows.Select(row => row.Rank).SequenceEqual([null, 1, 1, null, null, 3]));
 }
 
 static void RecoveryAndLock()
