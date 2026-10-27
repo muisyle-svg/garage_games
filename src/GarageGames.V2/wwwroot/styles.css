@@ -445,3 +445,9 @@ select { cursor: pointer; }
 @media (max-width: 1099px) {
   .scoreboard-events:has(.tv-keypad-challenge:not([hidden])) { min-height: 60vh; }
 }
+/* Run start: 3, 2, 1, Go! fills the TV in step with the app's countdown voice. */
+.tv-start-countdown { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; overflow: hidden; background: rgba(10, 16, 26, .86); backdrop-filter: blur(6px); pointer-events: none; }
+.tv-start-countdown-label { color: var(--amber); font-size: min(78vh, 62vw); font-weight: 950; font-variant-numeric: tabular-nums; letter-spacing: -.04em; line-height: 1; text-shadow: 0 0 .12em rgba(246, 184, 77, .45), 0 .04em .1em rgba(0, 0, 0, .5); animation: tv-start-countdown-pop .45s cubic-bezier(.2, 1.4, .4, 1) both; }
+.tv-start-countdown.is-go .tv-start-countdown-label { color: var(--green); font-size: min(60vh, 34vw); text-shadow: 0 0 .12em rgba(69, 209, 154, .5), 0 .04em .1em rgba(0, 0, 0, .5); }
+@keyframes tv-start-countdown-pop { from { opacity: 0; transform: scale(1.6); } to { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .tv-start-countdown-label { animation: none; } }
