@@ -222,3 +222,25 @@ test("leaving countdown cancels scheduled Go and stops pending audio", async () 
   await flush();
   assert.deepEqual(finishCalls, []);
 });
+
+test("TV countdown overlay shows 3, 2, 1, Go! with the voice and clears after Go", () => {
+  const { countdownOverlayLabel, COUNTDOWN_OVERLAY_END_MS, COUNTDOWN_GO_AT_MS } = countdown;
+  assert.equal(countdownOverlayLabel(0), "");
+  assert.equal(countdownOverlayLabel(279), "");
+  assert.equal(countdownOverlayLabel(280), "3");
+  assert.equal(countdownOverlayLabel(1099), "3");
+  assert.equal(countdownOverlayLabel(1100), "2");
+  assert.equal(countdownOverlayLabel(1900), "1");
+  assert.equal(countdownOverlayLabel(2900), "Go!");
+  assert.equal(countdownOverlayLabel(COUNTDOWN_GO_AT_MS), "Go!");
+  assert.ok(COUNTDOWN_OVERLAY_END_MS > COUNTDOWN_GO_AT_MS);
+  assert.equal(countdownOverlayLabel(COUNTDOWN_OVERLAY_END_MS), null);
+  assert.equal(countdownOverlayLabel(-1), null);
+  assert.equal(countdownOverlayLabel(Number.NaN), null);
+});
+
+test("TV scoreboard loads the countdown overlay and its timeline", () => {
+  const html = fs.readFileSync(require.resolve("../../src/GarageGames.V2/wwwroot/scoreboard.html"), "utf8");
+  assert.match(html, /id="scoreboard-start-countdown"[^>]*hidden/);
+  assert.ok(html.indexOf("mvp-scorekeeper-countdown.js") < html.indexOf("app.js"));
+});

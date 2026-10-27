@@ -4,6 +4,28 @@
   const COUNTDOWN_TRACK_DURATION_MS = 3480;
   const COUNTDOWN_GO_LEAD_MS = 125;
   const COUNTDOWN_GO_AT_MS = COUNTDOWN_TRACK_DURATION_MS - COUNTDOWN_GO_LEAD_MS;
+  // When each word starts in the countdown track (ms from its start), for the TV overlay.
+  // "Go!" is spoken before the run actually starts at COUNTDOWN_GO_AT_MS, and stays up a
+  // moment after it so it can be read.
+  const COUNTDOWN_OVERLAY_CUES = Object.freeze([
+    Object.freeze({ atMs: 280, label: "3" }),
+    Object.freeze({ atMs: 1100, label: "2" }),
+    Object.freeze({ atMs: 1900, label: "1" }),
+    Object.freeze({ atMs: 2900, label: "Go!" })
+  ]);
+  const COUNTDOWN_OVERLAY_END_MS = 4000;
+
+  // The overlay text at a point in the countdown: "" before the first word, null once the
+  // overlay should be gone.
+  function countdownOverlayLabel(elapsedMs) {
+    const elapsed = Number(elapsedMs);
+    if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= COUNTDOWN_OVERLAY_END_MS) return null;
+    let label = "";
+    for (const cue of COUNTDOWN_OVERLAY_CUES) {
+      if (elapsed >= cue.atMs) label = cue.label;
+    }
+    return label;
+  }
 
   function createCountdownCoordinator({
     readState,
@@ -195,6 +217,9 @@
     COUNTDOWN_TRACK_DURATION_MS,
     COUNTDOWN_GO_LEAD_MS,
     COUNTDOWN_GO_AT_MS,
+    COUNTDOWN_OVERLAY_CUES,
+    COUNTDOWN_OVERLAY_END_MS,
+    countdownOverlayLabel,
     createCountdownCoordinator
   });
   if (typeof module !== "undefined" && module.exports) module.exports = api;

@@ -4,6 +4,7 @@
   const operatorPage = document.body.classList.contains("operator-view");
   const scoreboardPage = document.body.classList.contains("scoreboard-view");
   const scorekeeperTime = window.GarageGamesScorekeeperTime;
+  const countdownApi = window.GarageGamesCountdown;
 
   // Keep every write in one small route map. If the server route changes, this is the only
   // frontend contract table that needs updating; the views do not create local game state.
@@ -1155,12 +1156,60 @@
     });
   }
 
+  // Big 3, 2, 1, Go! over the whole TV while the app plays the run-start countdown voice.
+  // The app reports how far into its countdown it is; the TV keeps its own clock from that so
+  // the words land with the voice, and keeps "Go!" up briefly after the run starts.
+  let startCountdown = null;
+  let startCountdownPolling = false;
+  function pollStartCountdown() {
+    if (startCountdownPolling) return Promise.resolve();
+    startCountdownPolling = true;
+    return request("/api/run/countdown-state", { cache: "no-store", signal: AbortSignal.timeout(SCOREBOARD_REQUEST_TIMEOUT_MS) }).then((countdownState) => {
+      const status = String(countdownState && countdownState.status || "").toLowerCase();
+      const runId = countdownState && countdownState.runId;
+      if (status === "countdown" && runId) {
+        // Response time only makes an estimate late, so the earliest start seen is the best one.
+        const startedAt = performance.now() - Math.max(0, Number(countdownState.elapsedMilliseconds) || 0);
+        if (!startCountdown || startCountdown.runId !== runId) startCountdown = { runId, startedAt };
+        else startCountdown.startedAt = Math.min(startCountdown.startedAt, startedAt);
+      } else if (startCountdown && !(status === "active" && runId === startCountdown.runId)) {
+        startCountdown = null;
+      }
+      state.startCountdownStatus = status;
+    }).catch(() => {}).finally(() => { startCountdownPolling = false; });
+  }
+
+  // Checked every 50 ms while a run is armed or counting down so the overlay starts with the
+  // voice; otherwise twice a second.
+  function scheduleStartCountdownPoll() {
+    const status = state.startCountdownStatus;
+    const delay = status === "armed" || status === "countdown" ? 50 : 500;
+    window.setTimeout(() => pollStartCountdown().finally(scheduleStartCountdownPoll), delay);
+  }
+
+  function renderStartCountdown() {
+    const overlay = q("#scoreboard-start-countdown");
+    if (!overlay) return;
+    const label = startCountdown ? countdownApi.countdownOverlayLabel(performance.now() - startCountdown.startedAt) : null;
+    if (label === null) startCountdown = null;
+    overlay.hidden = label === null;
+    overlay.classList.toggle("is-go", label === "Go!");
+    if (overlay.dataset.label === (label || "")) return;
+    overlay.dataset.label = label || "";
+    // A fresh element per word so its pop-in animation plays again.
+    const word = document.createElement("span");
+    word.className = "tv-start-countdown-label";
+    word.textContent = label || "";
+    overlay.replaceChildren(word);
+  }
+
   function initScoreboard() {
     setConnection(false, null);
     pollScoreboard().finally(scheduleScoreboardPoll);
+    pollStartCountdown().finally(scheduleStartCountdownPoll);
     window.setInterval(renderScoreboardClock, 100);
     // Every frame, so the bonus timer can blink as fast as the buttons (65 ms at the end).
-    const bonusFrame = () => { renderScoreboardBonus(); window.requestAnimationFrame(bonusFrame); };
+    const bonusFrame = () => { renderScoreboardBonus(); renderStartCountdown(); window.requestAnimationFrame(bonusFrame); };
     window.requestAnimationFrame(bonusFrame);
   }
 
