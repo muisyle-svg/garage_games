@@ -908,6 +908,66 @@ public sealed class RunService
         }
     }
 
+    // The public scoreboard on the event guide website: the Leaderboards tab's standings and
+    // the results of each listed run, with the bonus round folded in as one more event the
+    // way the scorecard shows it.
+    public PublicScoreboardSnapshot GetPublicScoreboard()
+    {
+        const string bonusEventId = "bonus-round";
+        lock (_gate)
+        {
+            var leaderboard = BuildLeaderboard();
+            var listed = leaderboard.Where(row => row.RunId is not null).Select(row => row.RunId!).ToHashSet(StringComparer.Ordinal);
+            var runs = _data.Runs.Where(run => listed.Contains(run.Id)).ToList();
+            var bonusSettings = _edition.BonusGame ?? new BonusGameSettings();
+            var events = _edition.ActiveEvents.Select(e => new PublicScoreboardEvent(e.EventId, e.Name, "event")).ToList();
+            if (bonusSettings.Enabled || _data.Runs.Any(run => run.EditionId == _edition.EditionId && run.BonusGame is not null))
+            {
+                events.Add(new PublicScoreboardEvent(bonusEventId, bonusSettings.DisplayName, "bonusRound"));
+            }
+
+            PublicScoreboardResult? BonusResult(RunRecord run)
+            {
+                var bonus = run.BonusGame;
+                if (bonus is null && run.Edition.BonusGame?.Enabled != true) return null;
+                var ended = bonus?.Phase == BonusGamePhase.Ended;
+                return new PublicScoreboardResult
+                {
+                    EventId = bonusEventId,
+                    Status = bonus is null ? "pending" : ended ? "completed" : "active",
+                    StartElapsedMs = bonus?.StartedElapsedMs,
+                    FinishElapsedMs = ended ? bonus!.EndedElapsedMs : null,
+                    Points = ended ? bonus!.ScoreOverride ?? bonus.AwardedPoints ?? bonus.Hits * bonus.PointsPerPress : bonus?.ScoreOverride ?? 0
+                };
+            }
+
+            return new PublicScoreboardSnapshot
+            {
+                EditionName = _edition.Name,
+                Events = events,
+                Leaderboard = leaderboard,
+                Runs = runs.Select(run => new PublicScoreboardRun
+                {
+                    Id = run.Id,
+                    Category = run.Category,
+                    RecordedAt = run.RecordedAt,
+                    DurationLimitSeconds = run.Edition.DurationLimitSeconds,
+                    TotalPoints = run.TotalPoints,
+                    Events = run.Events.Select(e => new PublicScoreboardResult
+                        {
+                            EventId = e.EventId,
+                            Status = e.Status.ToString().ToLowerInvariant(),
+                            StartElapsedMs = e.StartElapsedMs,
+                            FinishElapsedMs = e.FinishElapsedMs,
+                            Points = e.ScoreOverride ?? e.Score
+                        })
+                        .Concat(BonusResult(run) is { } bonusResult ? new[] { bonusResult } : Array.Empty<PublicScoreboardResult>())
+                        .ToList()
+                }).ToList()
+            };
+        }
+    }
+
     private static ScoreboardBonusGame? BuildScoreboardBonus(RunRecord run)
     {
         if (run.BonusGame is not { } bonus)

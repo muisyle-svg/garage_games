@@ -399,6 +399,8 @@ select:disabled, input:disabled { opacity: .58; }
 .leaderboards-top-grid { display: grid; grid-template-columns: minmax(250px, .72fr) minmax(0, 1.45fr); align-items: start; gap: .8rem; }
 .leaderboard-card { min-width: 0; overflow: hidden; }
 .leaderboard-help { margin: 0; padding: 0 .95rem .65rem; color: var(--muted); font-size: .68rem; line-height: 1.45; }
+.public-scoreboard-status { padding-top: .1rem; }
+.public-scoreboard-status[data-state="error"] { color: var(--red); }
 .leaderboard-exhibitions-toggle { display: inline-flex; align-items: center; gap: .45rem; margin: 0 .95rem .65rem; color: var(--ink); font-size: .67rem; font-weight: 750; cursor: pointer; }
 .leaderboard-exhibitions-toggle input { width: 17px; min-height: 17px; height: 17px; accent-color: var(--green); }
 .leaderboard-player-select { display: grid; grid-template-columns: auto minmax(170px, 1fr); align-items: center; gap: .65rem; padding: 0 .95rem .55rem; }
