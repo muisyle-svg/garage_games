@@ -2131,6 +2131,26 @@ void handleGarageArcadeStatus(const RxPacket& packet) {
                 flag, packet.data[10]);
 }
 
+// GNOTE:3:<note>, a spoke's diagnostic for the scorekeeper's log: BOOT:<reason> once after
+// it starts, REJOIN:<ms>:<0|1> when it gets the run back after a dropout. Notes are short
+// and limited to capitals, digits, ':' and '_', so they can't break the serial line format.
+void handleGarageNote(const RxPacket& packet) {
+  static const char prefix[] = "GNOTE:3:";
+  const size_t prefixLength = sizeof(prefix) - 1;
+  if (packet.len <= prefixLength || packet.len > prefixLength + 40 ||
+      memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, prefixLength) != 0 ||
+      !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0) return;
+  for (size_t i = prefixLength; i < packet.len; ++i) {
+    const char c = packet.data[i];
+    if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ':' || c == '_')) return;
+  }
+  char macText[13];
+  macToHex(packet.source, macText, sizeof(macText));
+  Serial.printf("GG1 NOTE %lu %s %s\n", (unsigned long)bootToken, macText,
+                packet.data + prefixLength);
+}
+
 void processRx() {
   RxPacket packet;
   while (rxQueue && xQueueReceive(rxQueue, &packet, 0) == pdTRUE) {
@@ -2144,6 +2164,10 @@ void processRx() {
     }
     if (strncmp(packet.data, "GKEY:", 5) == 0) {
       handleGarageKeypad(packet);
+      continue;
+    }
+    if (strncmp(packet.data, "GNOTE:", 6) == 0) {
+      handleGarageNote(packet);
       continue;
     }
     if (strncmp(packet.data, "GARC:", 5) == 0) {

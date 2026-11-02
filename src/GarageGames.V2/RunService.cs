@@ -321,6 +321,17 @@ public sealed class RunService
 
     public void MarkDevicesUnverified() => RecordDeviceScan(false, false, []);
 
+    // "Row Darts III (F09E9EB28920)" for log lines; just the MAC when it has no event.
+    public string DescribeDevice(string deviceId)
+    {
+        lock (_gate)
+        {
+            var name = (_current ?? _lastDisplayedRun)?.Events.FirstOrDefault(eventItem =>
+                string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))?.Name;
+            return name is null ? deviceId : $"{name} ({deviceId})";
+        }
+    }
+
     public string ClearAllData(string confirmationPhrase)
     {
         lock (_gate)
