@@ -60,6 +60,9 @@ builder.Services.AddSingleton(service);
 builder.Services.AddSingleton<PhysicalMasterSerialService>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<PhysicalMasterSerialService>());
 builder.Services.AddHostedService<RunCheckpointHostedService>();
+// Copies the leaderboards to the event guide website when public-scoreboard.json is set up.
+builder.Services.AddSingleton<PublicScoreboardPublisher>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<PublicScoreboardPublisher>());
 // Game sounds play through this computer's speakers, not a browser tab. --no-sound
 // silences them (for example, on a machine that is only testing).
 var soundsEnabled = OperatingSystem.IsWindows() && !args.Contains("--no-sound", StringComparer.OrdinalIgnoreCase);
@@ -223,6 +226,7 @@ if (!string.IsNullOrWhiteSpace(trayShutdownToken))
 }
 app.MapGet("/api/operator", (RunService runs) => Results.Ok(runs.GetOperatorSnapshot(simulationMode)));
 app.MapGet("/api/scoreboard", (RunService runs) => Results.Ok(runs.GetScoreboard(simulationMode)));
+app.MapGet("/api/public-scoreboard", (PublicScoreboardPublisher publisher) => Results.Ok(publisher.GetStatus()));
 app.MapGet("/api/setup", (RunService runs) => Results.Ok(runs.GetSetup()));
 app.MapPut("/api/setup", (EditionSetup request, RunService runs) => Results.Ok(runs.UpdateSetup(request)));
 app.MapGet("/api/run/countdown-state", (RunService runs) => Results.Ok(runs.GetCountdownState()));

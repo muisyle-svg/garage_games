@@ -93,6 +93,7 @@ var tests = new (string Name, Action Run)[]
     ("the on-deck list can be shuffled into a new random order", ShufflingOnDeck),
     ("category exclusion and shared tie rank", CategoryAndTieRank),
     ("leaderboard preference persists and playoffs precede official and exhibition rows", LeaderboardPreferenceAndCategories),
+    ("the public scoreboard lists only leaderboard runs, with results but no device or keypad details", PublicScoreboardSnapshotListsLeaderboardRuns),
     ("exhibition rows sit among official rows by points without a rank", ExhibitionRowsInterleaveByPointsWithoutRank),
     ("persistent recovery and exclusive data lock", RecoveryAndLock),
     ("danger-zone clear backs up first and resets persisted and runtime state", ClearDatabaseSafety),
@@ -4133,6 +4134,38 @@ static void CategoryAndTieRank()
     var leaderboard = h.Service.GetScoreboard().Leaderboard;
     Assert.Equal(2, leaderboard.Count);
     Assert.True(leaderboard.All(row => row.Rank == 1));
+}
+
+static void PublicScoreboardSnapshotListsLeaderboardRuns()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+
+    var official = h.ArmAndStart(RunCategory.Official);
+    h.Service.Finish();
+    h.Service.Record();
+    var exhibition = h.ArmAndStart(RunCategory.Exhibition);
+    h.Service.Finish();
+    h.Service.Record();
+
+    var hidden = h.Service.GetPublicScoreboard();
+    Assert.Equal(1, hidden.Leaderboard.Count);
+    Assert.Equal(official.Id, hidden.Runs.Single().Id);
+    Assert.True(hidden.Events.Count >= h.Service.GetOperatorSnapshot().Events.Count);
+    Assert.True(hidden.Runs.Single().Events.Select(e => e.EventId).ToHashSet()
+        .IsSupersetOf(h.Service.GetOperatorSnapshot().Events.Select(e => e.EventId)));
+    Assert.Equal(hidden.Leaderboard.Single().Points, hidden.Runs.Single().TotalPoints);
+
+    h.Service.SetLeaderboardPreference(true);
+    var shown = h.Service.GetPublicScoreboard();
+    Assert.Equal(2, shown.Runs.Count);
+    Assert.Contains(shown.Runs, run => run.Id == exhibition.Id && run.Category == RunCategory.Exhibition);
+
+    var json = JsonSerializer.Serialize(shown, JsonDefaults.Options);
+    foreach (var privateField in new[] { "\"deviceId\"", "\"prompt\"", "\"answer\"", "\"keypad", "\"competitorId\"", "\"queue\"" })
+    {
+        Assert.True(!json.Contains(privateField, StringComparison.OrdinalIgnoreCase), $"public scoreboard leaked {privateField}");
+    }
+    Assert.True(json.Contains("\"status\":\"completed\"") || json.Contains("\"status\":\"pending\""), "event statuses are lower-case words");
 }
 
 static void LeaderboardPreferenceAndCategories()
