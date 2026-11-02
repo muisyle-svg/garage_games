@@ -84,6 +84,7 @@ public sealed record MasterBonusStatus(string Token, int Sequence, string Phase,
 public sealed record MasterPhysicalPress(string BootToken, string RunToken, string DeviceId, uint Sequence,
     uint AgeMilliseconds = 0);
 public sealed record MasterButtonTestPress(string BootToken, string DeviceId, uint Sequence);
+public sealed record MasterSpokeNote(string BootToken, string DeviceId, string Note);
 
 // A keypad spoke reports its typed entry (Submit = false) after each key so the TV can
 // show it, and submits the entry when '*' is pressed. Only submissions are acknowledged.
@@ -235,6 +236,47 @@ public static class MasterProtocolCodec
 
         press = new MasterButtonTestPress(parts[2], parts[3], sequence);
         return true;
+    }
+
+    // GG1 NOTE <bootToken> <mac> <note>: a button's diagnostic for the log, such as
+    // BOOT:BROWNOUT after it restarts or REJOIN:2400:1 after a dropout (ms away, press held).
+    public static bool TryParseSpokeNote(string line, out MasterSpokeNote note)
+    {
+        note = null!;
+        if (line.Length > MaximumLineLength) return false;
+        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length != 5 || parts[0] != "GG1" || parts[1] != "NOTE" ||
+            !IsValidBootToken(parts[2]) || !IsUpperHex(parts[3], 12) ||
+            parts[4].Length is 0 or > 40 ||
+            !parts[4].All(c => c is (>= 'A' and <= 'Z') or (>= '0' and <= '9') or ':' or '_'))
+        {
+            return false;
+        }
+
+        note = new MasterSpokeNote(parts[2], parts[3], parts[4]);
+        return true;
+    }
+
+    public static string DescribeSpokeNote(string note)
+    {
+        var parts = note.Split(':');
+        if (parts[0] == "BOOT" && parts.Length == 2)
+        {
+            return parts[1] switch
+            {
+                "POWERON" => "it was switched on",
+                "BROWNOUT" => "it restarted because its power dipped: check the battery and connections",
+                "CRASH" or "WATCHDOG" => "it restarted after a firmware fault",
+                "SOFTWARE" => "it restarted itself after a radio fault",
+                _ => "it restarted"
+            };
+        }
+        if (parts[0] == "REJOIN" && parts.Length == 3)
+        {
+            return $"it lost the master for about {parts[1]} ms and got the run back" +
+                (parts[2] == "1" ? "; a press it was holding was sent then" : "");
+        }
+        return "button diagnostic";
     }
 
     public static bool TryParsePhysicalPress(string line, out MasterPhysicalPress press)

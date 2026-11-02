@@ -243,6 +243,14 @@ operation.
    blocks further physical presses for that event until a matching late result
    arrives or a new Garage session begins; use its virtual event control as
    fallback. An explicit `REJECTED` result allows another physical attempt.
+   Presses go straight to the master (the radio acknowledges and retries them),
+   and a press waiting for its result keeps retrying through a state update or a
+   short dropout. A spoke that can't hear the master for 1.8 s holds its run for
+   up to 9 s from the last status it heard: if the same run comes back, it picks up
+   its event's state and sends any press it was holding (including one made while
+   it was out of touch), timed from when it was pressed. Each spoke also reports
+   why it last restarted (`BROWNOUT` means its power dipped) and every rejoin; the
+   app writes these to its log as "Button … reported …".
 5. Choose a competitor and use **Arm for physical Start**. A short press and
    release of the master button starts that competitor's run. The on-screen
    virtual **Start** remains available with no master connected.

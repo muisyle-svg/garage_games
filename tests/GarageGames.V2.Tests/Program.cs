@@ -599,6 +599,14 @@ static void PhysicalSpokeProtocolAndSession()
     Assert.Equal(testPress, parsedTest);
     Assert.True(!MasterProtocolCodec.TryParseButtonTest("GG1 TEST boot-A_1 aabbccddeeff 12", out _));
     Assert.True(!MasterProtocolCodec.TryParseButtonTest("GG1 TEST boot-A_1 AABBCCDDEEFF 0", out _));
+    Assert.True(MasterProtocolCodec.TryParseSpokeNote("GG1 NOTE boot-A_1 AABBCCDDEEFF BOOT:BROWNOUT", out var bootNote));
+    Assert.Equal(new MasterSpokeNote("boot-A_1", "AABBCCDDEEFF", "BOOT:BROWNOUT"), bootNote);
+    Assert.True(MasterProtocolCodec.DescribeSpokeNote(bootNote.Note).Contains("battery"));
+    Assert.True(MasterProtocolCodec.TryParseSpokeNote("GG1 NOTE boot-A_1 AABBCCDDEEFF REJOIN:2400:1", out var rejoinNote));
+    Assert.True(MasterProtocolCodec.DescribeSpokeNote(rejoinNote.Note).Contains("2400 ms"));
+    Assert.True(!MasterProtocolCodec.TryParseSpokeNote("GG1 NOTE boot-A_1 AABBCCDDEEFF boot:x", out _));
+    Assert.True(!MasterProtocolCodec.TryParseSpokeNote("GG1 NOTE boot-A_1 AABBCCDDEEFF", out _));
+    Assert.True(!MasterProtocolCodec.TryParseSpokeNote("GG1 NOTE boot-A_1 aabbccddeeff BOOT:SW", out _));
     Assert.Equal("GG1 IDENTIFY AABBCCDDEEFF 9", MasterProtocolCodec.FormatIdentifyCommand("aabbccddeeff", 9));
     Assert.Equal("0011223344556677",
         MasterProtocolCodec.GetGarageRunToken("run-00112233445566778899AABBCCDDEEFF"));

@@ -529,6 +529,19 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                     return;
                 }
 
+                // A button's restart reason or dropout report, kept in the app log so a missed
+                // press can be traced afterwards.
+                if (MasterProtocolCodec.TryParseSpokeNote(line, out var spokeNote))
+                {
+                    if (string.Equals(_protocol.BootToken, spokeNote.BootToken, StringComparison.Ordinal))
+                    {
+                        _logger.LogInformation("Button {Button} reported {Note} ({Meaning}).",
+                            _runs.DescribeDevice(spokeNote.DeviceId), spokeNote.Note,
+                            MasterProtocolCodec.DescribeSpokeNote(spokeNote.Note));
+                    }
+                    return;
+                }
+
                 // The Chaos Heist shrine's status for the operator ("clear the shrine" and so on).
                 if (MasterProtocolCodec.TryParseArcadeStatus(line, out var arcadeStatus))
                 {
