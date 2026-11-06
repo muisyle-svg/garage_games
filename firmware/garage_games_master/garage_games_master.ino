@@ -13,6 +13,10 @@
     - A spoke with a keypad also sends its typed entry and '*'-submitted codes;
       the master relays them as GG1 KEYPAD lines and the scorekeeper checks the
       code, answering with the same GG1 RESULT line used for presses.
+    - A magnetic arcade station (the Chaos Heist emerald shrine) sends GARC
+      packets: S when all seven emeralds are placed, F on the 20th ring. The
+      master relays them as GG1 ARCADE lines and forwards the app's GG1 RESULT
+      answer like a press acknowledgement.
     - Holding the master button for 5 seconds starts Speed Button discovery
       only when the scorekeeper is not reporting a Garage Games countdown,
       active run, or paused run.
@@ -2049,6 +2053,104 @@ void handleGarageKeypad(const RxPacket& packet) {
                 (unsigned long)totalAgeMs);
 }
 
+// GARC:3:<token>:<sequence>:<S|F>:<ageMs>. S = all emeralds placed (event start),
+// F = ring goal reached (event finish). The app validates the run, station MAC, and
+// event type, and answers with the shared GG1 RESULT line.
+bool parseGarageArcadePacket(const RxPacket& packet, char* parsedToken, uint32_t& sequence,
+                             char& kind, uint32_t& signalAgeMs) {
+  static const char prefix[] = "GARC:3:";
+  const size_t prefixLength = sizeof(prefix) - 1;
+  if (!parsedToken || packet.len <= prefixLength ||
+      memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, prefixLength) != 0) return false;
+
+  const char* cursor = packet.data + prefixLength;
+  const char* packetEnd = packet.data + packet.len;
+  char tokenText[17];
+  char sequenceText[11];
+  char kindText[2];
+  char ageText[11];
+  if (!readPacketField(cursor, packetEnd, tokenText, sizeof(tokenText)) ||
+      !readPacketField(cursor, packetEnd, sequenceText, sizeof(sequenceText)) ||
+      !readPacketField(cursor, packetEnd, kindText, sizeof(kindText)) ||
+      !readPacketField(cursor, packetEnd, ageText, sizeof(ageText)) || cursor != packetEnd) {
+    return false;
+  }
+  if (strlen(tokenText) != 16 || !parseGarageToken(tokenText, parsedToken) ||
+      strcmp(parsedToken, "-") == 0 ||
+      !parseUint32Token(sequenceText, sequence) || sequence == 0 ||
+      !parseUint32Token(ageText, signalAgeMs)) return false;
+  kind = kindText[0];
+  return kind == 'S' || kind == 'F';
+}
+
+void handleGarageArcade(const RxPacket& packet) {
+  char parsedToken[17];
+  uint32_t sequence = 0;
+  char kind = 0;
+  uint32_t signalAgeMs = 0;
+  if (!parseGarageArcadePacket(packet, parsedToken, sequence, kind, signalAgeMs) ||
+      !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0) return;
+
+  uint32_t now = millis();
+  // Same relay window as presses: a ring goal reached just before a pause or the buzzer
+  // can arrive a moment later, and the app decides from its age whether it counts.
+  const bool runStillAnswering = garageStatus == GARAGE_STATUS_ACTIVE ||
+      garageStatus == GARAGE_STATUS_PAUSED || garageStatus == GARAGE_STATUS_TIMED_OUT;
+  if (gameState != IDLE || !runStillAnswering || !hostStatusFresh(now) ||
+      !garageStatusFresh(now) || strcmp(parsedToken, garageToken) != 0 ||
+      (int32_t)(now - packet.receivedAtMs) < 0 ||
+      (uint32_t)(now - packet.receivedAtMs) > HOST_STATUS_STALE_MS) return;
+
+  char macText[13];
+  macToHex(packet.source, macText, sizeof(macText));
+  uint32_t relayDelayMs = now - packet.receivedAtMs;
+  uint32_t totalAgeMs = signalAgeMs > UINT32_MAX - relayDelayMs
+                            ? UINT32_MAX : signalAgeMs + relayDelayMs;
+  Serial.printf("GG1 ARCADE %lu %s %s %lu %c %lu\n", (unsigned long)bootToken,
+                parsedToken, macText, (unsigned long)sequence, kind,
+                (unsigned long)totalAgeMs);
+}
+
+// GARCS:3:<O|C|R>:<0-7>, the arcade station's status for the operator: C when
+// emeralds must come off the shrine, R when the competitor must lift and
+// replace one. Sent about once a second; relayed as GG1 ARCSTAT whenever the
+// app is listening in Garage Games mode, with or without a run.
+void handleGarageArcadeStatus(const RxPacket& packet) {
+  const uint32_t now = millis();
+  // Exactly "GARCS:3:<flag>:<digit>" (11 bytes).
+  if (packet.len != 11 || memcmp(packet.data, "GARCS:3:", 8) != 0 ||
+      packet.data[9] != ':' || packet.data[10] < '0' || packet.data[10] > '7' ||
+      !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0 ||
+      gameState != IDLE || !hostStatusFresh(now)) return;
+  const char flag = packet.data[8];
+  if (flag != 'O' && flag != 'C' && flag != 'R') return;
+  char macText[13];
+  macToHex(packet.source, macText, sizeof(macText));
+  Serial.printf("GG1 ARCSTAT %lu %s %c %c\n", (unsigned long)bootToken, macText,
+                flag, packet.data[10]);
+}
+
+// GNOTE:3:<note>, a spoke's diagnostic for the scorekeeper's log: BOOT:<reason> once after
+// it starts, REJOIN:<ms>:<0|1> when it gets the run back after a dropout. Notes are short
+// and limited to capitals, digits, ':' and '_', so they can't break the serial line format.
+void handleGarageNote(const RxPacket& packet) {
+  static const char prefix[] = "GNOTE:3:";
+  const size_t prefixLength = sizeof(prefix) - 1;
+  if (packet.len <= prefixLength || packet.len > prefixLength + 40 ||
+      memchr(packet.data, '\0', packet.len) != nullptr ||
+      memcmp(packet.data, prefix, prefixLength) != 0 ||
+      !validStationMac(packet.source) || memcmp(packet.source, masterMac, 6) == 0) return;
+  for (size_t i = prefixLength; i < packet.len; ++i) {
+    const char c = packet.data[i];
+    if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ':' || c == '_')) return;
+  }
+  char macText[13];
+  macToHex(packet.source, macText, sizeof(macText));
+  Serial.printf("GG1 NOTE %lu %s %s\n", (unsigned long)bootToken, macText,
+                packet.data + prefixLength);
+}
+
 void processRx() {
   RxPacket packet;
   while (rxQueue && xQueueReceive(rxQueue, &packet, 0) == pdTRUE) {
@@ -2062,6 +2164,18 @@ void processRx() {
     }
     if (strncmp(packet.data, "GKEY:", 5) == 0) {
       handleGarageKeypad(packet);
+      continue;
+    }
+    if (strncmp(packet.data, "GNOTE:", 6) == 0) {
+      handleGarageNote(packet);
+      continue;
+    }
+    if (strncmp(packet.data, "GARC:", 5) == 0) {
+      handleGarageArcade(packet);
+      continue;
+    }
+    if (strncmp(packet.data, "GARCS:", 6) == 0) {
+      handleGarageArcadeStatus(packet);
       continue;
     }
     if (strncmp(packet.data, "GBHELLO:", 8) == 0) {

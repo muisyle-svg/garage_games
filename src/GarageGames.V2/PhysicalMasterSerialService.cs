@@ -30,6 +30,14 @@ public sealed class PhysicalMasterSerialService : BackgroundService
     private string? _reconnectPortName;
     private DateTimeOffset? _connectionLostAt;
     private DateTimeOffset _lastReconnectAttemptAt;
+    // The master says hello every two seconds, so a port that stays open but goes quiet is
+    // stuck: the master's USB output can stop after it has had to drop output, and only a
+    // reopen (or a reset) brings it back. Presses, scans, and arcade signals are lost
+    // meanwhile while status still flows out, so it looks connected. Reopen after this long
+    // without a line; if the master is still silent after that, reset it.
+    internal static readonly TimeSpan MasterSilenceLimit = TimeSpan.FromSeconds(8);
+    private long _lastLineTicks;
+    private int _silentReopens;
 
     public PhysicalMasterSerialService(RunService runs, ILogger<PhysicalMasterSerialService> logger)
     {
@@ -156,6 +164,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
             _protocol.Reset();
             ResetEventSyncLocked();
             _port = port;
+            Interlocked.Exchange(ref _lastLineTicks, DateTime.UtcNow.Ticks);
             _reconnectPortName = selectedPort;
             _connectionLostAt = null;
             var connectionCancellation = new CancellationTokenSource();
@@ -339,13 +348,62 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         {
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
-                TryReconnect();
-                await SendStatusAsync(stoppingToken);
+                // A failure here (a serial write timing out, a database write refused) must
+                // never end the loop: it would stop status, reconnects, and the whole app.
+                try
+                {
+                    ReopenIfMasterSilent();
+                    TryReconnect();
+                    await SendStatusAsync(stoppingToken);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    _logger.LogError(exception, "Physical master upkeep failed; it will try again in a second.");
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
         }
+    }
+
+    // An open port that has heard nothing from the master for MasterSilenceLimit is reopened
+    // (the status loop's reconnect does that a moment later). If it is silent again right
+    // after a reopen, the master is reset first, as unplugging it would.
+    private void ReopenIfMasterSilent()
+    {
+        bool resetMaster;
+        lock (_gate)
+        {
+            if (_port?.IsOpen != true || _reconnectPortName is null ||
+                DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastLineTicks) < MasterSilenceLimit.Ticks)
+            {
+                return;
+            }
+
+            resetMaster = Interlocked.Increment(ref _silentReopens) >= 2;
+            if (resetMaster)
+            {
+                Interlocked.Exchange(ref _silentReopens, 0);
+                try
+                {
+                    // The ESP32's USB serial resets the chip on an RTS pulse (as the uploader does).
+                    _port.DtrEnable = false;
+                    _port.RtsEnable = true;
+                    Thread.Sleep(100);
+                    _port.RtsEnable = false;
+                }
+                catch (Exception exception) when (exception is IOException or InvalidOperationException)
+                {
+                }
+            }
+            CloseConnectionLocked();
+        }
+
+        _logger.LogWarning(resetMaster
+            ? "Physical master was silent again after a reopen; reset it and reconnecting."
+            : "Physical master went silent with its port open; reopening it.");
+        _runs.MarkDevicesUnverified();
     }
 
     private void TryReconnect()
@@ -394,6 +452,9 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                     var value = buffer[index];
                     if (value == (byte)'\n')
                     {
+                        // Any line at all shows the master's output is alive.
+                        Interlocked.Exchange(ref _lastLineTicks, DateTime.UtcNow.Ticks);
+                        Interlocked.Exchange(ref _silentReopens, 0);
                         if (!discardLine && line.Length > 0)
                         {
                             await ProcessLineAsync(port, line.ToString().TrimEnd('\r'), cancellationToken);
@@ -421,7 +482,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
-        catch (Exception exception) when (exception is IOException or InvalidOperationException)
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException)
         {
             _logger.LogInformation("Physical master serial connection ended ({ErrorType}).", exception.GetType().Name);
         }
@@ -464,6 +525,30 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                     {
                         _lastTestDeviceId = testPress.DeviceId;
                         _lastTestAt = DateTimeOffset.UtcNow;
+                    }
+                    return;
+                }
+
+                // A button's restart reason or dropout report, kept in the app log so a missed
+                // press can be traced afterwards.
+                if (MasterProtocolCodec.TryParseSpokeNote(line, out var spokeNote))
+                {
+                    if (string.Equals(_protocol.BootToken, spokeNote.BootToken, StringComparison.Ordinal))
+                    {
+                        _logger.LogInformation("Button {Button} reported {Note} ({Meaning}).",
+                            _runs.DescribeDevice(spokeNote.DeviceId), spokeNote.Note,
+                            MasterProtocolCodec.DescribeSpokeNote(spokeNote.Note));
+                    }
+                    return;
+                }
+
+                // The Chaos Heist shrine's status for the operator ("clear the shrine" and so on).
+                if (MasterProtocolCodec.TryParseArcadeStatus(line, out var arcadeStatus))
+                {
+                    if (_protocol.Mode == MasterMode.Idle &&
+                        string.Equals(_protocol.BootToken, arcadeStatus.BootToken, StringComparison.Ordinal))
+                    {
+                        _runs.ReceiveArcadeStationStatus(arcadeStatus);
                     }
                     return;
                 }
@@ -530,6 +615,13 @@ public sealed class PhysicalMasterSerialService : BackgroundService
                             reply = MasterProtocolCodec.FormatKeypadResult(keypad, result.State);
                             pushStatus |= result.Disposition == MessageDisposition.Accepted;
                         }
+                        return result;
+                    },
+                    (arcade, sessionAllowed) =>
+                    {
+                        var result = _runs.ReceivePhysicalArcadeInput(arcade, sessionAllowed);
+                        reply = MasterProtocolCodec.FormatArcadeResult(arcade, result.State);
+                        pushStatus |= result.Disposition == MessageDisposition.Accepted;
                         return result;
                     });
             }
@@ -627,7 +719,7 @@ public sealed class PhysicalMasterSerialService : BackgroundService
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
-        catch (Exception exception) when (exception is IOException or InvalidOperationException)
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException)
         {
             _logger.LogInformation("Physical master status write failed ({ErrorType}).", exception.GetType().Name);
             var connectionEnded = false;

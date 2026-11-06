@@ -117,6 +117,7 @@
         prompt: String(event.prompt || ""),
         answer: String(event.answer || ""),
         requiredSuccesses: integerDefault(event.requiredSuccesses, 1, { minimum: 1, maximum: MAX_KEYPAD_REQUIRED_SUCCESSES }),
+        disabled: event.disabled === true,
         ...values,
         ...Object.fromEntries(SCORE_FIELDS.map((field) => [`${field}Inherited`, inherited[field]])),
         assignmentValue: assignedMac || "",
@@ -225,6 +226,44 @@
     return event;
   }
 
+  // Edition-wide scoring defaults, as typed on Setup. Events that inherit a field follow the
+  // new default (an inherited minimum under an event's own starting points stays half of it).
+  const DEFAULT_SCORE_FIELDS = Object.freeze(["basePoints", "minimumPoints", "decayPoints", "decayEverySeconds"]);
+
+  function updateScoringDefault(draft, field, value) {
+    if (!draft?.scoringDefaults || !DEFAULT_SCORE_FIELDS.includes(field)) return false;
+    draft.scoringDefaults[field] = value;
+    (draft.events || []).forEach((event) => {
+      if (!event[`${field}Inherited`]) return;
+      if (field === "minimumPoints" && !event.basePointsInherited) return;
+      event[field] = value;
+      if (field === "basePoints" && event.minimumPointsInherited) event.minimumPoints = draft.scoringDefaults.minimumPoints;
+    });
+    return true;
+  }
+
+  function buildScoringPayload(defaults) {
+    const source = defaults || {};
+    if (!validInteger(source.basePoints, 0, MAX_EVENT_BASE_POINTS)) {
+      throw new Error("Default scoring: starting points must be a whole number from 0 to 1,000,000.");
+    }
+    if (!validInteger(source.minimumPoints, 0, Number(source.basePoints))) {
+      throw new Error(`Default scoring: minimum points must be a whole number from 0 to the starting points (${Number(source.basePoints)}).`);
+    }
+    if (!validInteger(source.decayPoints, 0, MAX_SCORING_POINTS)) {
+      throw new Error(`Default scoring: points lost each step must be a whole number from 0 to ${MAX_SCORING_POINTS.toLocaleString("en-US")}.`);
+    }
+    if (!validInteger(source.decayEverySeconds, 1, MAX_SCORING_SECONDS)) {
+      throw new Error(`Default scoring: seconds per step must be a whole number from 1 to ${MAX_SCORING_SECONDS.toLocaleString("en-US")}.`);
+    }
+    return {
+      basePoints: Number(source.basePoints),
+      minimumPoints: Number(source.minimumPoints),
+      decayPoints: Number(source.decayPoints),
+      decayEverySeconds: Number(source.decayEverySeconds)
+    };
+  }
+
   function updateEventScoring(event, field, value) {
     if (!event || !SCORE_FIELDS.includes(field)) return false;
     event[field] = value;
@@ -244,6 +283,8 @@
     if (!editionId) throw new Error("The setup response is missing its edition ID. Reload setup before saving.");
     if (!name) throw new Error("Enter an edition name.");
     if (!draft.events?.length) throw new Error("Add at least one event before saving setup.");
+    if (draft.events.every((event) => event.disabled)) throw new Error("Keep at least one event turned on.");
+    const scoring = buildScoringPayload(draft.scoringDefaults);
 
     const eventIds = new Set();
     const deviceIds = new Set();
@@ -308,6 +349,7 @@
         decayPoints: event.decayPointsInherited ? null : decayPoints,
         decayEverySeconds: event.decayEverySecondsInherited ? null : decayEverySeconds,
         graceSeconds: event.graceSecondsInherited ? null : graceSeconds,
+        ...(event.disabled ? { disabled: true } : {}),
         ...(type === "keypad" ? {
           requiredSuccesses: Number(event.requiredSuccesses),
           ...(prompt ? { prompt } : {}),
@@ -316,7 +358,7 @@
       };
     });
 
-    return { editionId, name, events: payloadEvents, bonusGame: buildBonusGamePayload(draft.bonusGame) };
+    return { editionId, name, scoring, events: payloadEvents, bonusGame: buildBonusGamePayload(draft.bonusGame) };
   }
 
   function scanStatus(value) {
@@ -447,6 +489,8 @@
     normalizeSetup,
     addEvent,
     updateEventScoring,
+    updateScoringDefault,
+    buildScoringPayload,
     buildSetupPayload,
     normalizeScanResponse,
     readiness,

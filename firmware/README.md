@@ -115,3 +115,19 @@ Spoke-to-master packets are `GKEY:3:<token>:<seq>:<K|S>:<entry or ->:<ageMs>`
 answers submissions with the usual `GG1 RESULT` line: `COMPLETED` for the code
 that finishes the event, `NEXT` for a right code when more are needed, and
 `ACTIVE` for a wrong one.
+
+## Chaos Heist arcade station
+
+The master also relays the Chaos Heist shrine's two signals. The shrine's ESP32
+(sketch `ChaosHeistController` in the ChaosHeist folder) broadcasts
+`GARC:3:<runToken>:<seq>:<S|F>:<ageMs>`: S when all seven emeralds are placed,
+F at the ring goal. The master prints `GG1 ARCADE <bootToken> <runToken> <mac>
+<seq> <S|F> <ageMs>` for the current run only, adding its own relay delay to
+the age. The app's `GG1 RESULT` reply is forwarded as the usual `GRESULT`
+packet. The shrine also answers a Garage Games device scan (only when Garage
+status packets are flowing, so it never joins the Speed game, and only while
+the ChaosHeist app is in Garage Games Mode) and can send
+`GTEST` for Setup's press-to-assign. About once a second it also broadcasts
+`GARCS:3:<O|C|R>:<0-7>` (C = emeralds to clear, R = one to replace), which the
+master prints as `GG1 ARCSTAT <bootToken> <mac> <O|C|R> <count>` for the
+operator's tile. Reflash the master for this; button spokes are unaffected.

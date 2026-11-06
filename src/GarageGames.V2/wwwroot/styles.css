@@ -405,6 +405,11 @@ select { cursor: pointer; }
 .tv-keypad-challenge { position: absolute; inset: 0; z-index: 2; display: flex; container-type: inline-size; flex-direction: column; align-items: center; justify-content: center; gap: clamp(.6rem, 2.5vh, 1.6rem); padding: clamp(1rem, 3vw, 2.5rem); border: 3px solid var(--amber); border-radius: var(--radius); background: rgba(10, 16, 26, .96); box-shadow: 0 0 0 6px rgba(246, 184, 77, .12), var(--shadow); text-align: center; }
 .tv-keypad-label { margin: 0; color: var(--amber); font-size: clamp(1rem, 2.4cqi, 1.7rem); font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }
 .tv-keypad-prompt { margin: 0; max-width: 100%; color: var(--cream); font-size: min(10cqi, 17vh); font-weight: 950; letter-spacing: -.03em; line-height: 1; overflow-wrap: anywhere; text-wrap: balance; }
+.tv-keypad-clue { margin: 0; max-width: 100%; color: var(--amber); font-size: min(5cqi, 8vh); font-weight: 900; line-height: 1.1; overflow-wrap: anywhere; text-wrap: balance; animation: tv-keypad-clue-in .4s ease-out; }
+.tv-disc { display: inline-block; width: .85em; height: .85em; border: .09em solid #000; border-radius: 50%; vertical-align: -.08em; box-sizing: border-box; }
+.tv-disc.is-white { background: #fff; }
+.tv-disc.is-colored { background: conic-gradient(#ff3b30, #ff9500, #ffcc00, #34c759, #00c7be, #007aff, #af52de, #ff2d55, #ff3b30); }
+@keyframes tv-keypad-clue-in { from { opacity: 0; transform: translateY(.3em); } to { opacity: 1; transform: none; } }
 .tv-keypad-entry { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .5rem 1rem; min-height: 1em; font-size: min(5cqi, 8vh); }
 .tv-keypad-keys { display: flex; gap: .2em; }
 .tv-keypad-key { display: grid; place-items: center; min-width: 1.15em; height: 1.35em; padding: 0 .12em; border: 2px solid rgba(246, 184, 77, .55); border-radius: .18em; background: rgba(246, 184, 77, .12); color: var(--amber); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-weight: 900; line-height: 1; }
@@ -440,3 +445,9 @@ select { cursor: pointer; }
 @media (max-width: 1099px) {
   .scoreboard-events:has(.tv-keypad-challenge:not([hidden])) { min-height: 60vh; }
 }
+/* Run start: 3, 2, 1, Go! fills the TV in step with the app's countdown voice. */
+.tv-start-countdown { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; overflow: hidden; background: rgba(10, 16, 26, .86); backdrop-filter: blur(6px); pointer-events: none; }
+.tv-start-countdown-label { color: var(--amber); font-size: min(78vh, 62vw); font-weight: 950; font-variant-numeric: tabular-nums; letter-spacing: -.04em; line-height: 1; text-shadow: 0 0 .12em rgba(246, 184, 77, .45), 0 .04em .1em rgba(0, 0, 0, .5); animation: tv-start-countdown-pop .45s cubic-bezier(.2, 1.4, .4, 1) both; }
+.tv-start-countdown.is-go .tv-start-countdown-label { color: var(--green); font-size: min(60vh, 34vw); text-shadow: 0 0 .12em rgba(69, 209, 154, .5), 0 .04em .1em rgba(0, 0, 0, .5); }
+@keyframes tv-start-countdown-pop { from { opacity: 0; transform: scale(1.6); } to { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .tv-start-countdown-label { animation: none; } }

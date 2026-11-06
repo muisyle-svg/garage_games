@@ -84,11 +84,22 @@ public sealed record MasterBonusStatus(string Token, int Sequence, string Phase,
 public sealed record MasterPhysicalPress(string BootToken, string RunToken, string DeviceId, uint Sequence,
     uint AgeMilliseconds = 0);
 public sealed record MasterButtonTestPress(string BootToken, string DeviceId, uint Sequence);
+public sealed record MasterSpokeNote(string BootToken, string DeviceId, string Note);
 
 // A keypad spoke reports its typed entry (Submit = false) after each key so the TV can
 // show it, and submits the entry when '*' is pressed. Only submissions are acknowledged.
 public sealed record MasterKeypadInput(string BootToken, string RunToken, string DeviceId, uint Sequence,
     bool Submit, string Entry, uint AgeMilliseconds = 0);
+
+// A magnetic arcade station (the Chaos Heist emerald shrine) reports its two gameplay
+// signals through the master: Finish = false when all seven emeralds are placed, true when
+// the 20th ring is entered. Both are acknowledged with the same GG1 RESULT line as presses.
+public sealed record MasterArcadeInput(string BootToken, string RunToken, string DeviceId, uint Sequence,
+    bool Finish, uint AgeMilliseconds = 0);
+
+// The arcade station's status for the operator: Attention is "clear" when emeralds must come
+// off the shrine, "replace" when the competitor must lift and replace one, or null when all is well.
+public sealed record MasterArcadeStatus(string BootToken, string DeviceId, string? Attention, int Emeralds);
 
 public sealed record MasterPhysicalPressResult(string State, MessageDisposition Disposition, string Reason);
 
@@ -132,6 +143,9 @@ public static class MasterProtocolCodec
 
     public static string GetKeypadSubmitMessageId(string runToken, string deviceId, uint sequence) =>
         $"spoke-keypad:{runToken}:{deviceId}:{sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+    public static string GetArcadeMessageId(string runToken, string deviceId, uint sequence) =>
+        $"spoke-arcade:{runToken}:{deviceId}:{sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
     public static string? GetGarageRunToken(string? runId)
     {
@@ -198,6 +212,9 @@ public static class MasterProtocolCodec
     public static string FormatKeypadResult(MasterKeypadInput input, string state) =>
         $"GG1 RESULT {input.RunToken} {input.DeviceId} {input.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)} {state}";
 
+    public static string FormatArcadeResult(MasterArcadeInput input, string state) =>
+        $"GG1 RESULT {input.RunToken} {input.DeviceId} {input.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)} {state}";
+
     public static string FormatButtonTest(MasterButtonTestPress press) =>
         $"GG1 TEST {press.BootToken} {press.DeviceId} {press.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
@@ -219,6 +236,47 @@ public static class MasterProtocolCodec
 
         press = new MasterButtonTestPress(parts[2], parts[3], sequence);
         return true;
+    }
+
+    // GG1 NOTE <bootToken> <mac> <note>: a button's diagnostic for the log, such as
+    // BOOT:BROWNOUT after it restarts or REJOIN:2400:1 after a dropout (ms away, press held).
+    public static bool TryParseSpokeNote(string line, out MasterSpokeNote note)
+    {
+        note = null!;
+        if (line.Length > MaximumLineLength) return false;
+        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length != 5 || parts[0] != "GG1" || parts[1] != "NOTE" ||
+            !IsValidBootToken(parts[2]) || !IsUpperHex(parts[3], 12) ||
+            parts[4].Length is 0 or > 40 ||
+            !parts[4].All(c => c is (>= 'A' and <= 'Z') or (>= '0' and <= '9') or ':' or '_'))
+        {
+            return false;
+        }
+
+        note = new MasterSpokeNote(parts[2], parts[3], parts[4]);
+        return true;
+    }
+
+    public static string DescribeSpokeNote(string note)
+    {
+        var parts = note.Split(':');
+        if (parts[0] == "BOOT" && parts.Length == 2)
+        {
+            return parts[1] switch
+            {
+                "POWERON" => "it was switched on",
+                "BROWNOUT" => "it restarted because its power dipped: check the battery and connections",
+                "CRASH" or "WATCHDOG" => "it restarted after a firmware fault",
+                "SOFTWARE" => "it restarted itself after a radio fault",
+                _ => "it restarted"
+            };
+        }
+        if (parts[0] == "REJOIN" && parts.Length == 3)
+        {
+            return $"it lost the master for about {parts[1]} ms and got the run back" +
+                (parts[2] == "1" ? "; a press it was holding was sent then" : "");
+        }
+        return "button diagnostic";
     }
 
     public static bool TryParsePhysicalPress(string line, out MasterPhysicalPress press)
@@ -272,6 +330,58 @@ public static class MasterProtocolCodec
         }
 
         input = new MasterKeypadInput(parts[2], parts[3], parts[4], sequence, parts[6] == "S", entry, ageMilliseconds);
+        return true;
+    }
+
+    // GG1 ARCADE <bootToken> <runToken> <mac> <sequence> <S|F> <ageMs>
+    public static bool TryParseArcadeInput(string line, out MasterArcadeInput input)
+    {
+        input = null!;
+        if (line.Length > MaximumLineLength)
+        {
+            return false;
+        }
+
+        var parts = line.Split(' ');
+        if (parts.Length != 8 || parts[0] != "GG1" || parts[1] != "ARCADE" ||
+            !IsValidBootToken(parts[2]) || !IsUpperHex(parts[3], 16) || !IsUpperHex(parts[4], 12) ||
+            !TryParseDecimalUInt(parts[5], out var sequence) || sequence == 0 ||
+            parts[6] is not ("S" or "F") || !TryParseDecimalUInt(parts[7], out var ageMilliseconds))
+        {
+            return false;
+        }
+
+        input = new MasterArcadeInput(parts[2], parts[3], parts[4], sequence, parts[6] == "F", ageMilliseconds);
+        return true;
+    }
+
+    // GG1 ARCSTAT <bootToken> <mac> <O|C|R> <0-7>
+    public static bool TryParseArcadeStatus(string line, out MasterArcadeStatus status)
+    {
+        status = null!;
+        if (line.Length > MaximumLineLength)
+        {
+            return false;
+        }
+
+        var parts = line.Split(' ');
+        if (parts.Length != 6 || parts[0] != "GG1" || parts[1] != "ARCSTAT" ||
+            !IsValidBootToken(parts[2]) || !IsUpperHex(parts[3], 12) ||
+            parts[5].Length != 1 || parts[5][0] is < '0' or > '7')
+        {
+            return false;
+        }
+
+        string? attention;
+        switch (parts[4])
+        {
+            case "O": attention = null; break;
+            case "C": attention = "clear"; break;
+            case "R": attention = "replace"; break;
+            default: return false;
+        }
+
+        status = new MasterArcadeStatus(parts[2], parts[3], attention, parts[5][0] - '0');
         return true;
     }
 
@@ -407,7 +517,21 @@ public sealed class MasterProtocolState
     public bool ProcessLine(string line, Func<string, ulong, bool, InputResult> receiveStart,
         Func<MasterPhysicalPress, bool, MasterPhysicalPressResult>? receivePhysicalPress,
         Func<MasterKeypadInput, bool, MasterPhysicalPressResult?>? receiveKeypad)
+        => ProcessLine(line, receiveStart, receivePhysicalPress, receiveKeypad, null);
+
+    public bool ProcessLine(string line, Func<string, ulong, bool, InputResult> receiveStart,
+        Func<MasterPhysicalPress, bool, MasterPhysicalPressResult>? receivePhysicalPress,
+        Func<MasterKeypadInput, bool, MasterPhysicalPressResult?>? receiveKeypad,
+        Func<MasterArcadeInput, bool, MasterPhysicalPressResult>? receiveArcade)
     {
+        if (MasterProtocolCodec.TryParseArcadeInput(line, out var arcade))
+        {
+            LastMessage = line;
+            var sessionAllowed = string.Equals(BootToken, arcade.BootToken, StringComparison.Ordinal) && Mode == MasterMode.Idle;
+            receiveArcade?.Invoke(arcade, sessionAllowed);
+            return true;
+        }
+
         if (MasterProtocolCodec.TryParseKeypadInput(line, out var keypad))
         {
             LastMessage = line;

@@ -312,6 +312,39 @@ uint32_t garageEventRevision = 0;
 uint32_t garageTerminalAtMs = 0;
 bool garageTerminalTimerStarted = false;
 int garageVisualAppliedKey = -100;
+// The event state this spoke showed when the waiting press was made ('P' not started,
+// 'A' running, 'C' completed for a bonus press). A state sync that still shows it means
+// the scorekeeper has not handled the press yet, so the press keeps retrying.
+char garagePressFromState = 0;
+
+// When the master goes quiet (a radio dropout, or the scorekeeper briefly silent), the
+// spoke holds its run session for a while (timed from the last word it heard) instead of
+// forgetting it. If the same run
+// comes back, the event's state, the press numbering and any waiting press are restored,
+// and a press made during the dropout is sent then. The scorekeeper times each press by
+// its age, and ignores presses older than 10 s, so the hold lasts no longer than that.
+constexpr uint32_t GARAGE_HELD_SESSION_MS = 9000;
+struct HeldGarageSession {
+  bool valid;
+  uint32_t savedAtMs;
+  char token[17];
+  GarageModeState modeState;
+  uint32_t pressSequence;
+  uint32_t eventRevision;
+  char resultState[10];
+  bool completed;
+  bool pressPending;
+  bool pendingIsKeypad;
+  char pressFromState;
+  uint32_t pendingSequence;
+  uint32_t pressAtMs;
+  char pressMessage[56];
+};
+HeldGarageSession heldGarage = {};
+
+// Diagnostics sent to the scorekeeper's log: why this spoke last restarted (once, when it
+// first reaches a run) and each time it rejoins after a dropout.
+bool bootNoteSent = false;
 
 // --------------------------- Keypad state ---------------------------
 constexpr uint8_t KEYPAD_ROWS = 4;
@@ -542,6 +575,18 @@ bool parseGarageEventStatePacket(const RxPacket& packet, char* token, uint32_t& 
          strcmp(eventState, "COMPLETED") == 0;
 }
 
+char eventStateLetter(const char* eventState) {
+  if (strcmp(eventState, "ACTIVE") == 0) return 'A';
+  if (strcmp(eventState, "COMPLETED") == 0) return 'C';
+  return 'P';
+}
+
+// What this spoke currently shows for its own event, in the same letters.
+char currentEventStateLetter() {
+  if (garageCompleted) return 'C';
+  return strcmp(garageResultState, "ACTIVE") == 0 ? 'A' : 'P';
+}
+
 void handleGarageEventState(const RxPacket& packet) {
   char token[17];
   uint32_t revision = 0;
@@ -559,6 +604,11 @@ void handleGarageEventState(const RxPacket& packet) {
   // State syncs follow any change in the run. While a submitted code is still awaiting its
   // answer and the event is still running, keep waiting so a wrong code still flashes red.
   if (garagePressAwaitingResult && garagePendingIsKeypad && strcmp(eventState, "ACTIVE") == 0) return;
+  // The same goes for a press: a sync can be sent just before the press reaches the
+  // scorekeeper, or while the press is still being retried over a weak link. Dropping the
+  // press then lost it (the light went back to red and the player had to press again).
+  if (garagePressAwaitingResult && !garagePendingIsKeypad &&
+      eventStateLetter(eventState) == garagePressFromState) return;
   garagePressAwaitingResult = false;
   garagePendingIsKeypad = false;
   garagePressRetriesLeft = 0;
@@ -620,6 +670,26 @@ uint32_t randomGarageSequenceBase() {
   return esp_random() & 0x3FFFFFFFUL;
 }
 
+// Run messages that need the master (presses, codes, notes) go straight to it rather than
+// as a broadcast: a direct ESP-NOW send is acknowledged by the master's radio and retried
+// automatically, so one lost packet no longer costs a 250 ms retry. Falls back to a
+// broadcast if the master isn't known yet or the direct send can't be queued.
+bool sendToGarageMaster(const char* message) {
+  if (!radioReady || !message) return false;
+  if (garageMasterLocked && validStationMac(garageMasterMac) && !macEqual(garageMasterMac, ownMac)) {
+    if (!esp_now_is_peer_exist(garageMasterMac)) {
+      esp_now_peer_info_t peer{};
+      memcpy(peer.peer_addr, garageMasterMac, 6);
+      peer.ifidx = WIFI_IF_STA;
+      peer.channel = ESPNOW_CHANNEL;
+      peer.encrypt = false;
+      esp_now_add_peer(&peer);
+    }
+    if (esp_now_send(garageMasterMac, (const uint8_t*)message, strlen(message)) == ESP_OK) return true;
+  }
+  return sendBroadcast(message);
+}
+
 // The press age lets the host timestamp the physical press rather than its
 // arrival, so ESP-NOW retries and relay latency are not charged to the player.
 void sendGaragePress() {
@@ -628,10 +698,118 @@ void sendGaragePress() {
   int length = snprintf(message, sizeof(message), "%s:%lu", pendingGaragePressMessage,
                         (unsigned long)(millis() - garagePressAtMs));
   if (length <= 0 || (size_t)length >= sizeof(message)) return;
-  sendBroadcast(message);
+  sendToGarageMaster(message);
 }
 
-void clearGarageMode(bool clearVisual) {
+// Remembers the run session so it can be restored if the same run comes back.
+void holdGarageSession(uint32_t now) {
+  // A session that is already held stays held while the master is still quiet.
+  if (!garageStatusSeen || strcmp(garageToken, "-") == 0 ||
+      (garageModeState != GARAGE_MODE_ACTIVE && garageModeState != GARAGE_MODE_PAUSED)) return;
+  heldGarage.valid = true;
+  // Timed from the last word from the master, so the hold (and the rejoin report) covers
+  // the whole dropout, not just the part after the spoke gave up waiting.
+  heldGarage.savedAtMs = (int32_t)(now - lastGarageStateMs) >= 0 ? lastGarageStateMs : now;
+  memcpy(heldGarage.token, garageToken, sizeof(heldGarage.token));
+  heldGarage.modeState = garageModeState;
+  heldGarage.pressSequence = garagePressSequence;
+  heldGarage.eventRevision = garageEventRevision;
+  memcpy(heldGarage.resultState, garageResultState, sizeof(heldGarage.resultState));
+  heldGarage.completed = garageCompleted;
+  heldGarage.pressPending = garagePressAwaitingResult && pendingGaragePressMessage[0] != '\0';
+  heldGarage.pendingIsKeypad = garagePendingIsKeypad;
+  heldGarage.pressFromState = garagePressFromState;
+  heldGarage.pendingSequence = pendingGarageSequence;
+  heldGarage.pressAtMs = garagePressAtMs;
+  memcpy(heldGarage.pressMessage, pendingGaragePressMessage, sizeof(heldGarage.pressMessage));
+  if (heldGarage.pressPending) {
+    Serial.println("[GARAGE] Lost the master with a press waiting; holding it");
+  }
+}
+
+bool heldGarageUsable(uint32_t now) {
+  return heldGarage.valid && (uint32_t)(now - heldGarage.savedAtMs) <= GARAGE_HELD_SESSION_MS;
+}
+
+// A press made while the master can't be heard. It is kept with the held session and sent
+// if the same run comes back, timed from now. Only a plain press on an unfinished event
+// is kept: the scorekeeper decides from its age whether it still counts.
+bool holdPressDuringDropout(uint32_t now) {
+  if (!heldGarageUsable(now) || heldGarage.modeState != GARAGE_MODE_ACTIVE ||
+      heldGarage.completed || heldGarage.pressPending) return false;
+  ++heldGarage.pressSequence;
+  if (heldGarage.pressSequence == 0) ++heldGarage.pressSequence;
+  const int length = snprintf(heldGarage.pressMessage, sizeof(heldGarage.pressMessage),
+      "GPRESS:3:%s:%lu", heldGarage.token, (unsigned long)heldGarage.pressSequence);
+  if (length <= 0 || (size_t)length >= sizeof(heldGarage.pressMessage)) {
+    heldGarage.pressMessage[0] = '\0';
+    return false;
+  }
+  heldGarage.pressPending = true;
+  heldGarage.pendingIsKeypad = false;
+  heldGarage.pendingSequence = heldGarage.pressSequence;
+  heldGarage.pressAtMs = now;
+  heldGarage.pressFromState = heldGarage.resultState[0] != '\0' &&
+      strcmp(heldGarage.resultState, "ACTIVE") == 0 ? 'A' : 'P';
+  garageVisualAppliedKey = -100;
+  Serial.println("[GARAGE] Pressed while the master can't be heard; holding the press");
+  return true;
+}
+
+// Why the spoke last started, for the scorekeeper's log. BROWNOUT means the supply
+// dipped too low (a weak battery or a loose connection).
+const char* resetReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "POWERON";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    case ESP_RST_SW: return "SOFTWARE";
+    case ESP_RST_PANIC: return "CRASH";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT: return "WATCHDOG";
+    case ESP_RST_EXT: return "RESET_PIN";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+    default: return "OTHER";
+  }
+}
+
+void sendGarageNote(const char* note) {
+  char message[48];
+  const int length = snprintf(message, sizeof(message), "GNOTE:3:%s", note);
+  if (length <= 0 || (size_t)length > RX_MAX_LEN) return;
+  sendToGarageMaster(message);
+}
+
+// Called when the same run comes back after a dropout.
+void restoreHeldGarageSession(uint32_t now) {
+  garagePressSequence = heldGarage.pressSequence;
+  garageEventRevision = heldGarage.eventRevision;
+  memcpy(garageResultState, heldGarage.resultState, sizeof(garageResultState));
+  garageCompleted = heldGarage.completed;
+  const bool pressPending = heldGarage.pressPending;
+  if (pressPending) {
+    memcpy(pendingGaragePressMessage, heldGarage.pressMessage, sizeof(pendingGaragePressMessage));
+    pendingGarageSequence = heldGarage.pendingSequence;
+    garagePressAtMs = heldGarage.pressAtMs;
+    garagePendingIsKeypad = heldGarage.pendingIsKeypad;
+    garagePressFromState = heldGarage.pressFromState;
+    garagePressAwaitingResult = true;
+    garagePressRetriesLeft = GARAGE_PRESS_MAX_RETRIES;
+    nextGaragePressRetryMs = now;
+  }
+  char note[40];
+  snprintf(note, sizeof(note), "REJOIN:%lu:%u",
+           (unsigned long)(now - heldGarage.savedAtMs), pressPending ? 1u : 0u);
+  heldGarage.valid = false;
+  Serial.printf("[GARAGE] Rejoined the run after %lu ms%s\n",
+                (unsigned long)(now - heldGarage.savedAtMs),
+                pressPending ? "; resending the held press" : "");
+  sendGarageNote(note);
+}
+
+void clearGarageMode(bool clearVisual, bool holdSession) {
+  if (holdSession) holdGarageSession(millis());
+  else heldGarage.valid = false;
   garageModeState = GARAGE_MODE_NONE;
   strcpy(garageToken, "-");
   garageStatusSeen = false;
@@ -680,12 +858,19 @@ void handleGarageMode(const RxPacket& packet) {
   if (garageStatusSeen &&
       (int32_t)(packet.receivedAtMs - lastGarageStateMs) < 0) return;
 
+  if (!bootNoteSent) {
+    bootNoteSent = true;
+    char note[32];
+    snprintf(note, sizeof(note), "BOOT:%s", resetReasonText());
+    sendGarageNote(note);
+  }
+
   bool sameSession = garageStatusSeen && strcmp(garageToken, newToken) == 0;
   bool visualChanged = !garageStatusSeen || !sameSession ||
                        garageModeState != newState;
   if (newState == GARAGE_MODE_NONE) {
     if (visualChanged || garagePressAwaitingResult || garageCompleted) {
-      clearGarageMode(false);
+      clearGarageMode(false, true);
     }
     garageStatusSeen = true;
     garageModeState = GARAGE_MODE_NONE;
@@ -709,6 +894,11 @@ void handleGarageMode(const RxPacket& packet) {
     garageTerminalAtMs = 0;
     garageTerminalTimerStarted = false;
     resetBonusMemory();
+    if (heldGarageUsable(packet.receivedAtMs) && strcmp(heldGarage.token, newToken) == 0) {
+      restoreHeldGarageSession(packet.receivedAtMs);
+    } else {
+      heldGarage.valid = false;
+    }
   }
   if (isGarageTerminalState(newState) &&
       (!sameSession || !isGarageTerminalState(garageModeState))) {
@@ -767,7 +957,7 @@ void updateGarageWatchdog() {
   if (isGarageTerminalState(garageModeState) && garageTerminalTimerStarted &&
       (uint32_t)(millis() - garageTerminalAtMs) < GARAGE_TERMINAL_LED_MS) return;
   if ((uint32_t)(millis() - lastGarageStateMs) > GARAGE_STATUS_TIMEOUT_MS) {
-    clearGarageMode(true);
+    clearGarageMode(true, true);
   }
 }
 
@@ -847,6 +1037,7 @@ void sendBonusPress() {
   }
   garagePressAtMs = now;
   garagePressAwaitingResult = true;
+  garagePressFromState = 'C';
   garagePendingIsKeypad = false;
   garagePressRetriesLeft = GARAGE_PRESS_MAX_RETRIES;
   nextGaragePressRetryMs = now + GARAGE_PRESS_RESEND_INTERVAL_MS;
@@ -946,6 +1137,9 @@ void updateGarageVisual() {
   int key = 0;
   if (terminalIndicatorActive) {
     key = garageModeState == GARAGE_MODE_TIMED_OUT ? 12 : 9;
+  } else if (!fresh && heldGarageUsable(now) && heldGarage.pressPending) {
+    // A press is being held through a dropout: keep showing that it is waiting.
+    key = 3;
   } else if (fresh && garageAckUnknown) {
     key = 11;
   } else if (fresh) {
@@ -1067,7 +1261,7 @@ void handleDiscover(const RxPacket& packet) {
   masterReserved = true;
   reservationUntilMs = now + MASTER_RESERVATION_MS;
   lastMasterCommandMs = now;
-  clearGarageMode(true);
+  clearGarageMode(true, false);
   memcpy(garageMasterMac, packet.source, sizeof(garageMasterMac));
   garageMasterLocked = true;
   scheduleHello(reservedDiscoveryToken,
@@ -1321,6 +1515,10 @@ void handlePress() {
     return;
   }
 
+  // The master can't be heard right now, but a run was going a moment ago: keep the press
+  // and send it if the run comes back (see holdPressDuringDropout).
+  if (!gameActive && !garageStateFresh(now) && holdPressDuringDropout(now)) return;
+
   // In the bonus round only the lit spoke reports a press; its own event is already done.
   if (!gameActive && bonusRoundFresh(now)) {
     if (bonusTargetPressable(now)) sendBonusPress();
@@ -1342,6 +1540,7 @@ void handlePress() {
     garagePressAtMs = now;
     garagePressAwaitingResult = true;
     garagePendingIsKeypad = false;
+    garagePressFromState = currentEventStateLetter();
     garagePressRetriesLeft = GARAGE_PRESS_MAX_RETRIES;
     nextGaragePressRetryMs = now + GARAGE_PRESS_RESEND_INTERVAL_MS;
     garageResultState[0] = '\0';

@@ -219,6 +219,9 @@ select:disabled, input:disabled { opacity: .58; }
 /* The bonus round's lit button: bright, pulsing, and impossible to miss among the tiles. */
 .virtual-button.is-bonus-target { border-color: #45d19a; background: rgba(69, 209, 154, .18); box-shadow: 0 0 0 3px rgba(69, 209, 154, .55), 0 0 22px rgba(69, 209, 154, .45); animation: bonus-target-pulse .5s ease-in-out infinite alternate; }
 .virtual-button.is-bonus-target .virtual-action-hint { color: #45d19a; font-weight: 950; }
+/* The Chaos Heist shrine needs the operator (emeralds to clear, or one to replace). */
+.virtual-button.is-arcade-warning { border-color: rgba(244, 189, 96, .75); }
+.virtual-button.is-arcade-warning .virtual-action-hint { color: var(--amber) !important; font-weight: 900; }
 @keyframes bonus-target-pulse { from { box-shadow: 0 0 0 2px rgba(69, 209, 154, .4), 0 0 10px rgba(69, 209, 154, .3); } to { box-shadow: 0 0 0 5px rgba(69, 209, 154, .75), 0 0 28px rgba(69, 209, 154, .6); } }
 @media (prefers-reduced-motion: reduce) { .virtual-button.is-bonus-target { animation: none; } }
 @keyframes started-event-flash { 50% { border-color: rgba(244, 189, 96, .28); background: rgba(244, 189, 96, .025); color: var(--amber); } }
@@ -300,10 +303,26 @@ select:disabled, input:disabled { opacity: .58; }
 /* The result box already shows a finished event's duration; drop the repeat below it. */
 .virtual-button.is-complete .virtual-action-hint { display: none; }
 
+/* With a run on the desk, event progress colours the tile: unstarted is dark and quiet, a
+   started event amber, a finished one green. The device label keeps its own colour, and a
+   button that isn't responding keeps its red border. */
+.virtual-button.is-unstarted:not(.is-bonus-target) { border-color: rgba(255, 255, 255, .1); background: rgba(0, 0, 0, .16); }
+.virtual-button.is-unstarted .virtual-button-name { color: var(--muted); }
+.virtual-button.is-unstarted:hover:not(:disabled):not(.is-bonus-target) { border-color: rgba(244, 189, 96, .65); background: rgba(244, 189, 96, .07); }
+.virtual-button.is-unstarted.device-not-responding:not(.is-bonus-target) { border-color: rgba(240, 135, 121, .58); }
+.virtual-button.is-unstarted.device-unverified:not(.is-bonus-target) { border-color: rgba(244, 189, 96, .45); }
+.virtual-button.is-in-progress:not(.is-bonus-target) { border-color: rgba(244, 189, 96, .75); background: rgba(244, 189, 96, .1); }
+.virtual-button.is-complete:not(.is-bonus-target), .virtual-button.is-complete:disabled:not(.is-bonus-target) { border-color: rgba(104, 214, 164, .75); background: rgba(104, 214, 164, .17); }
+.virtual-button.is-complete .virtual-button-name, .virtual-button.is-complete:disabled .virtual-button-name { color: var(--ink); }
+
 /* Run history search and filters. */
 .history-filters { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; padding: 0 .95rem .75rem; }
 .history-filters input { flex: 1 1 220px; min-width: 0; max-width: 360px; }
 .history-filters select { flex: 0 1 170px; width: auto; }
+.history-filters .history-edition-filter { flex: 0 1 300px; }
+.history-run-type { display: flex; align-items: center; gap: .4rem; margin-left: auto; font-size: .8rem; color: var(--muted); white-space: nowrap; }
+.history-run-type select { width: auto; }
+.on-deck-heading-actions { display: flex; align-items: center; gap: .6rem; }
 .history-filters .button[hidden] { display: none; }
 
 /* Deleted runs are restorable from a collapsed list at the bottom of Run history. */
@@ -380,6 +399,8 @@ select:disabled, input:disabled { opacity: .58; }
 .leaderboards-top-grid { display: grid; grid-template-columns: minmax(250px, .72fr) minmax(0, 1.45fr); align-items: start; gap: .8rem; }
 .leaderboard-card { min-width: 0; overflow: hidden; }
 .leaderboard-help { margin: 0; padding: 0 .95rem .65rem; color: var(--muted); font-size: .68rem; line-height: 1.45; }
+.public-scoreboard-status { padding-top: .1rem; }
+.public-scoreboard-status[data-state="error"] { color: var(--red); }
 .leaderboard-exhibitions-toggle { display: inline-flex; align-items: center; gap: .45rem; margin: 0 .95rem .65rem; color: var(--ink); font-size: .67rem; font-weight: 750; cursor: pointer; }
 .leaderboard-exhibitions-toggle input { width: 17px; min-height: 17px; height: 17px; accent-color: var(--green); }
 .leaderboard-player-select { display: grid; grid-template-columns: auto minmax(170px, 1fr); align-items: center; gap: .65rem; padding: 0 .95rem .55rem; }
@@ -479,6 +500,11 @@ select:disabled, input:disabled { opacity: .58; }
 .setup-readiness.detected { border-color: rgba(244, 189, 96, .3); color: var(--amber); }
 .setup-readiness.unassigned { color: var(--dim); }
 .setup-event-id { margin: .38rem 0 0; color: var(--dim); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .54rem; }
+.setup-event-play { display: flex; align-items: center; gap: .45rem; margin-top: .45rem; font-size: .66rem; font-weight: 850; }
+.setup-event-play small { color: var(--muted); font-weight: 600; }
+.setup-event-row.is-disabled { border-style: dashed; }
+.setup-event-row.is-disabled > :not(.setup-event-play):not(.setup-event-top) { opacity: .45; }
+.setup-preview-item.is-disabled { opacity: .5; }
 .setup-bonus { display: grid; gap: .45rem; margin: .85rem .95rem 0; padding: .75rem; border: 1px solid rgba(104, 214, 164, .28); border-radius: 10px; background: rgba(104, 214, 164, .05); }
 .setup-bonus h3 { margin: .1rem 0 0; }
 .setup-bonus-toggle { display: flex; align-items: center; gap: .45rem; font-size: .72rem; font-weight: 850; }

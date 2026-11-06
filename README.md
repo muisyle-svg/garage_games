@@ -30,7 +30,8 @@ app. The current `GG1` serial protocol runs at 115200 baud; a five-second master
 button hold enters the existing Speed game when no Garage run is active or
 paused. Regular and keypad Garage events can receive physical spoke presses
 over ESP-NOW (see "Keypad events" below); magnetic special events and bonus
-rounds remain future work. The app runs locally and has no Google Sheets or
+rounds remain future work, except the Chaos Heist arcade event (see "Chaos Heist
+arcade event" below). The app runs locally and has no Google Sheets or
 other network-service dependency.
 
 The combined Garage Games/Speed Button master and spoke sketches are in
@@ -166,9 +167,15 @@ fields are optional nullable integers. Effective base, minimum, and decay
 values must be within 0–1,000,000 points; intervals and grace periods must be
 within 1–86,400 and 0–86,400 seconds respectively. The minimum cannot exceed
 the effective base. `GET /api/setup` and the `PUT` response include `scoring`
-with the actual edition-wide defaults. For compatibility, `scoring` is optional
-in a PUT request and any submitted value is ignored; only per-event fields are
-editable through setup.
+with the edition-wide defaults, which Setup's **Default scoring** section edits
+(starting points, minimum, points lost per step, seconds per step). `scoring` is
+optional in a PUT request; leaving it out keeps the current defaults. Each event
+also has a **Play this event** switch (`disabled: true` in the API): a turned-off
+event stays in Setup with its button assignment but is left out of new runs, the
+scorecard, the TV, and its event leaderboard. New runs finish (and start the
+bonus round) once their remaining events are done, and a turned-off event's
+button is never lit in the bonus round even if it is powered and answering.
+At least one event must stay on.
 
 To match physical buttons to MAC addresses, connect the master (Garage idle
 mode, no run underway) and press a button: its MAC is added to Setup's
@@ -182,11 +189,12 @@ a MAC (in the list or on an event row) blinks that physical button.
 The active setup is stored transactionally in SQLite metadata; a database
 backup is created before a changed setup is saved. Setup is locked while a run
 is in progress or waiting to be recorded. Each run keeps its own edition
-snapshot, so editing setup never rewrites historical results. If the event
-roster or any per-event scoring setting changes while recorded runs exist in
-the current edition, the saved setup gets a new edition ID and the leaderboard
-starts a separate edition; earlier scores remain in history and are not
-deleted.
+snapshot (events, button MACs, and scoring), so editing setup never rewrites
+historical results, and corrections to an earlier run use the rules it was
+played under. Setup changes keep the edition ID, so the leaderboard and the
+one-official-run rule carry on mid-competition: swapping a broken button for a
+new MAC, turning an event off, or changing scoring applies to runs started
+afterwards, while runs already played keep their events and points.
 
 Use **Scan devices** or arm a run while the physical master is connected. The
 server sends `GG1 STATUS` immediately before `GG1 SCAN <id>`; the master
@@ -235,6 +243,14 @@ operation.
    blocks further physical presses for that event until a matching late result
    arrives or a new Garage session begins; use its virtual event control as
    fallback. An explicit `REJECTED` result allows another physical attempt.
+   Presses go straight to the master (the radio acknowledges and retries them),
+   and a press waiting for its result keeps retrying through a state update or a
+   short dropout. A spoke that can't hear the master for 1.8 s holds its run for
+   up to 9 s from the last status it heard: if the same run comes back, it picks up
+   its event's state and sends any press it was holding (including one made while
+   it was out of touch), timed from when it was pressed. Each spoke also reports
+   why it last restarted (`BROWNOUT` means its power dipped) and every rejoin; the
+   app writes these to its log as "Button … reported …".
 5. Choose a competitor and use **Arm for physical Start**. A short press and
    release of the master button starts that competitor's run. The on-screen
    virtual **Start** remains available with no master connected.
@@ -349,8 +365,8 @@ arrival, capped at 10 seconds and never earlier than the start of the current
 active stretch. Spoke press sequences start from a random value each session,
 so a spoke that reboots mid-run cannot reuse a sequence the app already
 recorded. Flash the master and spokes together: an older master rejects the
-new press format. Future work includes magnetic special-event messages. This
-design does not use Google Sheet row IDs or Wi-Fi. Battery-powered spokes must
+new press format. Magnetic arcade (Chaos Heist) messages are described under
+"Chaos Heist arcade event". This design does not use Google Sheet row IDs or Wi-Fi. Battery-powered spokes must
 keep their radio listening to receive a wireless start; deep sleep cannot
 receive that start signal.
 
@@ -378,6 +394,10 @@ only shows the countdown and reports Go as a backup.
 | Keypad chime | A keypad message appears on the TV | `wwwroot/sounds/keypad-message.wav` |
 | Bonus chime | The bonus round's first button lights | `wwwroot/sounds/bonus-start.wav` |
 | Keypad buzzer | A wrong code is entered on a keypad | `wwwroot/sounds/keypad-wrong.wav` |
+| Keypad success | The keypad event's last required message is solved | `wwwroot/sounds/keypad-success.mp3` |
+| Minutes remaining | The clock passes 4:00, 3:00, 2:00 and 1:00 | `wwwroot/sounds/four-minutes-remaining.wav` … `one-minute-remaining.wav` |
+| Final countdown | The clock passes 0:05 | `wwwroot/sounds/5-second-countdown.mp3` |
+| Time-up buzzer | The clock reaches 0:00, or a bonus-round button is missed | `wwwroot/sounds/time-up-buzzer.wav` |
 
 Replace a file (same name, WAV or MP3) to change a sound; add a `SoundCue` in
 `SoundService.cs` with its file to add one. Set the volume with Windows' volume
@@ -427,12 +447,11 @@ them, adjust the times, or Clear it. Entering a start time and hits on a run tha
 never reached the bonus records one. The Leaderboards tab has a Bonus round board
 that ranks by points (ties share a rank; round length doesn't matter), with runs
 that never reached it listed as DNF. Set the round up in Setup under **Bonus
-speed round**: its name (shown on the TV, scorecards, and leaderboards; renaming it
-doesn't start a new edition version), whether it plays, points per press, the starting seconds per press,
+speed round**: its name (shown on the TV, scorecards, and leaderboards), whether it plays, points per press, the starting seconds per press,
 how much and how often that drops, and the minimum. The defaults match the
 standalone Speed game (10 s, dropping 1 s every 10 s, to 2 s) at 5 points per
-press. Changing them after runs are recorded starts a new edition version, like
-changing event scoring. The standalone Speed game on the master (five-second hold)
+press. Changing them mid-competition applies to new runs only; runs already
+played keep their bonus settings and the leaderboard carries on. The standalone Speed game on the master (five-second hold)
 is unchanged and still runs on its own. Flash the master and spokes together for
 the bonus round.
 
@@ -450,6 +469,17 @@ file (for example in Excel, saved as CSV) and restart the app; Setup shows how
 many messages loaded or what is wrong with the file. Each run keeps a copy of
 the list it started with. Start the app with `--keypad-answers <path>` to use a
 different file.
+
+Hints: when `config/keypad-answers-hints.csv` exists the app loads it instead of
+`keypad-answers.csv`. It is the same grid with extra rows labelled `Hint` under
+answer rows; each hint cell belongs to the message directly above it. A message
+shows on the TV as usual, and if it is still unsolved after 15 seconds of run
+time (pauses don't count, wrong codes don't reset it) the TV adds its hint under
+it, with a short bong (`sounds/keypad-hint.wav`). The next message starts its own 15 seconds. A hint with no message above
+it, or two hint rows under one answer row, is reported in Setup.
+The hint shows as "◯ - hint", where the circle is the disc: plain white for a
+hint as written, or a color wheel when the hint ends in `*` (`Column*` shows the
+color wheel and "Column"; a cell of just `*` shows only the color wheel).
 
 In Setup, set an event's type to **Keypad code**, choose **Codes to pass**, and
 assign the special button's MAC to that event as usual. During a run:
@@ -473,6 +503,8 @@ assign the special button's MAC to that event as usual. During a run:
   back the latest solved code (its message returns to the TV and any message
   drawn after it is dropped), and finally the start. Wrong codes are never
   undone; they stay in the raw messages.
+- An event named Wall-D (or "Wall D") words its TV panel for discs: "1 of 3
+  discs found", "Enter the coordinates", and "Wrong coordinates".
 
 
 Codes are checked by the app, not the button, and every submitted code is
@@ -480,3 +512,66 @@ recorded along with which messages each run drew. The typed-so-far entry shown
 on the TV is display-only and is not saved. The spoke sketch detects the keypad
 automatically, so the same `garage_games_spoke` sketch runs on every button;
 flash the master and spokes together when updating to this protocol.
+
+## Chaos Heist arcade event
+
+The Chaos Heist emerald shrine (repository `magnetic-arcade-sensor`) can be one
+of the run's events. The seven Chaos Emerald sensors and the coin slot take the
+place of a start/stop button. Seven emeralds in place starts the event's timer,
+and the 20th ring finishes it. The app owns the timing and scoring exactly as
+it does for any button event. The shrine runs on its own Windows PC with the
+ChaosHeist app; the two computers are not networked. Everything travels through
+the master over ESP-NOW channel 1:
+
+- The shrine's ESP32 listens to the master's run broadcasts (`GARAGE:3:...`)
+  and its own event state (`GSTATE:3:...`), and relays them to ChaosHeist over
+  USB.
+- When ChaosHeist sees the seventh emerald (after a confirmed empty shrine for
+  this run) or the 20th ring, the ESP32 sends `GARC:3:<runToken>:<seq>:<S|F>:<ageMs>`
+  and repeats it every 250 ms until answered, for up to about 6 seconds.
+- The master relays it as `GG1 ARCADE <bootToken> <runToken> <mac> <seq> <S|F> <ageMs>`
+  only for the current run while it is active, paused, or just timed out. The
+  app records it as `arcade-start` or `arcade-finish` through the same checks as
+  a physical press: master handshake, run token, station MAC and event type,
+  duplicate message ID, pause, timeout, and late-arrival timing by age. It
+  answers with the usual `GG1 RESULT ... <PENDING|ACTIVE|COMPLETED|REJECTED>`,
+  which the master forwards to the station.
+- A repeated or duplicate start never restarts the timer, a finish before the
+  start is rejected, and extra finishes are ignored. A signal sent while the
+  run is armed, counting down, or paused is turned down; the competitor then
+  lifts and replaces one emerald once the run is going. A 20th ring that lands
+  just before a pause or the buzzer still counts by its age.
+
+Setup:
+
+1. Flash the updated `firmware/garage_games_master` sketch to the master.
+   Button spokes don't need reflashing; the arcade messages are additions to
+   the existing protocol.
+2. Flash the updated `ChaosHeistController` sketch from the ChaosHeist folder
+   to the shrine's XIAO (board `XIAO_ESP32C3`, **USB CDC On Boot: Enabled**).
+   Wiring is unchanged.
+3. In **Setup**, add an event (for example "Chaos Heist") and set its type to
+   **Chaos Heist (emeralds + rings)**. To assign the shrine's MAC, click
+   **Assign** on that event and press **Send ID to Garage Games** in the
+   ChaosHeist control panel, or type the MAC shown in that panel. Save setup.
+   The shrine must be on and in range.
+4. On the shrine's PC, start ChaosHeist and press **Garage Games Mode**. Only
+   then does the shrine answer **Scan devices** (and the arm-time scan) like a
+   button, so "responding" in Garage Games means ChaosHeist is ready to play.
+   If the shrine shows as not responding, check that ChaosHeist is open and in
+   Garage Games Mode.
+
+The event's tile also shows what the shrine needs from the operator, in amber:
+**Clear shrine · N emeralds on** when emeralds are still in place before a
+competitor can start, and **Lift & replace 1 emerald** when all seven went in
+before the run started. The shrine sends this through the master about once a
+second (`GARCS` → `GG1 ARCSTAT`); it is display-only and never recorded.
+
+During a run the event's tile works as an operator fallback, as it does for a
+keypad event. The first tap starts the event and the second finishes it (a
+second tap within half a second is ignored as a double tap), so a
+failed sensor or radio never blocks a run. The Chaos Heist event counts toward
+"every event done": finishing it (with all the others) starts the bonus speed
+round when the bonus round is enabled in Setup, or finishes the run when it is
+not. The shrine has no button to light, so the speed round only ever targets
+the regular and keypad buttons, and its tile never counts as a bonus hit.

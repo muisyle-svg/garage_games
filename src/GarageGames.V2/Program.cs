@@ -24,7 +24,13 @@ if (!File.Exists(editionPath))
 var edition = EditionDefinition.FromJson(editionPath);
 // Keypad messages and their codes. A missing or invalid file is reported in Setup rather
 // than stopping the app; keypad events then fall back to operator overrides.
-var keypadAnswersPath = GetOption(args, "--keypad-answers") ?? Path.Combine(Path.GetDirectoryName(editionPath)!, "keypad-answers.csv");
+// The file with hint rows is used when it exists; otherwise the plain answer grid.
+var configDirectory = Path.GetDirectoryName(editionPath)!;
+var keypadAnswersPath = GetOption(args, "--keypad-answers")
+    ?? new[] { "keypad-answers-hints.csv", "keypad-answers.csv" }
+        .Select(name => Path.Combine(configDirectory, name))
+        .FirstOrDefault(File.Exists)
+    ?? Path.Combine(configDirectory, "keypad-answers.csv");
 var keypadChallenges = KeypadChallengeSet.LoadOrReportError(keypadAnswersPath);
 var store = new RunStore(dataPath);
 var clock = new SimulationClock();
@@ -44,12 +50,19 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
 });
+// A background loop that fails must not take the app down mid-event (the .NET default stops
+// the host); each loop logs its own errors and carries on.
+builder.Services.Configure<HostOptions>(options =>
+    options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 builder.Services.AddSingleton(store);
 builder.Services.AddSingleton<IMonotonicClock>(clock);
 builder.Services.AddSingleton(service);
 builder.Services.AddSingleton<PhysicalMasterSerialService>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<PhysicalMasterSerialService>());
 builder.Services.AddHostedService<RunCheckpointHostedService>();
+// Copies the leaderboards to the event guide website when public-scoreboard.json is set up.
+builder.Services.AddSingleton<PublicScoreboardPublisher>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<PublicScoreboardPublisher>());
 // Game sounds play through this computer's speakers, not a browser tab. --no-sound
 // silences them (for example, on a machine that is only testing).
 var soundsEnabled = OperatingSystem.IsWindows() && !args.Contains("--no-sound", StringComparer.OrdinalIgnoreCase);
@@ -213,6 +226,7 @@ if (!string.IsNullOrWhiteSpace(trayShutdownToken))
 }
 app.MapGet("/api/operator", (RunService runs) => Results.Ok(runs.GetOperatorSnapshot(simulationMode)));
 app.MapGet("/api/scoreboard", (RunService runs) => Results.Ok(runs.GetScoreboard(simulationMode)));
+app.MapGet("/api/public-scoreboard", (PublicScoreboardPublisher publisher) => Results.Ok(publisher.GetStatus()));
 app.MapGet("/api/setup", (RunService runs) => Results.Ok(runs.GetSetup()));
 app.MapPut("/api/setup", (EditionSetup request, RunService runs) => Results.Ok(runs.UpdateSetup(request)));
 app.MapGet("/api/run/countdown-state", (RunService runs) => Results.Ok(runs.GetCountdownState()));
@@ -235,6 +249,11 @@ app.MapDelete("/api/queue/{queueId}", (string queueId, RunService runs) =>
 app.MapPost("/api/queue/reorder", (ReorderQueueRequest request, RunService runs) =>
 {
     runs.ReorderQueue(request.QueueIds);
+    return Results.Ok(runs.GetOperatorSnapshot(simulationMode));
+});
+app.MapPost("/api/queue/shuffle", (RunService runs) =>
+{
+    runs.ShuffleQueue();
     return Results.Ok(runs.GetOperatorSnapshot(simulationMode));
 });
 app.MapPost("/api/queue/{queueId}/arm", async (string queueId, ArmRequest request, RunService runs,

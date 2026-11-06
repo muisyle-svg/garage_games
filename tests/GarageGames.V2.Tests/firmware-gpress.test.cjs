@@ -133,7 +133,40 @@ test("bonus heartbeats let the app swap dead buttons, and a new run forgets the 
 
 test("presses for a paused or just-timed-out run still reach the app, which checks their age", () => {
   const relays = master.match(/const bool runStillAnswering = [^;]+;/g) || [];
-  assert.equal(relays.length, 2, "both the press and keypad relays");
+  assert.equal(relays.length, 3, "the press, keypad, and arcade relays");
   relays.forEach((relay) => assert.match(relay, /GARAGE_STATUS_PAUSED[\s\S]*GARAGE_STATUS_TIMED_OUT/));
   assert.match(master, /Serial\.setRxBufferSize\(HOST_RX_BUFFER_BYTES\);/, "the master's serial buffer holds a full status burst");
+});
+
+test("a waiting press survives state syncs and dropouts instead of being dropped", () => {
+  const sync = spoke.match(/void handleGarageEventState\([\s\S]*?\n}\n/);
+  assert.ok(sync, "event-state sync handler exists");
+  assert.match(sync[0], /eventStateLetter\(eventState\) == garagePressFromState\) return;/,
+    "a sync that still shows the pre-press state keeps the press retrying");
+  assert.match(spoke, /garagePressFromState = currentEventStateLetter\(\);/);
+  assert.match(spoke, /garagePressFromState = 'C';/, "bonus presses are made from a completed event");
+
+  const clear = spoke.match(/void clearGarageMode\([\s\S]*?\n}\n/);
+  assert.ok(clear && /holdGarageSession\(millis\(\)\)/.test(clear[0]), "a lost session is held, not forgotten");
+  const newSession = spoke.match(/if \(!sameSession\) \{[\s\S]*?\n  \}\n/);
+  assert.ok(newSession && /restoreHeldGarageSession\(packet\.receivedAtMs\)/.test(newSession[0]),
+    "the same run coming back restores the held session");
+  assert.match(spoke, /strcmp\(heldGarage\.token, newToken\) == 0/);
+  assert.match(spoke, /GARAGE_HELD_SESSION_MS = 9000;/, "held presses stay inside the app's 10 s press-age limit");
+  assert.match(spoke, /clearGarageMode\(true, false\);/, "a Speed discovery does not hold the Garage session");
+  assert.match(spoke, /!garageStateFresh\(now\) && holdPressDuringDropout\(now\)/,
+    "a press made during a dropout is kept and sent when the run comes back");
+  assert.match(spoke, /nextGaragePressRetryMs = now;/, "a restored press is resent at once");
+});
+
+test("presses go straight to the master, and spokes report restarts and dropouts", () => {
+  const sendPress = spoke.match(/void sendGaragePress\(\) \{[\s\S]*?\n}\n/);
+  assert.ok(sendPress && /sendToGarageMaster\(message\);/.test(sendPress[0]));
+  assert.match(spoke, /esp_now_send\(garageMasterMac,/, "a direct send gets the radio's acknowledgement and retries");
+  assert.match(spoke, /return sendBroadcast\(message\);/, "falls back to a broadcast");
+  assert.match(spoke, /GNOTE:3:%s/);
+  assert.match(spoke, /case ESP_RST_BROWNOUT: return "BROWNOUT";/);
+  assert.match(spoke, /REJOIN:%lu:%u/);
+  assert.match(master, /handleGarageNote\(packet\)/);
+  assert.match(master, /GG1 NOTE %lu %s %s/);
 });

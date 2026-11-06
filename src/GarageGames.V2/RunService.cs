@@ -89,6 +89,9 @@ public sealed class RunService
     private PrimedCompetitor? _primed;
 
     public const long KeypadWrongDisplayMilliseconds = 2_000;
+    // How long a keypad message stays unsolved (run time, so pauses don't count) before the
+    // TV adds its hint.
+    public const long KeypadHintDelayMilliseconds = 15_000;
     private readonly KeypadChallengeSet _keypadChallenges;
 
     // Raised (under the service lock) when the game calls for a sound; the host plays it
@@ -107,6 +110,18 @@ public sealed class RunService
     // Keypad events start and finish from the same physical spoke as regular events;
     // only their finish signal differs.
     private static bool IsButtonEvent(EventKind kind) => kind is EventKind.Standard or EventKind.Keypad;
+
+    // Events that are started and finished during a run and count toward "every event done"
+    // (which ends the run or starts the bonus speed round). A magnetic arcade (Chaos Heist)
+    // event counts here, but it has no button to light, so it is never a bonus target.
+    private static bool IsTimedEvent(EventKind kind) => IsButtonEvent(kind) || kind == EventKind.MagneticArcade;
+
+    // Arcade signals (all emeralds placed / 20th ring) belong only to a magnetic arcade event;
+    // every other physical input belongs only to a button or keypad event.
+    private static bool AcceptsPhysicalInput(EventKind kind, string inputType) =>
+        inputType.StartsWith("arcade-", StringComparison.Ordinal)
+            ? kind == EventKind.MagneticArcade
+            : IsButtonEvent(kind);
 
     private KeypadEntryState KeypadEntryFor(RunRecord run, EventRecord eventResult)
     {
@@ -204,7 +219,18 @@ public sealed class RunService
                 EditionId = request.EditionId?.Trim() ?? "",
                 Name = request.Name?.Trim() ?? "",
                 DurationLimitSeconds = _edition.DurationLimitSeconds,
-                Scoring = _edition.Scoring.Clone(),
+                // The edition-wide defaults are editable too; manual-points mode isn't on Setup,
+                // so it keeps its current value.
+                Scoring = request.Scoring is { } scoring
+                    ? new ScoringRule
+                    {
+                        ManualEventPoints = _edition.Scoring.ManualEventPoints,
+                        BasePoints = scoring.BasePoints,
+                        MinimumPoints = scoring.MinimumPoints,
+                        DecayPoints = scoring.DecayPoints,
+                        DecayEverySeconds = scoring.DecayEverySeconds
+                    }
+                    : _edition.Scoring.Clone(),
                 Events = (request.Events ?? []).Select(CloneEventDefinition).ToList(),
                 BonusGame = (request.BonusGame ?? _edition.BonusGame)?.Clone()
             };
@@ -224,16 +250,9 @@ public sealed class RunService
                 throw new CommandException(exception.Message);
             }
 
-            // Bonus round points and timing score runs too, so they version the edition like
-            // event scoring does.
-            // (Renaming the round alone does not.)
-            var eventSetupChanged = !SameEventSetup(_edition.Events, candidate.Events) ||
-                !(_edition.BonusGame ?? new BonusGameSettings()).SameScoringAs(candidate.BonusGame ?? new BonusGameSettings());
-            if (eventSetupChanged && string.Equals(candidate.EditionId, _edition.EditionId, StringComparison.Ordinal) &&
-                _data.Runs.Any(run => run.EditionId == _edition.EditionId && run.IsRecorded))
-            {
-                candidate.EditionId = NewId("edition");
-            }
+            // Setup changes keep the edition, so the leaderboard carries on mid-competition: a
+            // swapped button, a disabled event, or new scoring applies to new runs, while each
+            // run already played keeps (and is rescored by) its own saved copy of the rules.
 
             if (string.Equals(Serialize(candidate), Serialize(_edition), StringComparison.Ordinal))
             {
@@ -301,6 +320,17 @@ public sealed class RunService
     }
 
     public void MarkDevicesUnverified() => RecordDeviceScan(false, false, []);
+
+    // "Row Darts III (F09E9EB28920)" for log lines; just the MAC when it has no event.
+    public string DescribeDevice(string deviceId)
+    {
+        lock (_gate)
+        {
+            var name = (_current ?? _lastDisplayedRun)?.Events.FirstOrDefault(eventItem =>
+                string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))?.Name;
+            return name is null ? deviceId : $"{name} ({deviceId})";
+        }
+    }
 
     public string ClearAllData(string confirmationPhrase)
     {
@@ -388,7 +418,7 @@ public sealed class RunService
                 : (run.Events.SingleOrDefault(item => item.EventId == eventId)
                     ?? throw new CommandException("That event is not part of this run.")).Name;
             var reopenRun = !isBonus && isCurrent && run.Status == RunStatus.Finished &&
-                run.Events.All(item => IsButtonEvent(item.Type));
+                run.Events.All(item => IsTimedEvent(item.Type));
             var request = new EditRunRequest
             {
                 ExpectedRevision = expectedRevision,
@@ -446,9 +476,9 @@ public sealed class RunService
                 ? null
                 : run.Events.SingleOrDefault(item => item.EventId == eventId)
                     ?? throw new CommandException("That event is not part of this run.");
-            if (requestedEvent is not null && !IsButtonEvent(requestedEvent.Type))
+            if (requestedEvent is not null && !IsTimedEvent(requestedEvent.Type))
             {
-                throw new CommandException("Only button and keypad events can be undone this way; use the scorecard to correct it.");
+                throw new CommandException("Only button, keypad, and Chaos Heist events can be undone this way; use the scorecard to correct it.");
             }
             if (requestedEvent is not null && requestedEvent.Status == EventStatus.Pending)
             {
@@ -460,7 +490,7 @@ public sealed class RunService
                 .Select(message => new
                 {
                     Message = message,
-                    Event = run.Events.SingleOrDefault(item => IsButtonEvent(item.Type) &&
+                    Event = run.Events.SingleOrDefault(item => IsTimedEvent(item.Type) &&
                         string.Equals(item.DeviceId, message.DeviceId, StringComparison.OrdinalIgnoreCase))
                 })
                 .Where(item => item.Event is not null && (requestedEvent is null || item.Event.EventId == requestedEvent.EventId) &&
@@ -526,7 +556,7 @@ public sealed class RunService
             _keypadEntries.Remove(candidateEvent.EventId);
 
             var reopenRun = candidate.Status == RunStatus.Finished &&
-                run.Events.All(item => IsButtonEvent(item.Type));
+                run.Events.All(item => IsTimedEvent(item.Type));
             if (reopenRun)
             {
                 candidate.Status = RunStatus.Active;
@@ -592,6 +622,16 @@ public sealed class RunService
             }
             return eventResult.Status == EventStatus.Active && message.Type == "event-press" &&
                 eventResult.StartElapsedMs == elapsed && eventResult.FinishElapsedMs is null;
+        }
+
+        if (eventResult.Type == EventKind.MagneticArcade)
+        {
+            // The shrine's signals or the operator's tile taps: the finish once complete, else
+            // the start while running. The shrine follows the event back (see ChaosHeist).
+            return eventResult.Status == EventStatus.Completed
+                ? message.Type == "arcade-finish" && eventResult.FinishElapsedMs == elapsed
+                : eventResult.Status == EventStatus.Active && message.Type == "arcade-start" &&
+                    eventResult.StartElapsedMs == elapsed && eventResult.FinishElapsedMs is null;
         }
 
         if (eventResult.Status == EventStatus.Completed)
@@ -662,7 +702,8 @@ public sealed class RunService
         }
 
         var events = run.Events
-            .Where(eventResult => IsButtonEvent(eventResult.Type) && MasterProtocolCodec.IsValidDeviceId(eventResult.DeviceId))
+            .Where(eventResult => (IsButtonEvent(eventResult.Type) || eventResult.Type == EventKind.MagneticArcade) &&
+                MasterProtocolCodec.IsValidDeviceId(eventResult.DeviceId))
             .OrderBy(eventResult => eventResult.DeviceId, StringComparer.OrdinalIgnoreCase)
             .Select(eventResult => new MasterGarageEventStatus(token, run.Revision, eventResult.DeviceId,
                 eventResult.Status switch
@@ -771,6 +812,10 @@ public sealed class RunService
                         string.Equals(device.DeviceId, eventDefinition.DeviceId, StringComparison.OrdinalIgnoreCase)))
                     .Select(Clone)
                     .ToList(),
+                ArcadeStations = _arcadeStations
+                    .Where(pair => _clock.MonotonicMilliseconds - pair.Value.HeardAtMs <= ArcadeStatusFreshMilliseconds)
+                    .Select(pair => pair.Value.Status)
+                    .ToList(),
                 History = _data.Runs.Where(r => !r.IsDeleted).OrderByDescending(r => r.CreatedAt).Select(Listed).ToList(),
                 DeletedRuns = _data.Runs.Where(r => r.IsDeleted).OrderByDescending(r => r.DeletedAt).Select(Listed).ToList(),
                 Messages = _data.Messages.OrderByDescending(m => m.Id).Take(250).Select(Clone).ToList(),
@@ -842,16 +887,20 @@ public sealed class RunService
                     Phase = RunPhase.Normal,
                     IsPrimed = true,
                     RemainingMilliseconds = primed.DurationLimitSeconds * 1000L,
-                    TotalEvents = _edition.Events.Count,
-                    Events = _edition.Events.Select(e => new ScoreboardEvent { Name = e.Name, Status = EventStatus.Pending }).ToList()
+                    TotalEvents = _edition.ActiveEvents.Count(),
+                    Events = _edition.ActiveEvents.Select(e => new ScoreboardEvent { Name = e.Name, Status = EventStatus.Pending }).ToList()
                 };
             }
 
-            // The primed competitor is shown as competing, so not also as on deck.
+            // A primed or armed competitor is shown as competing, so not also as on deck.
+            // (Starting the run consumes their queue entry.)
             var queue = _data.Queue.OrderBy(q => q.Position).ToList();
-            var primedEntry = primed is null ? null : queue.FirstOrDefault(item =>
-                item.CompetitorId == primed.CompetitorId && item.Category == primed.Category);
-            if (primedEntry is not null) queue.Remove(primedEntry);
+            var competing = primed is not null
+                ? (primed.CompetitorId, primed.Category)
+                : _current is { Status: RunStatus.Armed } armed ? (armed.CompetitorId, armed.Category) : default;
+            var competingEntry = competing.CompetitorId is null ? null : queue.FirstOrDefault(item =>
+                item.CompetitorId == competing.CompetitorId && item.Category == competing.Category);
+            if (competingEntry is not null) queue.Remove(competingEntry);
             var onDeck = queue.Take(4)
                 .Select(item => new ScoreboardOnDeck(
                     competitorNames.GetValueOrDefault(item.CompetitorId, "Unknown competitor"), item.Category))
@@ -866,6 +915,66 @@ public sealed class RunService
                 OnDeckName = onDeck.FirstOrDefault()?.Name,
                 OnDeck = onDeck,
                 Leaderboard = BuildLeaderboard()
+            };
+        }
+    }
+
+    // The public scoreboard on the event guide website: the Leaderboards tab's standings and
+    // the results of each listed run, with the bonus round folded in as one more event the
+    // way the scorecard shows it.
+    public PublicScoreboardSnapshot GetPublicScoreboard()
+    {
+        const string bonusEventId = "bonus-round";
+        lock (_gate)
+        {
+            var leaderboard = BuildLeaderboard();
+            var listed = leaderboard.Where(row => row.RunId is not null).Select(row => row.RunId!).ToHashSet(StringComparer.Ordinal);
+            var runs = _data.Runs.Where(run => listed.Contains(run.Id)).ToList();
+            var bonusSettings = _edition.BonusGame ?? new BonusGameSettings();
+            var events = _edition.ActiveEvents.Select(e => new PublicScoreboardEvent(e.EventId, e.Name, "event")).ToList();
+            if (bonusSettings.Enabled || _data.Runs.Any(run => run.EditionId == _edition.EditionId && run.BonusGame is not null))
+            {
+                events.Add(new PublicScoreboardEvent(bonusEventId, bonusSettings.DisplayName, "bonusRound"));
+            }
+
+            PublicScoreboardResult? BonusResult(RunRecord run)
+            {
+                var bonus = run.BonusGame;
+                if (bonus is null && run.Edition.BonusGame?.Enabled != true) return null;
+                var ended = bonus?.Phase == BonusGamePhase.Ended;
+                return new PublicScoreboardResult
+                {
+                    EventId = bonusEventId,
+                    Status = bonus is null ? "pending" : ended ? "completed" : "active",
+                    StartElapsedMs = bonus?.StartedElapsedMs,
+                    FinishElapsedMs = ended ? bonus!.EndedElapsedMs : null,
+                    Points = ended ? bonus!.ScoreOverride ?? bonus.AwardedPoints ?? bonus.Hits * bonus.PointsPerPress : bonus?.ScoreOverride ?? 0
+                };
+            }
+
+            return new PublicScoreboardSnapshot
+            {
+                EditionName = _edition.Name,
+                Events = events,
+                Leaderboard = leaderboard,
+                Runs = runs.Select(run => new PublicScoreboardRun
+                {
+                    Id = run.Id,
+                    Category = run.Category,
+                    RecordedAt = run.RecordedAt,
+                    DurationLimitSeconds = run.Edition.DurationLimitSeconds,
+                    TotalPoints = run.TotalPoints,
+                    Events = run.Events.Select(e => new PublicScoreboardResult
+                        {
+                            EventId = e.EventId,
+                            Status = e.Status.ToString().ToLowerInvariant(),
+                            StartElapsedMs = e.StartElapsedMs,
+                            FinishElapsedMs = e.FinishElapsedMs,
+                            Points = e.ScoreOverride ?? e.Score
+                        })
+                        .Concat(BonusResult(run) is { } bonusResult ? new[] { bonusResult } : Array.Empty<PublicScoreboardResult>())
+                        .ToList()
+                }).ToList()
             };
         }
     }
@@ -906,7 +1015,8 @@ public sealed class RunService
             .Where(e => e.Type == EventKind.Keypad && e.Status == EventStatus.Active)
             .OrderByDescending(e => e.StartElapsedMs ?? 0)
             .FirstOrDefault();
-        var prompt = eventResult?.Keypad?.Current?.Prompt ?? eventResult?.Prompt;
+        var current = eventResult?.Keypad?.Current;
+        var prompt = current?.Prompt ?? eventResult?.Prompt;
         if (eventResult is null || string.IsNullOrWhiteSpace(prompt))
         {
             return null;
@@ -919,10 +1029,13 @@ public sealed class RunService
         }
 
         var now = _clock.MonotonicMilliseconds;
+        var hintShown = current is { Hint: not null } && run.ActiveElapsedMs - current.DrawnElapsedMs >= KeypadHintDelayMilliseconds;
         return new ScoreboardKeypadChallenge
         {
             EventName = eventResult.Name,
             Prompt = prompt,
+            Hint = hintShown ? current!.Hint : null,
+            HintDisc = hintShown ? (current!.ColoredDisc ? "colored" : "white") : null,
             Entry = entry?.Entry ?? "",
             ShowWrong = entry?.WrongAtMonotonicMs is long wrongAt && now - wrongAt < KeypadWrongDisplayMilliseconds,
             ShowCorrect = entry?.CorrectAtMonotonicMs is long correctAt && now - correctAt < KeypadWrongDisplayMilliseconds,
@@ -1174,14 +1287,19 @@ public sealed class RunService
             // Players finish a keypad event only with its code; the operator's second tap is
             // the override for a stuck player or a broken keypad.
             var keypadOverride = eventResult is { Type: EventKind.Keypad, Status: EventStatus.Active };
+            // An arcade station's tile is the operator's fallback for its emerald and ring
+            // signals (a broken sensor or radio): the first tap starts it, the second finishes it.
+            var arcadeType = eventResult.Type == EventKind.MagneticArcade
+                ? eventResult.Status == EventStatus.Pending ? "arcade-start" : "arcade-finish"
+                : null;
             using var payload = JsonDocument.Parse("{}");
             return ReceiveCore(new InputEnvelope
             {
-                MessageId = NewId(keypadOverride ? "virtual-keypad-override" : "virtual-press"),
+                MessageId = NewId(keypadOverride ? "virtual-keypad-override" : arcadeType is null ? "virtual-press" : "virtual-arcade"),
                 SessionId = run.Id,
                 RunId = run.Id,
                 DeviceId = eventResult.DeviceId,
-                Type = keypadOverride ? "keypad-success" : "event-press",
+                Type = arcadeType ?? (keypadOverride ? "keypad-success" : "event-press"),
                 ElapsedMilliseconds = run.ActiveElapsedMs,
                 Payload = payload.RootElement.Clone()
             }, trustedVirtual: true);
@@ -1238,11 +1356,47 @@ public sealed class RunService
         }
     }
 
+    // Puts the whole on-deck list in a random order. With two or more entries the order always
+    // changes, so the operator sees that it worked.
+    public void ShuffleQueue()
+    {
+        lock (_gate)
+        {
+            var original = _data.Queue.OrderBy(q => q.Position).ToArray();
+            if (original.Length < 2)
+            {
+                return;
+            }
+
+            var shuffled = original.ToArray();
+            do
+            {
+                Random.Shared.Shuffle(shuffled);
+            }
+            while (shuffled.SequenceEqual(original));
+
+            for (var index = 0; index < shuffled.Length; index++)
+            {
+                shuffled[index].Position = index;
+            }
+
+            try
+            {
+                _store.SaveQueue(_data.Queue);
+            }
+            catch
+            {
+                ReloadInMemoryAfterPersistenceFailure();
+                throw;
+            }
+        }
+    }
+
     public IReadOnlyList<PreflightResult> Preflight()
     {
         lock (_gate)
         {
-            return _edition.Events.Select(eventDefinition =>
+            return _edition.ActiveEvents.Select(eventDefinition =>
             {
                 var device = _data.Devices.Single(d => string.Equals(d.DeviceId, eventDefinition.DeviceId, StringComparison.OrdinalIgnoreCase));
                 return new PreflightResult
@@ -1483,7 +1637,7 @@ public sealed class RunService
                 string.Equals(MasterProtocolCodec.GetGarageRunToken(run.Id), input.RunToken, StringComparison.Ordinal) &&
                 eventResult is { Type: EventKind.Keypad, Status: EventStatus.Active };
             var entryState = liveKeypadEvent ? KeypadEntryFor(run!, eventResult!) : null;
-            if (entryState is not null && input.Sequence > entryState.Sequence)
+            if (entryState is not null && IsNewerKeypadSequence(input.Sequence, entryState.Sequence))
             {
                 entryState.Sequence = input.Sequence;
                 entryState.Entry = input.Submit ? "" : input.Entry;
@@ -1503,6 +1657,51 @@ public sealed class RunService
                     mac = input.DeviceId,
                     sequence = input.Sequence,
                     answer = input.Entry
+                }, sessionAllowed);
+        }
+    }
+
+    // A keypad's updates count up by one per key, so a slightly lower number is a late, out-of-
+    // order copy. A button that reboots or loses its run status for a moment starts again from
+    // a new random number, usually far lower; that is a fresh start, not an old update, or the
+    // TV would stop showing its typing for the rest of the run.
+    internal const uint KeypadSequenceResetGap = 1_000;
+
+    private static bool IsNewerKeypadSequence(uint sequence, uint last) =>
+        sequence > last || last - sequence > KeypadSequenceResetGap;
+
+    // The shrine repeats its status about once a second; anything older is no longer shown.
+    public const long ArcadeStatusFreshMilliseconds = 4_000;
+    private readonly Dictionary<string, (ArcadeStationStatus Status, long HeardAtMs)> _arcadeStations =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    // Display-only: what the shrine wants the operator to do. Kept in memory, never recorded.
+    public void ReceiveArcadeStationStatus(MasterArcadeStatus status)
+    {
+        lock (_gate)
+        {
+            _arcadeStations[status.DeviceId] = (
+                new ArcadeStationStatus(status.DeviceId, status.Attention, status.Emeralds),
+                _clock.MonotonicMilliseconds);
+        }
+    }
+
+    // The Chaos Heist station sends "S" once all seven emeralds are placed and "F" on the
+    // 20th ring. Both go through the same session, run-token, duplicate, pause, and late-press
+    // checks as a button press, and the reply carries the event state back to the station.
+    public MasterPhysicalPressResult ReceivePhysicalArcadeInput(MasterArcadeInput input, bool sessionAllowed)
+    {
+        lock (_gate)
+        {
+            return ReceivePhysicalSpokeInput(input.BootToken, input.RunToken, input.DeviceId, input.Sequence,
+                input.AgeMilliseconds, MasterProtocolCodec.GetArcadeMessageId(input.RunToken, input.DeviceId, input.Sequence),
+                input.Finish ? "arcade-finish" : "arcade-start", new
+                {
+                    bootToken = input.BootToken,
+                    token = input.RunToken,
+                    mac = input.DeviceId,
+                    sequence = input.Sequence,
+                    signal = input.Finish ? "finish" : "start"
                 }, sessionAllowed);
         }
     }
@@ -1559,7 +1758,7 @@ public sealed class RunService
             if (frozenRun is not null && LatePressElapsed(frozenRun, deviceId, ageMilliseconds) is long lateElapsed &&
                 frozenRun.Events.SingleOrDefault(eventItem =>
                     string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase)) is { } lateEvent &&
-                IsButtonEvent(lateEvent.Type))
+                AcceptsPhysicalInput(lateEvent.Type, type))
             {
                 envelope.ElapsedMilliseconds = lateElapsed;
                 var late = ReceiveCore(envelope, trustedVirtual: true, lateRun: frozenRun);
@@ -1592,10 +1791,12 @@ public sealed class RunService
 
             var eventResult = run.Events.SingleOrDefault(eventItem =>
                 string.Equals(eventItem.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
-            if (eventResult is null || !IsButtonEvent(eventResult.Type))
+            if (eventResult is null || !AcceptsPhysicalInput(eventResult.Type, type))
             {
                 return PhysicalPressResult(RecordRejected(envelope, MessageDisposition.UnknownStation,
-                    "Physical spoke MAC is not assigned to a button or keypad event in this run.", payloadJson), run, deviceId, messageId);
+                    type.StartsWith("arcade-", StringComparison.Ordinal)
+                        ? "Arcade station MAC is not assigned to a magnetic arcade event in this run."
+                        : "Physical spoke MAC is not assigned to a button or keypad event in this run.", payloadJson), run, deviceId, messageId);
             }
 
             var device = _data.Devices.SingleOrDefault(deviceItem =>
@@ -1986,15 +2187,11 @@ public sealed class RunService
             replacedSource.Revision++;
         }
 
-        // Only recording the run on screen advances the on-deck queue; recording an
-        // older run from history must not consume the next competitor.
+        // Only recording the run on screen preselects the next on-deck competitor; recording
+        // an older run from history leaves the selection alone. The entry stays queued (and
+        // on deck on the TV) until that competitor's run actually starts.
         var promotesQueue = _current?.Id == run.Id || (_current is null && _lastDisplayedRun?.Id == run.Id);
         var promoted = promotesQueue ? _data.Queue.OrderBy(item => item.Position).FirstOrDefault() : null;
-        if (promoted is not null)
-        {
-            _data.Queue.Remove(promoted);
-            NormalizeQueue();
-        }
         var selectedCompetitorId = promotesQueue ? promoted?.CompetitorId : _data.SelectedCompetitorId;
         var selectedRunCategory = promotesQueue ? promoted?.Category : _data.SelectedRunCategory;
         var runsToSave = replacedSource is null ? new[] { run } : new[] { replacedSource, run };
@@ -2248,7 +2445,7 @@ public sealed class RunService
                 // A late press counts toward a timed-out run, which stays timed out.
                 reason += " (pressed before time ran out; arrived just after)";
             }
-            else if (run.AllEventsCompleted && run.Events.All(e => IsButtonEvent(e.Type)))
+            else if (run.AllEventsCompleted && run.Events.All(e => IsTimedEvent(e.Type)))
             {
                 if (TryStartBonusGame(run))
                 {
@@ -2392,8 +2589,9 @@ public sealed class RunService
                 return ReplaceBonusTarget(run, now);
             }
 
-            // Missed: the run ends at the moment the window closed.
+            // Missed: the run ends at the moment the window closed, with the time-up buzzer.
             EndBonusRoundAndRun(run, "miss", Math.Max(deadline, run.LastAcceptedInputElapsedMs));
+            SoundCueRequested?.Invoke(SoundCue.TimeUp);
             return true;
         }
     }
@@ -2458,6 +2656,16 @@ public sealed class RunService
             }
 
             _bonusBeatAtMonotonicMs[deviceId] = _clock.MonotonicMilliseconds;
+            // A beating button is clearly taking part, so it counts as an answer to the intro
+            // poll. Each button answers the poll with a single unacknowledged radio packet; if
+            // that one packet was lost, no button had answered and the round lit every event,
+            // virtual tiles included. Beats come several times during the intro, so one lost
+            // packet no longer matters, and a button heard only later joins the next targets.
+            var beatingEvent = run.Events.First(e => string.Equals(e.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase));
+            if (!bonus.RespondingDeviceIds.Contains(beatingEvent.DeviceId, StringComparer.OrdinalIgnoreCase))
+            {
+                bonus.RespondingDeviceIds.Add(beatingEvent.DeviceId);
+            }
             if (bonus is { Phase: BonusGamePhase.Target, TargetAwaitingReady: true } &&
                 string.Equals(bonus.TargetDeviceId, deviceId, StringComparison.OrdinalIgnoreCase) &&
                 shownSequence == (uint)bonus.Sequence)
@@ -2501,6 +2709,7 @@ public sealed class RunService
         var bonus = run.BonusGame!;
         var settings = run.Edition.BonusGame ?? new BonusGameSettings();
         var candidates = run.Events
+            .Where(e => IsButtonEvent(e.Type))
             .Where(e => bonus.RespondingDeviceIds.Count == 0 ||
                 bonus.RespondingDeviceIds.Contains(e.DeviceId, StringComparer.OrdinalIgnoreCase))
             .Where(e => !IsBonusBeatCapable(e.DeviceId) || IsBonusButtonAlive(e.DeviceId, BonusButtonAliveMilliseconds))
@@ -2809,6 +3018,18 @@ public sealed class RunService
             }
             HandleOfficialConflict(run, candidate, request.ReplaceExistingOfficial, out var replaced);
 
+            // An official redo changed to another run type no longer replaces anything: the
+            // result it had replaced counts again (as when the redo is deleted).
+            RunRecord? restoredSource = null;
+            if (run.Category == RunCategory.Official && candidate.Category != RunCategory.Official &&
+                candidate.SupersedesRunId is string sourceId)
+            {
+                restoredSource = candidate.SupersededByRunId is null
+                    ? _data.Runs.SingleOrDefault(r => r.Id == sourceId && r.SupersededByRunId == run.Id && !r.IsDeleted)
+                    : null;
+                candidate.SupersedesRunId = null;
+            }
+
             var before = Serialize(run);
             candidate.Revision = run.Revision + 1;
             var after = Serialize(candidate);
@@ -2821,9 +3042,17 @@ public sealed class RunService
                 AfterJson = after
             };
             ReplaceRun(run, candidate);
+            if (restoredSource is not null)
+            {
+                restoredSource.Status = restoredSource.SupersededFromStatus ?? InferStatusBeforeSupersede(restoredSource);
+                restoredSource.SupersededByRunId = null;
+                restoredSource.SupersededFromStatus = null;
+                restoredSource.Revision++;
+            }
+            var otherRuns = replaced is not null && replaced.Id != candidate.Id ? replaced : restoredSource;
             try
             {
-                _store.AddEdit(candidate, edit, replaced is not null && replaced.Id != candidate.Id ? [replaced] : null);
+                _store.AddEdit(candidate, edit, otherRuns is null ? null : [otherRuns]);
             }
             catch
             {
@@ -3125,6 +3354,13 @@ public sealed class RunService
                 reason = "Arcade completion timestamp precedes its start.";
                 return MessageDisposition.StaleTimestamp;
             }
+            // Same double-press guard as a button finish. It matters for the operator's
+            // fallback tile: a double tap would otherwise score a near-zero time.
+            if (envelope.ElapsedMilliseconds - start < FinishPressLockoutMilliseconds)
+            {
+                reason = "Arcade finish ignored: it came too soon after the start (a double tap).";
+                return MessageDisposition.TooSoon;
+            }
 
             eventResult.FinishElapsedMs = envelope.ElapsedMilliseconds;
             eventResult.Status = EventStatus.Completed;
@@ -3196,7 +3432,7 @@ public sealed class RunService
         }
 
         var chosen = candidates[Random.Shared.Next(candidates.Count)];
-        var attempt = new KeypadAttemptRecord { Prompt = chosen.Prompt, Answer = chosen.Answer, DrawnElapsedMs = elapsedMs };
+        var attempt = new KeypadAttemptRecord { Prompt = chosen.Prompt, Answer = chosen.Answer, Hint = chosen.Hint, ColoredDisc = chosen.ColoredDisc, DrawnElapsedMs = elapsedMs };
         progress.Challenges.Add(attempt);
         eventResult.Prompt = attempt.Prompt;
         SoundCueRequested?.Invoke(SoundCue.KeypadMessage);
@@ -3234,6 +3470,7 @@ public sealed class RunService
             eventResult.Status = EventStatus.Completed;
             eventResult.Score = CalculateScore(eventResult, run.Edition);
             _keypadEntries.Remove(eventResult.EventId);
+            SoundCueRequested?.Invoke(SoundCue.KeypadComplete);
             return required == 1
                 ? $"{who} '{current.Prompt}'; the keypad event is complete."
                 : $"{who} '{current.Prompt}' ({solved} of {required}); the keypad event is complete.";
@@ -3334,9 +3571,17 @@ public sealed class RunService
         }
 
         _clockAnchorMilliseconds = now;
+        var limitMs = _current.Edition.DurationLimitSeconds * 1000L;
+        var remainingBefore = limitMs - _current.ActiveElapsedMs;
         _current.ActiveElapsedMs += delta;
-        if (_current.ActiveElapsedMs >= _current.Edition.DurationLimitSeconds * 1000L)
+        AnnounceTimeRemaining(remainingBefore, limitMs - _current.ActiveElapsedMs);
+        AnnounceKeypadHint(_current, _current.ActiveElapsedMs - delta, _current.ActiveElapsedMs);
+        if (_current.ActiveElapsedMs >= limitMs)
         {
+            if (_current.ActiveElapsedMs - limitMs <= LateTimeCalloutLimitMilliseconds)
+            {
+                SoundCueRequested?.Invoke(SoundCue.TimeUp);
+            }
             TimeoutCurrent();
         }
         else if (persist)
@@ -3349,6 +3594,57 @@ public sealed class RunService
             {
                 ReloadInMemoryAfterPersistenceFailure();
                 throw;
+            }
+        }
+    }
+
+    // Time-remaining voice callouts, each played as the clock passes its moment. The clock is
+    // ticked every 15 ms by RunTimingHostedService; a moment passed by longer than the late
+    // limit (a stall, or a run shorter than the callout) is skipped rather than played late.
+    private const long LateTimeCalloutLimitMilliseconds = 1_000;
+    private static readonly (long RemainingMs, SoundCue Cue)[] TimeCallouts =
+    [
+        (240_000, SoundCue.FourMinutesRemaining),
+        (180_000, SoundCue.ThreeMinutesRemaining),
+        (120_000, SoundCue.TwoMinutesRemaining),
+        (60_000, SoundCue.OneMinuteRemaining),
+        (5_000, SoundCue.FinalCountdown)
+    ];
+
+    private void AnnounceTimeRemaining(long remainingBefore, long remainingNow)
+    {
+        // Only the latest callout passed in this step plays, so a stall never stacks voices.
+        for (var index = TimeCallouts.Length - 1; index >= 0; index--)
+        {
+            var (remainingMs, cue) = TimeCallouts[index];
+            if (remainingBefore > remainingMs && remainingNow <= remainingMs)
+            {
+                if (remainingMs - remainingNow <= LateTimeCalloutLimitMilliseconds)
+                {
+                    SoundCueRequested?.Invoke(cue);
+                }
+                return;
+            }
+        }
+    }
+
+    // A short bong as the clock passes the moment an unsolved keypad message's hint appears on
+    // the TV (see BuildKeypadChallenge), skipped like a late time callout.
+    private void AnnounceKeypadHint(RunRecord run, long elapsedBefore, long elapsedNow)
+    {
+        foreach (var eventResult in run.Events)
+        {
+            if (eventResult.Type != EventKind.Keypad || eventResult.Status != EventStatus.Active
+                || eventResult.Keypad?.Current is not { Hint: not null } current)
+            {
+                continue;
+            }
+
+            var hintAt = current.DrawnElapsedMs + KeypadHintDelayMilliseconds;
+            if (elapsedBefore < hintAt && elapsedNow >= hintAt && elapsedNow - hintAt <= LateTimeCalloutLimitMilliseconds)
+            {
+                SoundCueRequested?.Invoke(SoundCue.KeypadHint);
+                return;
             }
         }
     }
@@ -3717,7 +4013,7 @@ public sealed class RunService
             result.Score = CalculateScore(result, candidate.Edition);
         }
 
-        if (candidate.AllEventsCompleted && candidate.Events.All(e => IsButtonEvent(e.Type)))
+        if (candidate.AllEventsCompleted && candidate.Events.All(e => IsTimedEvent(e.Type)))
         {
             // A correction made during the bonus round leaves the round running.
             if (candidate.BonusGame is not { Phase: not BonusGamePhase.Ended } ||
@@ -3898,7 +4194,7 @@ public sealed class RunService
         if (snapshot.Events.Any(e => e.Type == EventKind.Keypad) && _keypadChallenges.Challenges.Count > 0)
         {
             snapshot.KeypadChallenges = _keypadChallenges.Challenges
-                .Select(challenge => new KeypadChallengeDefinition { Prompt = challenge.Prompt, Answer = challenge.Answer })
+                .Select(challenge => new KeypadChallengeDefinition { Prompt = challenge.Prompt, Answer = challenge.Answer, Hint = challenge.Hint, ColoredDisc = challenge.ColoredDisc })
                 .ToList();
         }
         return new RunRecord
@@ -4071,8 +4367,11 @@ public sealed class RunService
             })
             .ToList();
 
-        rows = rows.OrderBy(row => row.Category switch { RunCategory.Playoff => 0, RunCategory.Official => 1, _ => 2 })
+        // Playoffs are their own standings. Exhibition runs sit among the official results by
+        // points (after an official run on the same points) instead of in a block below them.
+        rows = rows.OrderBy(row => row.Category == RunCategory.Playoff ? 0 : 1)
             .ThenByDescending(row => row.Points)
+            .ThenBy(row => row.Category == RunCategory.Exhibition ? 1 : 0)
             .ThenBy(row => row.CompetitorName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -4090,26 +4389,33 @@ public sealed class RunService
             }
         }
 
-        // Ranks restart within each category (playoff, official, exhibition), since each
-        // category is shown as its own standings; tied points share a rank.
+        // Ranks restart for the official standings after the playoff ones; tied points share a
+        // rank. Exhibition rows get no rank and are skipped, so official ranks run 1, 2, 3.
         var lastPoints = int.MinValue;
-        RunCategory? lastCategory = null;
+        var lastPlayoff = (bool?)null;
         var lastRank = 0;
-        var categoryStart = 0;
-        for (var index = 0; index < rows.Count; index++)
+        var ranked = 0;
+        foreach (var row in rows)
         {
-            if (rows[index].Category != lastCategory)
+            var playoff = row.Category == RunCategory.Playoff;
+            if (playoff != lastPlayoff)
             {
-                categoryStart = index;
-                lastCategory = rows[index].Category;
+                lastPlayoff = playoff;
                 lastPoints = int.MinValue;
+                ranked = 0;
             }
-            if (rows[index].Points != lastPoints)
+            if (row.Category == RunCategory.Exhibition)
             {
-                lastRank = index - categoryStart + 1;
-                lastPoints = rows[index].Points;
+                row.Rank = null;
+                continue;
             }
-            rows[index].Rank = lastRank;
+            ranked++;
+            if (row.Points != lastPoints)
+            {
+                lastRank = ranked;
+                lastPoints = row.Points;
+            }
+            row.Rank = lastRank;
         }
         return rows;
     }
@@ -4147,7 +4453,8 @@ public sealed class RunService
         GraceSeconds = eventDefinition.GraceSeconds,
         Prompt = eventDefinition.Prompt,
         Answer = eventDefinition.Answer,
-        RequiredSuccesses = eventDefinition.RequiredSuccesses
+        RequiredSuccesses = eventDefinition.RequiredSuccesses,
+        Disabled = eventDefinition.Disabled
     };
 
     private EditionSetup ToSetup(EditionDefinition edition) => new()
@@ -4161,21 +4468,6 @@ public sealed class RunService
         KeypadMessageSource = _keypadChallenges.Source,
         KeypadMessageError = _keypadChallenges.Error
     };
-
-    private static bool SameEventSetup(IReadOnlyList<EventDefinition> left, IReadOnlyList<EventDefinition> right) =>
-        left.Count == right.Count && left.Zip(right).All(pair =>
-            string.Equals(pair.First.EventId, pair.Second.EventId, StringComparison.Ordinal) &&
-            string.Equals(pair.First.Name, pair.Second.Name, StringComparison.Ordinal) &&
-            string.Equals(pair.First.DeviceId, pair.Second.DeviceId, StringComparison.OrdinalIgnoreCase) &&
-            pair.First.Type == pair.Second.Type &&
-            pair.First.BasePoints == pair.Second.BasePoints &&
-            pair.First.MinimumPoints == pair.Second.MinimumPoints &&
-            pair.First.DecayPoints == pair.Second.DecayPoints &&
-            pair.First.DecayEverySeconds == pair.Second.DecayEverySeconds &&
-            pair.First.GraceSeconds == pair.Second.GraceSeconds &&
-            string.Equals(pair.First.Prompt, pair.Second.Prompt, StringComparison.Ordinal) &&
-            string.Equals(pair.First.Answer, pair.Second.Answer, StringComparison.Ordinal) &&
-            pair.First.RequiredSuccesses == pair.Second.RequiredSuccesses);
 
     private static string RequireReason(string reason) => string.IsNullOrWhiteSpace(reason) ? throw new CommandException("A correction reason is required.") : reason.Trim();
     private static string Serialize<T>(T value) => JsonSerializer.Serialize(value, JsonDefaults.Options);

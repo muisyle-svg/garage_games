@@ -106,6 +106,7 @@
     queueForm: $("on-deck-form"),
     queueAdd: $("add-to-queue-button"),
     queueCount: $("on-deck-count"),
+    queueShuffle: $("shuffle-queue-button"),
     queueList: $("on-deck-list"),
     addForm: $("add-competitor-form"),
     newCompetitor: $("new-competitor-name"),
@@ -175,6 +176,8 @@
     historyRecord: $("record-history-run"),
     historyDelete: $("delete-history-run"),
     historySearch: $("history-search"),
+    historyEditionFilter: $("history-edition-filter"),
+    historyRunType: $("history-run-type"),
     historyCategoryFilter: $("history-category-filter"),
     historyStatusFilter: $("history-status-filter"),
     historyClearFilters: $("history-clear-filters"),
@@ -197,6 +200,7 @@
     setupContent: $("setup-content"),
     setupEditionName: $("setup-edition-name"),
     setupBonus: $("setup-bonus"),
+    setupScoring: $("setup-scoring"),
     setupScanAll: $("setup-scan-all"),
     setupSave: $("setup-save"),
     setupSaveBottom: $("setup-save-bottom"),
@@ -549,6 +553,7 @@
     ui.setupAddEvent.disabled = busy;
     ui.setupScanAll.disabled = busy || state.setupScanLoading || state.setupDirty;
     ui.setupEditionName.disabled = busy;
+    ui.setupScoring?.querySelectorAll("input").forEach((input) => { input.disabled = busy; });
     ui.setupEventList.querySelectorAll("input").forEach((input) => { input.disabled = busy; });
     ui.setupEventList.querySelectorAll("button[data-setup-action]").forEach((button) => {
       const action = button.dataset.setupAction;
@@ -866,7 +871,7 @@
       const kind = make("label", "setup-event-kind");
       kind.append(make("span", "", "Event type"));
       const kindSelect = make("select");
-      const kindOptions = [["standard", "Regular"], ["keypad", "Keypad code"]];
+      const kindOptions = [["standard", "Regular"], ["keypad", "Keypad code"], ["magneticArcade", "Chaos Heist (emeralds + rings)"]];
       if (!kindOptions.some(([value]) => value === event.type)) kindOptions.push([event.type, event.type === "magneticArcade" ? "Magnetic arcade" : titleCase(event.type)]);
       kindOptions.forEach(([value, label]) => {
         const option = make("option", "", label);
@@ -931,8 +936,20 @@
       readiness.appendChild(checkedLabel);
       deviceRow.append(assignmentLabel, assignNext, unassign, identify, readiness);
 
+      // Turning an event off leaves it out of new runs only; runs already played keep it.
+      const play = make("label", "setup-event-play");
+      const playInput = make("input");
+      playInput.type = "checkbox";
+      playInput.checked = !event.disabled;
+      playInput.dataset.setupField = "enabled";
+      playInput.dataset.setupEventId = event.eventId;
+      playInput.setAttribute("aria-label", `Play ${event.name || event.eventId} in new runs`);
+      play.append(playInput, make("span", "", "Play this event"),
+        make("small", "", event.disabled ? "Off: new runs skip it; runs already played keep their points for it." : "New runs include it."));
+      row.classList.toggle("is-disabled", Boolean(event.disabled));
+
       const internalId = make("p", "setup-event-id", `Event ID · ${event.eventId}`);
-      row.append(top, scoring, deviceRow);
+      row.append(top, play, scoring, deviceRow);
       if (event.type === "keypad") row.appendChild(setupKeypadFields(event));
       row.appendChild(internalId);
       ui.setupEventList.appendChild(row);
@@ -953,7 +970,9 @@
     if (!ui.setupPreviewList) return;
     const events = state.setupDraft?.events || [];
     ui.setupPreviewList.replaceChildren();
-    ui.setupPreviewSummary.textContent = `${events.length} ${events.length === 1 ? "event" : "events"} · order shown is the scorekeeper button order. Changes here are previews until you save setup.`;
+    const playing = events.filter((event) => !event.disabled).length;
+    const off = events.length - playing;
+    ui.setupPreviewSummary.textContent = `${playing} ${playing === 1 ? "event" : "events"} in new runs${off ? ` (${off} turned off)` : ""} · order shown is the scorekeeper button order. Changes here are previews until you save setup.`;
     events.forEach((event, index) => {
       const effectiveNumber = (value, fallback) => {
         const candidate = value ?? fallback;
@@ -967,8 +986,8 @@
       const firstDrop = grace > 0 ? grace : interval;
       const deviceId = setupTools.hardwareId(event.assignmentValue || "");
       const kind = ({ standard: "Regular", keypad: "Keypad", magneticArcade: "Arcade" })[event.type] || titleCase(event.type);
-      const details = `${kind} · ${starting ?? "—"} start · −${decay ?? "—"} at ${firstDrop ?? "—"}s, then every ${interval ?? "—"}s · min ${minimum ?? "—"} · ${deviceId ? `Button ${deviceId}` : "Virtual only"}`;
-      const row = make("li", "setup-preview-item");
+      const details = `${event.disabled ? "Off · " : ""}${kind} · ${starting ?? "—"} start · −${decay ?? "—"} at ${firstDrop ?? "—"}s, then every ${interval ?? "—"}s · min ${minimum ?? "—"} · ${deviceId ? `Button ${deviceId}` : "Virtual only"}`;
+      const row = make("li", `setup-preview-item${event.disabled ? " is-disabled" : ""}`);
       row.append(make("span", "setup-preview-order", String(index + 1)), make("span", "setup-preview-event"));
       row.querySelector(".setup-preview-event").append(make("strong", "", event.name || `Event ${index + 1}`), make("small", "", details));
       ui.setupPreviewList.appendChild(row);
@@ -988,6 +1007,7 @@
     }
     if (document.activeElement !== ui.setupEditionName) ui.setupEditionName.value = state.setupDraft.name;
     renderSetupBonus();
+    renderSetupScoring();
     renderSetupEvents();
     renderSetupDiscovery();
     renderSetupControls();
@@ -1017,6 +1037,30 @@
     });
   }
 
+  function renderSetupScoring() {
+    const defaults = state.setupDraft?.scoringDefaults;
+    if (!ui.setupScoring || !defaults) return;
+    ui.setupScoring.querySelectorAll("input[data-scoring-field]").forEach((input) => {
+      if (document.activeElement !== input) input.value = defaults[input.dataset.scoringField] ?? "";
+    });
+  }
+
+  // Events that inherit a default show the new value as it is typed.
+  function onSetupScoringInput(event) {
+    const input = event.target.closest("input[data-scoring-field]");
+    if (!input || !state.setupDraft) return;
+    setupTools.updateScoringDefault(state.setupDraft, input.dataset.scoringField, input.value);
+    ui.setupEventList.querySelectorAll(".setup-event-row").forEach((row) => {
+      const target = setupEvent(row.dataset.eventId);
+      if (!target) return;
+      row.querySelectorAll("input[data-setup-field]").forEach((field) => {
+        const name = field.dataset.setupField;
+        if (target[`${name}Inherited`] && document.activeElement !== field) field.value = target[name] ?? "";
+      });
+    });
+    markSetupChanged();
+  }
+
   function onSetupBonusInput(event) {
     const input = event.target.closest("input[data-bonus-field]");
     const bonus = state.setupDraft?.bonusGame;
@@ -1037,6 +1081,12 @@
     if (!input) return;
     const target = setupEvent(input.dataset.setupEventId);
     if (!target) return;
+    if (input.dataset.setupField === "enabled") {
+      target.disabled = !input.checked;
+      markSetupChanged();
+      renderSetupEvents();
+      return;
+    }
     if (input.dataset.setupField === "name") target.name = input.value;
     else if (input.dataset.setupField === "assignment") target.assignmentValue = input.value;
     else if (input.dataset.setupField === "requiredSuccesses") target.requiredSuccesses = input.value;
@@ -1422,18 +1472,12 @@
     return Number(event.hits || 0);
   }
 
+  // A run shows the events it was played with: Setup can change between runs (a new button,
+  // an event turned off), and the last run stays on the scorecard after it is recorded.
   function currentEditionEvents(run) {
     const configured = state.snapshot?.events || [];
-    if (!run) return configured.map(emptyEvent);
-    const byId = new Map((run.events || []).map((event) => [event.eventId, event]));
-    return configured.map((definition) => ({
-      ...emptyEvent(definition),
-      ...(byId.get(definition.eventId) || {}),
-      eventId: definition.eventId,
-      name: definition.name,
-      deviceId: definition.deviceId,
-      type: definition.type
-    }));
+    if (!run?.events?.length) return configured.map(emptyEvent);
+    return run.events.map((event) => ({ ...emptyEvent(event), ...event }));
   }
 
   function eventRosterSignature() {
@@ -1787,7 +1831,7 @@
   }
 
   function isUndoableEventType(event) {
-    return ["standard", "keypad"].includes(String(event.type || "standard").toLowerCase());
+    return ["standard", "keypad", "magneticarcade"].includes(String(event.type || "standard").toLowerCase());
   }
 
   // Mirrors RunService.IsUndoablePress: the start press while running, or the finishing
@@ -1801,6 +1845,11 @@
       const lastSolved = solved[solved.length - 1];
       if (lastSolved) return ["active", "completed"].includes(status) && lastSolved.solvedByMessageId === message.messageId;
       return status === "active" && message.type === "event-press" && event.startElapsedMs === elapsed && event.finishElapsedMs == null;
+    }
+    if (String(event.type || "").toLowerCase() === "magneticarcade") {
+      return status === "completed"
+        ? message.type === "arcade-finish" && event.finishElapsedMs === elapsed
+        : status === "active" && message.type === "arcade-start" && event.startElapsedMs === elapsed && event.finishElapsedMs == null;
     }
     if (status === "completed") {
       return message.type === "event-press" && event.finishElapsedMs === elapsed && event.lastSignalElapsedMs === elapsed;
@@ -1988,6 +2037,14 @@
         actionHint = `Done · ${formatDuration(event.finishElapsedMs - event.startElapsedMs)}`;
       }
       if (!identificationMode && useVirtual && event.status !== "completed") actionHint = `Use virtual · ${actionHint}`;
+      // The Chaos Heist shrine's request (clear it, or replace one emerald) replaces the hint
+      // in the same slot, so the tile never changes size.
+      const arcadeNotice = !identificationMode && event.type === "magneticArcade" && event.status !== "completed"
+        ? arcadeAttention(deviceId) : "";
+      if (arcadeNotice) {
+        actionHint = arcadeNotice;
+        button.classList.add("is-arcade-warning");
+      }
       if (bonusRunning) actionHint = bonusName(run);
       button.setAttribute("aria-label", identificationMode
         ? `${event.name}: ${actionHint}.`
@@ -2005,6 +2062,8 @@
       // height and a start press never shifts the rows below.
       button.append(virtualTileResult(run, event, unsaved));
       if (event.status === "completed") button.classList.add("is-complete");
+      else if (run && event.status === "active") button.classList.add("is-in-progress");
+      else if (run) button.classList.add("is-unstarted");
       if (unsaved) button.classList.add("is-unsaved");
       button.append(metadata);
       button.addEventListener("click", () => identificationMode
@@ -2063,7 +2122,8 @@
     }
     state.bonusPollInFlight = true;
     try {
-      const board = await request("/api/scoreboard", { cache: "no-store" });
+      // Timed out so one request that never answers can't hold bonusPollInFlight forever.
+      const board = await request("/api/scoreboard", { cache: "no-store", signal: AbortSignal.timeout(4000) });
       const bonus = board?.currentRun?.bonusGame || null;
       state.bonusLive = bonus ? { ...bonus, receivedAt: performance.now(), running: board.currentRun.status === "active" } : null;
       renderBonusLive();
@@ -2162,6 +2222,25 @@
       result.classList.add("is-running");
     }
     return result;
+  }
+
+  // The latest status heard from the Chaos Heist shrine with this MAC, if any.
+  function arcadeStation(deviceId) {
+    if (!deviceId) return null;
+    return (state.snapshot?.arcadeStations || [])
+      .find((item) => setupTools.hardwareId(item?.deviceId || "") === deviceId) || null;
+  }
+
+  // What the Chaos Heist shrine with this MAC is asking the operator to do, if anything.
+  function arcadeAttention(deviceId) {
+    const station = arcadeStation(deviceId);
+    // Short enough for the one-line hint; the tile's tooltip repeats it.
+    if (station?.attention === "replace") return "Lift & replace 1 emerald";
+    if (station?.attention === "clear") {
+      const count = Number(station.emeralds) || 0;
+      return `Clear shrine · ${count} emerald${count === 1 ? "" : "s"} on`;
+    }
+    return "";
   }
 
   function physicalReadinessKey(event) {
@@ -2282,7 +2361,9 @@
   function renderQueue() {
     const queue = (state.snapshot?.queue || []).slice().sort((a, b) => Number(a.position) - Number(b.position));
     ui.queueCount.textContent = `${queue.length} queued`;
-    const signature = `${state.busy}:${queue.map((item) => `${item.id}:${item.position}:${item.competitorId}:${item.category}`).join("|")}`;
+    // Always shown (so nothing moves); only usable with two or more to put in order.
+    ui.queueShuffle.disabled = state.busy || queue.length < 2;
+    const signature =`${state.busy}:${queue.map((item) => `${item.id}:${item.position}:${item.competitorId}:${item.category}`).join("|")}`;
     if (signature === state.queueSignature) return;
     ui.queueList.replaceChildren();
     if (!queue.length) {
@@ -2365,7 +2446,8 @@
     rows.forEach((item) => {
       const row = make("tr");
       row.append(
-        make("td", "leaderboard-rank", String(item.rank)),
+        // Exhibition rows sit among the official ones by points but have no rank.
+        make("td", "leaderboard-rank", item.rank == null ? "" : String(item.rank)),
         make("td", "leaderboard-player", item.displayName || item.competitorName),
         make("td", `leaderboard-category category-${String(item.category).toLowerCase()}`, categoryLabel(item.category)),
         make("td", "leaderboard-points", String(item.points))
@@ -2576,6 +2658,56 @@
     });
   }
 
+  // Changes a saved run's type (Official, Playoff, Exhibition) after asking. Making it Official
+  // when the player already has an official result (under the same rules) replaces that one;
+  // taking an official redo off Official lets the result it replaced count again.
+  async function changeHistoryRunType() {
+    const run = (state.snapshot?.history || []).find((item) => item.id === state.selectedHistoryId);
+    const category = ui.historyRunType.value;
+    if (!run || !category || category === run.category) return;
+    const name = competitorName(run.competitorId);
+    const from = categoryLabel(run.category);
+    const to = categoryLabel(category);
+    let replaceExistingOfficial = false;
+    let message = `Change ${name}'s run from ${shortDate(run.createdAt)} from ${from} to ${to}?`;
+    if (category === "official") {
+      const existing = (state.snapshot?.history || []).find((item) =>
+        item.id !== run.id && item.competitorId === run.competitorId && item.editionId === run.editionId &&
+        item.category === "official" && item.isRecorded && !item.supersededByRunId &&
+        item.status !== "aborted" && item.status !== "superseded");
+      if (existing) {
+        replaceExistingOfficial = true;
+        message += `\n\n${name} already has an official result (${tableTotal(existing)} pts, ${shortDate(existing.createdAt)}). ` +
+          "This run replaces it as the official result, even if it scores lower; the other run is kept in history as replaced.";
+      }
+    } else if (run.category === "official" && run.supersedesRunId) {
+      message += `\n\nThis run had replaced an earlier official result for ${name}; that result counts as official again.`;
+    } else if (run.category === "official") {
+      message += `\n\n${name} will no longer have an official result from this run.`;
+    }
+    if (!window.confirm(message)) {
+      ui.historyRunType.value = run.category;
+      return;
+    }
+    await performAction(async () => {
+      await request(`/api/runs/${encodeURIComponent(run.id)}/edit`, {
+        method: "PUT",
+        body: JSON.stringify({
+          expectedRevision: run.revision,
+          reason: `Changed the run type from ${from} to ${to}.`,
+          category,
+          replaceExistingOfficial,
+          events: []
+        })
+      });
+      state.historySignature = "";
+      state.historyTableKey = null;
+    }, `${name}'s run is now ${to}.`);
+    // A failed change leaves the select showing the run's real type again.
+    const latest = (state.snapshot?.history || []).find((item) => item.id === run.id);
+    if (latest) ui.historyRunType.value = latest.category;
+  }
+
   async function deleteHistoricalRun() {
     const run = (state.snapshot?.history || []).find((item) => item.id === state.selectedHistoryId);
     if (!run) return false;
@@ -2603,32 +2735,83 @@
   function historyFilter() {
     return {
       query: normalizedCompetitorName(ui.historySearch.value).toLowerCase(),
+      edition: ui.historyEditionFilter.value,
       category: ui.historyCategoryFilter.value,
       status: ui.historyStatusFilter.value
     };
   }
 
   function filterHistory(history, filter) {
+    const currentEditionId = state.snapshot?.editionId;
     return history.filter((run) =>
       (!filter.query || normalizedCompetitorName(competitorName(run.competitorId)).toLowerCase().includes(filter.query)) &&
+      (!filter.edition || run.editionId === (filter.edition === "current" ? currentEditionId : filter.edition)) &&
       (!filter.category || run.category === filter.category) &&
       (!filter.status || (filter.status === "recorded") === Boolean(run.isRecorded)));
+  }
+
+  function shortDay(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "?" : date.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+
+  // Each Setup save starts a new rules edition (usually with the same name), so earlier ones
+  // are told apart by when their runs were played. "Current rules" follows the edition in use,
+  // even if Setup is saved again while this page is open.
+  function renderHistoryEditionOptions(history) {
+    const currentEditionId = state.snapshot?.editionId;
+    const editions = new Map();
+    history.forEach((run) => {
+      const edition = editions.get(run.editionId) ||
+        { id: run.editionId, name: run.edition?.name || "Rules", first: run.createdAt, last: run.createdAt, count: 0 };
+      edition.count += 1;
+      if (run.createdAt < edition.first) edition.first = run.createdAt;
+      if (run.createdAt > edition.last) edition.last = run.createdAt;
+      editions.set(run.editionId, edition);
+    });
+    const runs = (count) => `${count} run${count === 1 ? "" : "s"}`;
+    const current = editions.get(currentEditionId);
+    const options = [
+      ["current", `Current rules · ${runs(current?.count || 0)}`],
+      ["", `All rules editions · ${runs(history.length)}`],
+      ...[...editions.values()]
+        .filter((edition) => edition.id !== currentEditionId)
+        .sort((a, b) => String(b.last).localeCompare(String(a.last)))
+        .map((edition) => {
+          const first = shortDay(edition.first);
+          const last = shortDay(edition.last);
+          return [edition.id, `${edition.name} · ${first === last ? first : `${first} – ${last}`} · ${runs(edition.count)}`];
+        })
+    ];
+    const key = JSON.stringify(options);
+    if (key === state.historyEditionOptionsKey) return;
+    state.historyEditionOptionsKey = key;
+    const selected = ui.historyEditionFilter.value;
+    ui.historyEditionFilter.replaceChildren(...options.map(([value, label]) => {
+      const option = make("option", "", label);
+      option.value = value;
+      return option;
+    }));
+    // An edition that no longer has runs (all deleted) falls back to the current rules.
+    ui.historyEditionFilter.value = options.some(([value]) => value === selected) ? selected : "current";
   }
 
   function renderHistory() {
     renderDeletedRuns();
     const allHistory = state.snapshot?.history || [];
+    renderHistoryEditionOptions(allHistory);
     const filter = historyFilter();
-    const filtering = Boolean(filter.query || filter.category || filter.status);
+    // Showing the current rules is the default, not a filter to clear.
+    const filtering = Boolean(filter.query || filter.category || filter.status || filter.edition !== "current");
     const history = filterHistory(allHistory, filter);
-    ui.historyCount.textContent = filtering
+    ui.historyCount.textContent = history.length !== allHistory.length
       ? `${history.length} of ${allHistory.length} ${allHistory.length === 1 ? "run" : "runs"}`
       : `${allHistory.length} ${allHistory.length === 1 ? "run" : "runs"}`;
     ui.historyClearFilters.hidden = !filtering;
     if (!history.some((run) => run.id === state.selectedHistoryId)) {
       state.selectedHistoryId = history[0]?.id || null;
     }
-    const signature = `${filter.query}|${filter.category}|${filter.status}|` +
+    const signature = `${filter.query}|${filter.edition}|${filter.category}|${filter.status}|` +
       history.map((run) => `${run.id}:${run.revision}:${run.status}`).join("|");
     if (signature !== state.historySignature) {
       ui.historyList.replaceChildren();
@@ -2670,6 +2853,8 @@
       ui.historyMeta.textContent = "Choose a history entry to review or correct its event times and points.";
       ui.historyRecord.disabled = true;
       ui.historyDelete.disabled = true;
+      ui.historyRunType.disabled = true;
+      ui.historyRunType.title = "";
       if (state.historyTableKey !== "no-history") {
         renderScoreTable(null, ui.historyBody, "history", false);
         state.historyTableKey = "no-history";
@@ -2695,6 +2880,17 @@
     // The run in progress is discarded from the scorekeeping tab instead.
     ui.historyDelete.disabled = state.busy || isLiveLock(selected);
     ui.historyDelete.title = isLiveLock(selected) ? "The run in progress can't be deleted; use Discard on the scorekeeping tab." : "";
+    // The run type changes on its own (it asks first), separately from the scorecard edits.
+    const runTypeBlock = isLiveLock(selected)
+      ? "The run in progress keeps its type; change it here once it has finished."
+      : selected.status === "superseded"
+        ? "This result was replaced by a later official run."
+        : hasDrafts(selected.id) || hasBonusDraft(selected.id)
+          ? "Save or discard the scorecard edits first."
+          : "";
+    if (document.activeElement !== ui.historyRunType) ui.historyRunType.value = selected.category;
+    ui.historyRunType.disabled = state.busy || Boolean(runTypeBlock);
+    ui.historyRunType.title = runTypeBlock || "Change this run's type (it asks first)";
   }
 
   function shortDate(value) {
@@ -2744,7 +2940,8 @@
     ui.pause.textContent = run?.status === "paused" ? "Resume" : "Pause";
     const undoable = undoableEventPress(run);
     ui.undoPress.disabled = state.busy || !undoable;
-    const undoneKeypadCode = undoable && undoable.message.type !== "event-press";
+    const undoneKeypadCode = undoable && String(undoable.event.type).toLowerCase() === "keypad" &&
+      undoable.message.type !== "event-press";
     ui.undoDetail.textContent = !undoable
       ? "No event press to undo."
       : undoneKeypadCode
@@ -2895,10 +3092,32 @@
     );
   }
 
+  // Before a new run, warn when a Chaos Heist shrine still has emeralds on it: the event
+  // can't start from the shrine until it reads empty. The operator can still go ahead.
+  function confirmShrinesClear(verb) {
+    const lines = (state.snapshot?.events || [])
+      .filter((event) => event.type === "magneticArcade")
+      .map((event) => {
+        const station = arcadeStation(setupTools.hardwareId(event.deviceId || ""));
+        if (station?.attention !== "clear") return "";
+        const count = Number(station.emeralds) || 0;
+        return `${event.name}: ${count} Chaos Emerald${count === 1 ? " is" : "s are"} still on the shrine.`;
+      })
+      .filter(Boolean);
+    if (!lines.length) return true;
+    return window.confirm(
+      `${lines.join("\n")}\n\n` +
+      "Take them all off before the competitor gets there. The event can't start from the shrine until it reads empty.\n\n" +
+      `${verb} the run anyway?`
+    );
+  }
+
   async function startRun() {
     const current = state.snapshot?.currentRun;
     const redo = current?.status === "armed" ? null : confirmOfficialRedo(ui.competitor.value, ui.category.value);
     if (redo === false) return false;
+    // An armed run was already checked when it was armed.
+    if (current?.status !== "armed" && !confirmShrinesClear("Start")) return false;
     const started = await masterActions.startVirtually(request, {
       master: state.master,
       currentRun: current,
@@ -2927,6 +3146,7 @@
   async function armPhysicalRun() {
     const redo = confirmOfficialRedo(ui.competitor.value, ui.category.value);
     if (redo === false) return false;
+    if (!confirmShrinesClear("Arm")) return false;
     state.armScanRequestVersion += 1;
     state.armScanPending = true;
     state.armScanAfterSnapshotRequestId = null;
@@ -2979,6 +3199,18 @@
       }, `${bonusName(run)} hit on ${event.name}.`);
       void pollBonusLive();
       return;
+    }
+    // The Chaos Heist shrine starts and finishes its own event. While it is responding, a tap
+    // here is an override, so make sure it's meant (a stray tap would start the clock before
+    // the competitor gets there, or end the event mid-rings and play the victory).
+    if (event.type === "magneticArcade" && event.status !== "completed" && physicalReadiness(event).key === "responding") {
+      const finishing = event.status === "active";
+      const confirmed = window.confirm(finishing
+        ? `Finish ${event.name} now from the scorekeeper?\n\n` +
+          "The shrine finishes it by itself at the 20th ring. Finishing here stops its clock now and plays the victory on the arcade. Undo can take it back."
+        : `Start ${event.name} now from the scorekeeper?\n\n` +
+          "The shrine starts it by itself when all seven emeralds are placed. Starting here starts its clock now and the competitor skips the emeralds. Undo can take it back.");
+      if (!confirmed) return;
     }
     await performAction(
       () => request(`/api/runs/${encodeURIComponent(run.id)}/events/${encodeURIComponent(event.eventId)}/press`, { method: "POST" }),
@@ -3276,6 +3508,7 @@
     ui.setupEditionName.addEventListener("input", onSetupInput);
     ui.setupBonus?.addEventListener("input", onSetupBonusInput);
     ui.setupBonus?.addEventListener("change", onSetupBonusInput);
+    ui.setupScoring?.addEventListener("input", onSetupScoringInput);
     ui.setupEventList.addEventListener("input", onSetupInput);
     ui.setupEventList.addEventListener("focusin", (event) => {
       const input = event.target.closest("[data-setup-event-id]");
@@ -3392,10 +3625,13 @@
     ui.historyDelete.addEventListener("click", () => performAction(deleteHistoricalRun, "Run deleted. It can be restored from Deleted runs."));
     const refilterHistory = () => { state.historyTableKey = null; renderHistory(); setSaveStates(); };
     ui.historySearch.addEventListener("input", refilterHistory);
+    ui.historyEditionFilter.addEventListener("change", refilterHistory);
     ui.historyCategoryFilter.addEventListener("change", refilterHistory);
     ui.historyStatusFilter.addEventListener("change", refilterHistory);
+    ui.historyRunType.addEventListener("change", () => void changeHistoryRunType());
     ui.historyClearFilters.addEventListener("click", () => {
       ui.historySearch.value = "";
+      ui.historyEditionFilter.value = "current";
       ui.historyCategoryFilter.value = "";
       ui.historyStatusFilter.value = "";
       refilterHistory();
@@ -3472,6 +3708,15 @@
           body: JSON.stringify({ competitorId, category })
         }),
         "Added to on deck."
+      );
+    });
+    ui.queueShuffle.addEventListener("click", () => {
+      const count = (state.snapshot?.queue || []).length;
+      if (count < 2) return;
+      if (!window.confirm(`Shuffle the whole on-deck list (${count} entries) into a random order?\n\nThe TV shows the new order straight away. This can't be undone, though you can still move entries up and down by hand.`)) return;
+      performAction(
+        () => request("/api/queue/shuffle", { method: "POST" }),
+        "On-deck order shuffled."
       );
     });
     ui.competitor.addEventListener("change", updateControls);

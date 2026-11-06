@@ -117,6 +117,10 @@ public sealed class EventDefinition
     public string? Answer { get; set; }
     // Keypad events: how many messages must be answered correctly to finish (default 1).
     public int? RequiredSuccesses { get; set; }
+    // A disabled event stays in Setup (and in the runs already played with it) but is left
+    // out of new runs, so it can be turned off for the rest of a competition.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Disabled { get; set; }
 }
 
 // The bonus speed round played after the last event when time remains. Timing mirrors the
@@ -152,11 +156,6 @@ public sealed class BonusGameSettings
 
     [JsonIgnore]
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? DefaultName : Name.Trim();
-
-    // Two settings score runs the same way when they differ at most in name.
-    public bool SameScoringAs(BonusGameSettings other) =>
-        Enabled == other.Enabled && PointsPerPress == other.PointsPerPress && InitialWindowMs == other.InitialWindowMs &&
-        StepMs == other.StepMs && StepEveryMs == other.StepEveryMs && MinimumWindowMs == other.MinimumWindowMs;
 
     // The time allowed for a target chosen this far into the bonus round.
     public long WindowForBonusElapsed(long bonusElapsedMs)
@@ -199,6 +198,10 @@ public sealed class EditionDefinition
     // Absent in older configurations; then the bonus round uses its defaults.
     public BonusGameSettings? BonusGame { get; set; }
 
+    // The events new runs play: every event not disabled in Setup.
+    [JsonIgnore]
+    public IEnumerable<EventDefinition> ActiveEvents => Events.Where(e => !e.Disabled);
+
     public EditionSnapshot ToSnapshot() => new()
     {
         EditionId = EditionId,
@@ -206,7 +209,7 @@ public sealed class EditionDefinition
         DurationLimitSeconds = DurationLimitSeconds,
         Scoring = Scoring.Clone(),
         BonusGame = (BonusGame ?? new BonusGameSettings()).Clone(),
-        Events = Events.Select(e => new EventSnapshot
+        Events = ActiveEvents.Select(e => new EventSnapshot
         {
             EventId = e.EventId,
             Name = e.Name,
@@ -257,6 +260,11 @@ public sealed class EditionDefinition
             edition.Events.GroupBy(e => e.DeviceId, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1))
         {
             throw new InvalidDataException($"Edition '{source}' must contain between 1 and 64 events with unique event and device identifiers.");
+        }
+
+        if (edition.Events.All(e => e.Disabled))
+        {
+            throw new InvalidDataException($"Edition '{source}' must keep at least one event turned on.");
         }
 
         foreach (var eventDefinition in edition.Events)
@@ -420,6 +428,8 @@ public sealed class KeypadAttemptRecord
 {
     public required string Prompt { get; set; }
     public required string Answer { get; set; }
+    public string? Hint { get; set; }
+    public bool ColoredDisc { get; set; }
     public long DrawnElapsedMs { get; set; }
     public long? SolvedElapsedMs { get; set; }
     // The accepted code submission or operator override that solved it, so undo can
@@ -604,12 +614,19 @@ public sealed class OperatorSnapshot
     public required List<CompetitorRecord> Competitors { get; set; }
     public required List<QueueItemRecord> Queue { get; set; }
     public required List<DeviceRecord> Devices { get; set; }
+    // What each Chaos Heist shrine is telling the operator right now (heard in the last few
+    // seconds), for example that emeralds must come off before the next competitor.
+    public List<ArcadeStationStatus> ArcadeStations { get; set; } = [];
     public required List<RunRecord> History { get; set; }
     public List<RunRecord> DeletedRuns { get; set; } = [];
     public required List<MessageRecord> Messages { get; set; }
     public required List<EditRecord> Edits { get; set; }
     public required List<LeaderboardRow> Leaderboard { get; set; }
 }
+
+// Attention is "clear" (emeralds must come off the shrine), "replace" (the competitor must
+// lift and replace one emerald), or null when nothing needs doing.
+public sealed record ArcadeStationStatus(string DeviceId, string? Attention, int Emeralds);
 
 public sealed class ScoreboardSnapshot
 {
@@ -670,6 +687,11 @@ public sealed class ScoreboardKeypadChallenge
 {
     public required string EventName { get; set; }
     public required string Prompt { get; set; }
+    // Set once the message has gone unsolved for RunService.KeypadHintDelayMilliseconds; may be
+    // empty when the hint only marks the disc's color.
+    public string? Hint { get; set; }
+    // "white" or "colored", shown before the hint; set with Hint.
+    public string? HintDisc { get; set; }
     public string Entry { get; set; } = "";
     public bool ShowWrong { get; set; }
     // Briefly true after a correct code that was not the last one needed.
@@ -690,7 +712,8 @@ public sealed class ScoreboardEvent
 
 public sealed class LeaderboardRow
 {
-    public int Rank { get; set; }
+    // Null for exhibition rows, which are listed by points but never ranked.
+    public int? Rank { get; set; }
     public required string CompetitorName { get; set; }
     public string? DisplayName { get; set; }
     public int Points { get; set; }

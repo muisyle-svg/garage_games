@@ -4,6 +4,7 @@
   const operatorPage = document.body.classList.contains("operator-view");
   const scoreboardPage = document.body.classList.contains("scoreboard-view");
   const scorekeeperTime = window.GarageGamesScorekeeperTime;
+  const countdownApi = window.GarageGamesCountdown;
 
   // Keep every write in one small route map. If the server route changes, this is the only
   // frontend contract table that needs updating; the views do not create local game state.
@@ -918,8 +919,12 @@
     window.setInterval(() => pollOperator(), 1000);
   }
 
+  // The next poll is scheduled only once this one settles, so a request that never answers
+  // would freeze the TV; give up on it after a few seconds and try again.
+  const SCOREBOARD_REQUEST_TIMEOUT_MS = 4000;
+
   function pollScoreboard() {
-    return request(API.scoreboard).then((snapshot) => {
+    return request(API.scoreboard, { signal: AbortSignal.timeout(SCOREBOARD_REQUEST_TIMEOUT_MS) }).then((snapshot) => {
       state.scoreboard = snapshot;
       state.lastGoodAt = new Date();
       setConnection(true, state.lastGoodAt);
@@ -1066,6 +1071,17 @@
   const bonusBlink = { target: null, windowMs: null, on: false, nextToggleAt: 0 };
   const buttonTargetLook = (remainingMs) => scorekeeperTime.buttonTargetLook(remainingMs);
 
+  // Wall-D's keypad answers are disc coordinates, so its TV panel talks about discs and
+  // coordinates instead of codes. Matched by name ("Wall-D", "Wall D", "WALLD").
+  function keypadWording(eventName) {
+    const wallD = String(eventName || "").toLowerCase().replace(/[^a-z0-9]/g, "") === "walld";
+    return wallD
+      ? { found: (solved, required) => `${solved} of ${required} disc${required === 1 ? "" : "s"} found`,
+        enter: "Enter the coordinates, then press ✱", wrong: "Wrong coordinates — try again", progress: "Discs found" }
+      : { found: (solved, required) => `${solved} of ${required} code${required === 1 ? "" : "s"} solved`,
+        enter: "Enter the code, then press ✱", wrong: "Wrong code — try again", progress: "Codes solved" };
+  }
+
   function renderKeypadChallenge(challenge) {
     const panel = q("#scoreboard-keypad");
     if (!panel) return;
@@ -1074,6 +1090,20 @@
     if (!challenge) { panel.classList.remove("is-wrong", "is-correct"); return; }
     text(q("#scoreboard-keypad-event"), challenge.eventName || "Keypad");
     text(q("#scoreboard-keypad-prompt"), challenge.prompt);
+    // The server adds the hint once the message has gone unsolved for 15 seconds of run time,
+    // shown as "◯ - hint" where the disc is white or a color wheel.
+    const clue = q("#scoreboard-keypad-clue");
+    if (clue) {
+      const shown = typeof challenge.hint === "string";
+      clue.hidden = !shown; clear(clue);
+      if (shown) {
+        const colored = challenge.hintDisc === "colored";
+        const disc = make("span", `tv-disc ${colored ? "is-colored" : "is-white"}`);
+        disc.setAttribute("role", "img"); disc.setAttribute("aria-label", colored ? "Colored disc" : "White disc");
+        clue.appendChild(disc);
+        if (challenge.hint) clue.appendChild(make("span", "tv-keypad-clue-text", ` - ${challenge.hint}`));
+      }
+    }
     const keys = q("#scoreboard-keypad-keys"); clear(keys);
     Array.from(challenge.entry || "").forEach((key) => keys.appendChild(make("span", "tv-keypad-key", key)));
     keys.appendChild(make("span", "tv-keypad-caret"));
@@ -1081,14 +1111,19 @@
     const solved = Math.min(required, Math.max(0, Number(challenge.successes) || 0));
     const pips = q("#scoreboard-keypad-pips"); clear(pips);
     for (let index = 0; index < required; index += 1) pips.appendChild(make("span", `tv-keypad-pip${index < solved ? " is-solved" : ""}`));
-    text(q("#scoreboard-keypad-count"), `${solved} of ${required} code${required === 1 ? "" : "s"} solved`);
+    const wording = keypadWording(challenge.eventName);
+    pips.parentElement?.setAttribute("aria-label", wording.progress);
+    text(q("#scoreboard-keypad-count"), wording.found(solved, required));
     const correct = !!challenge.showCorrect && !challenge.showWrong;
     panel.classList.toggle("is-wrong", !!challenge.showWrong);
     panel.classList.toggle("is-correct", correct);
-    text(q("#scoreboard-keypad-hint"), challenge.showWrong ? "Wrong code — try again"
+    text(q("#scoreboard-keypad-hint"), challenge.showWrong ? wording.wrong
       : correct ? `Correct! ${required - solved} more to go`
-        : "Enter the code, then press ✱");
+        : wording.enter);
   }
+
+  // Plain words for the audience on the TV event tiles.
+  const tvEventStatusLabels = { pending: "Unstarted", active: "Started" };
 
   function renderScoreboardEvents(run) {
     const container = q("#scoreboard-events"); clear(container);
@@ -1102,7 +1137,7 @@
       const finished = event.status === "completed" && Number.isFinite(event.durationMs);
       meta.appendChild(finished
         ? make("span", "tv-event-time", scorekeeperTime.formatClockMs(event.durationMs))
-        : make("span", "tv-event-status", pretty(event.status)));
+        : make("span", "tv-event-status", tvEventStatusLabels[event.status] || pretty(event.status)));
       meta.appendChild(make("strong", "tv-event-points", event.awardedPoints || 0));
       card.appendChild(meta);
       container.appendChild(card);
@@ -1113,7 +1148,7 @@
     const container = q(selector); if (!container) return; clear(container);
     if (!rows.length) { container.appendChild(make("div", "tv-empty", "No results yet.")); return; }
     rows.forEach((row) => {
-      const line = make("div", `tv-rank-row${row.rank === 1 ? " is-leader" : ""}`); line.appendChild(make("span", "tv-rank", row.rank));
+      const line = make("div", `tv-rank-row${row.rank === 1 ? " is-leader" : ""}`); line.appendChild(make("span", "tv-rank", row.rank == null ? "" : row.rank));
       const name = make("div", "tv-rank-identity"); name.appendChild(make("div", "tv-rank-name", row.displayName || row.competitorName));
       // Only exhibition rows need a label; the board title already names the category.
       if (row.category === "exhibition") name.appendChild(make("div", "tv-rank-meta", "Exhibition"));
@@ -1121,12 +1156,60 @@
     });
   }
 
+  // Big 3, 2, 1, Go! over the whole TV while the app plays the run-start countdown voice.
+  // The app reports how far into its countdown it is; the TV keeps its own clock from that so
+  // the words land with the voice, and keeps "Go!" up briefly after the run starts.
+  let startCountdown = null;
+  let startCountdownPolling = false;
+  function pollStartCountdown() {
+    if (startCountdownPolling) return Promise.resolve();
+    startCountdownPolling = true;
+    return request("/api/run/countdown-state", { cache: "no-store", signal: AbortSignal.timeout(SCOREBOARD_REQUEST_TIMEOUT_MS) }).then((countdownState) => {
+      const status = String(countdownState && countdownState.status || "").toLowerCase();
+      const runId = countdownState && countdownState.runId;
+      if (status === "countdown" && runId) {
+        // Response time only makes an estimate late, so the earliest start seen is the best one.
+        const startedAt = performance.now() - Math.max(0, Number(countdownState.elapsedMilliseconds) || 0);
+        if (!startCountdown || startCountdown.runId !== runId) startCountdown = { runId, startedAt };
+        else startCountdown.startedAt = Math.min(startCountdown.startedAt, startedAt);
+      } else if (startCountdown && !(status === "active" && runId === startCountdown.runId)) {
+        startCountdown = null;
+      }
+      state.startCountdownStatus = status;
+    }).catch(() => {}).finally(() => { startCountdownPolling = false; });
+  }
+
+  // Checked every 50 ms while a run is armed or counting down so the overlay starts with the
+  // voice; otherwise twice a second.
+  function scheduleStartCountdownPoll() {
+    const status = state.startCountdownStatus;
+    const delay = status === "armed" || status === "countdown" ? 50 : 500;
+    window.setTimeout(() => pollStartCountdown().finally(scheduleStartCountdownPoll), delay);
+  }
+
+  function renderStartCountdown() {
+    const overlay = q("#scoreboard-start-countdown");
+    if (!overlay) return;
+    const label = startCountdown ? countdownApi.countdownOverlayLabel(performance.now() - startCountdown.startedAt) : null;
+    if (label === null) startCountdown = null;
+    overlay.hidden = label === null;
+    overlay.classList.toggle("is-go", label === "Go!");
+    if (overlay.dataset.label === (label || "")) return;
+    overlay.dataset.label = label || "";
+    // A fresh element per word so its pop-in animation plays again.
+    const word = document.createElement("span");
+    word.className = "tv-start-countdown-label";
+    word.textContent = label || "";
+    overlay.replaceChildren(word);
+  }
+
   function initScoreboard() {
     setConnection(false, null);
     pollScoreboard().finally(scheduleScoreboardPoll);
+    pollStartCountdown().finally(scheduleStartCountdownPoll);
     window.setInterval(renderScoreboardClock, 100);
     // Every frame, so the bonus timer can blink as fast as the buttons (65 ms at the end).
-    const bonusFrame = () => { renderScoreboardBonus(); window.requestAnimationFrame(bonusFrame); };
+    const bonusFrame = () => { renderScoreboardBonus(); renderStartCountdown(); window.requestAnimationFrame(bonusFrame); };
     window.requestAnimationFrame(bonusFrame);
   }
 

@@ -7,8 +7,10 @@ var tests = new (string Name, Action Run)[]
     ("automatic event-score cutoffs", ScoreBoundaries),
     ("per-event scoring parameters and grace boundaries", PerEventScoringBoundaries),
     ("per-event base points flow through live scoring, edits, history, and leaderboard", PerEventBasePoints),
-    ("per-event scoring snapshots persist and version editions", PerEventScoringPersistenceAndVersioning),
-    ("each per-event scoring parameter versions recorded editions", PerEventScoringVersioning),
+    ("per-event scoring snapshots persist and keep the edition when scoring changes", PerEventScoringPersistenceAndVersioning),
+    ("each per-event scoring change keeps recorded runs on the same leaderboard", PerEventScoringVersioning),
+    ("mid-competition setup changes keep the leaderboard and apply only to new runs", MidCompetitionSetupChanges),
+    ("a turned-off event doesn't count toward the bonus round and is never lit, even if its button answers", DisabledEventSkipsBonusRound),
     ("legacy config and snapshots keep their persisted global scoring floors", LegacyScoringFallback),
     ("pause freezes time and timeout precedence", PauseAndTimeout),
     ("physical master protocol validates boot tokens and SPEED interlock", MasterProtocolAndSpeedInterlock),
@@ -26,6 +28,7 @@ var tests = new (string Name, Action Run)[]
     ("button states go to the master when they change, twice, then one button a second in rotation", MasterEventLinesSendChangesAndRotate),
     ("the polled snapshot leaves out edit copies the page never uses; the export keeps them", SnapshotLeavesOutEditCopies),
     ("a bonus button that dies is swapped out like the Speed game, not counted as a miss", BonusRoundSwapsDeadButtons),
+    ("a bonus heartbeat counts as an answer to the intro poll, so a lost answer doesn't light every event", BonusHeartbeatCountsAsPollAnswer),
     ("HTTP arm request duration flows into the saved run and ten-second timeout", ArmRequestDurationHandoff),
     ("custom run duration snapshots timeout and preserves edition leaderboard identity", PerRunDurationSnapshot),
     ("MVP roster is 13 regular events with two-press virtual buttons", MvpRosterAndVirtualPresses),
@@ -45,7 +48,7 @@ var tests = new (string Name, Action Run)[]
     ("duplicate and per-event stale input", DuplicateAndStale),
     ("keypad and arcade completion rules", SpecialCompletion),
     ("manual offline override remains optional and station packets stay guarded", ManualOverride),
-    ("setup persists safely, versions changed rosters, and preserves run snapshots", SetupPersistenceAndRosterIsolation),
+    ("setup persists safely, keeps the edition, and preserves run snapshots", SetupPersistenceAndRosterIsolation),
     ("setup is locked during an unrecorded run and validates device mappings", SetupLockAndValidation),
     ("device scan readiness distinguishes responding, missing, and unassigned stations", DeviceScanReadiness),
     ("device scan protocol accepts only correlated 12-hex node replies", DeviceScanProtocol),
@@ -62,12 +65,20 @@ var tests = new (string Name, Action Run)[]
     ("corrections cannot create unfinished history or count paused time", CorrectionsCannotCorruptRunLifecycle),
     ("physical press age back-dates presses within the current active stretch", PhysicalPressAgeBackdatesWithinActiveTime),
     ("keypad protocol lines parse strictly and '*' is never part of an entry", KeypadProtocolParsing),
+    ("arcade station lines parse strictly and answer with the shared RESULT line", ArcadeProtocolParsing),
+    ("the Chaos Heist arcade station starts on emeralds, finishes on rings, once each, via the master", PhysicalArcadeStationFlow),
+    ("arcade signals respect pause and late arrival, and the tile is an operator fallback with a double-tap guard", ArcadePauseLateAndVirtualFallback),
+    ("an arcade event counts toward the bonus round but is never a bonus target", ArcadeEventStartsBonusButIsNeverATarget),
+    ("the Chaos Heist shrine's operator status is parsed and shown only while fresh", ArcadeStationStatusIsShownWhileFresh),
     ("physical keypad spoke starts, rejects wrong codes, shows typing on the TV, and finishes on the code", PhysicalKeypadCodeFlow),
     ("operator tap overrides a running keypad event and keypad runs auto-finish", KeypadOperatorOverrideAndAutoFinish),
     ("keypad events undo their code finish and their start like regular events", KeypadEventUndo),
     ("keypad answer CSV maps each message to its row and column code", KeypadAnswerCsv),
+    ("keypad hint rows attach to the message above and show on the TV after 15 seconds unsolved", KeypadHints),
     ("keypad events draw unrepeated messages, need several codes, and undo one code at a time", KeypadMultipleCodes),
     ("the app plays the countdown and starts the run at Go without a browser", ServerCountdownAndSounds),
+    ("time-remaining callouts and the final countdown play once each as the clock passes them", TimeRemainingCallouts),
+    ("keypad typing still shows on the TV after the keypad button restarts its numbering", KeypadTypingSurvivesSpokeReset),
     ("an unrecorded timed-out run can be discarded; a recorded one cannot", DiscardTimedOutRun),
     ("the bonus round polls, lights targets, counts hits, shrinks windows, and ends the run on a miss", BonusRoundMissEndsRun),
     ("the bonus round ends on timeout, on operator finish, and uses every tile when nothing answers", BonusRoundOtherEndings),
@@ -78,8 +89,12 @@ var tests = new (string Name, Action Run)[]
     ("schema version 1 databases upgrade once after a backup", SchemaVersion1UpgradesWithBackup),
     ("deleted runs leave history and standings, persist, and can be restored", DeletedRunsHideAndRestore),
     ("deleting a recorded redo restores the result it replaced", DeletingRedoRestoresOriginal),
+    ("a saved run's type can be changed in history, with official results kept consistent", ChangingRunTypeInHistory),
+    ("the on-deck list can be shuffled into a new random order", ShufflingOnDeck),
     ("category exclusion and shared tie rank", CategoryAndTieRank),
     ("leaderboard preference persists and playoffs precede official and exhibition rows", LeaderboardPreferenceAndCategories),
+    ("the public scoreboard lists only leaderboard runs, with results but no device or keypad details", PublicScoreboardSnapshotListsLeaderboardRuns),
+    ("exhibition rows sit among official rows by points without a rank", ExhibitionRowsInterleaveByPointsWithoutRank),
     ("persistent recovery and exclusive data lock", RecoveryAndLock),
     ("danger-zone clear backs up first and resets persisted and runtime state", ClearDatabaseSafety),
     ("failed backup prevents database clearing", ClearDatabaseBackupFailurePreservesData),
@@ -265,7 +280,7 @@ static void PerEventBasePoints()
     var setup = h.Service.GetSetup();
     setup.Events[0].BasePoints = 80;
     var changedSetup = h.Service.UpdateSetup(setup);
-    Assert.True(changedSetup.EditionId != recorded.EditionId);
+    Assert.Equal(recorded.EditionId, changedSetup.EditionId);
     Assert.Equal(80, changedSetup.Events[0].BasePoints);
 
     var correctedHistory = h.Service.EditHistoricalRun(recorded.Id, new EditRunRequest
@@ -276,7 +291,7 @@ static void PerEventBasePoints()
     });
     Assert.Equal(35, correctedHistory.Events.Single(e => e.EventId == "event-01").Score);
     Assert.Equal(40, correctedHistory.Edition.Events.Single(e => e.EventId == "event-01").BasePoints);
-    Assert.Equal(0, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+    Assert.Equal(61, h.Service.GetOperatorSnapshot().Leaderboard.Single().Points);
 }
 
 static void PerEventScoringPersistenceAndVersioning()
@@ -318,7 +333,7 @@ static void PerEventScoringPersistenceAndVersioning()
     var priorEditionId = setup.EditionId;
     setup.Events[0].MinimumPoints = 10;
     var changed = h.Service.UpdateSetup(setup);
-    Assert.True(changed.EditionId != priorEditionId, "Changing one event scoring field after a result must create a new edition.");
+    Assert.Equal(priorEditionId, changed.EditionId);
     var historical = h.Service.GetOperatorSnapshot().History.Single(item => item.Id == recorded.Id);
     Assert.Equal(11, historical.Edition.Events[0].MinimumPoints);
     Assert.Equal(46, historical.Events.Single(item => item.EventId == "event-01").Score);
@@ -339,11 +354,22 @@ static void PerEventScoringPersistenceAndVersioning()
     Assert.Equal(25, changed.Scoring.MinimumPoints);
     var requestWithGlobalScoring = h.Service.GetSetup();
     requestWithGlobalScoring.Scoring = new ScoringRule { BasePoints = 900, MinimumPoints = 1, DecayPoints = 0, DecayEverySeconds = 1 };
-    var ignoredGlobalScoring = h.Service.UpdateSetup(requestWithGlobalScoring);
-    Assert.Equal(50, ignoredGlobalScoring.Scoring!.BasePoints);
-    Assert.Equal(25, ignoredGlobalScoring.Scoring.MinimumPoints);
-    Assert.Equal(5, ignoredGlobalScoring.Scoring.DecayPoints);
-    Assert.Equal(5, ignoredGlobalScoring.Scoring.DecayEverySeconds);
+    var appliedGlobalScoring = h.Service.UpdateSetup(requestWithGlobalScoring);
+    Assert.Equal(900, appliedGlobalScoring.Scoring!.BasePoints);
+    Assert.Equal(1, appliedGlobalScoring.Scoring.MinimumPoints);
+    Assert.Equal(0, appliedGlobalScoring.Scoring.DecayPoints);
+    Assert.Equal(1, appliedGlobalScoring.Scoring.DecayEverySeconds);
+    Assert.Equal(priorEditionId, appliedGlobalScoring.EditionId);
+    // The run already played keeps the defaults it was scored under.
+    Assert.Equal(50, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == recorded.Id).Edition.Scoring.BasePoints);
+
+    var setupWithoutScoring = h.Service.GetSetup();
+    setupWithoutScoring.Scoring = null;
+    Assert.Equal(900, h.Service.UpdateSetup(setupWithoutScoring).Scoring!.BasePoints);
+
+    var invalidGlobalScoring = h.Service.GetSetup();
+    invalidGlobalScoring.Scoring = new ScoringRule { BasePoints = 10, MinimumPoints = 11, DecayPoints = 1, DecayEverySeconds = 1 };
+    Assert.Throws<CommandException>(() => h.Service.UpdateSetup(invalidGlobalScoring));
 }
 
 static void PerEventScoringVersioning()
@@ -369,10 +395,92 @@ static void PerEventScoringVersioning()
         var setup = h.Service.GetSetup();
         change.Apply(setup.Events[0]);
         var updated = h.Service.UpdateSetup(setup);
-        Assert.True(updated.EditionId != recorded.EditionId,
-            $"Changing event {change.Name} after a recorded run must create a new edition.");
-        Assert.Equal(recorded.EditionId, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == recorded.Id).EditionId);
+        Assert.True(updated.EditionId == recorded.EditionId,
+            $"Changing event {change.Name} after a recorded run must keep the edition.");
+        var board = h.Service.GetOperatorSnapshot().Leaderboard.Single();
+        Assert.Equal(recorded.Id, board.RunId);
+        Assert.Equal(recorded.TotalPoints, board.Points);
     }
+}
+
+static void MidCompetitionSetupChanges()
+{
+    using var h = NewHarness();
+    var first = h.ArmAndStart();
+    h.Service.PressEvent(first.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    h.Service.PressEvent(first.Id, "event-01");
+    h.Service.PressEvent(first.Id, "event-04");
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    h.Service.PressEvent(first.Id, "event-04");
+    h.Service.Finish();
+    var recorded = h.Service.Record();
+    Assert.Equal(90, recorded.TotalPoints);
+
+    // Mid-competition: a new button for event 1, event 4 turned off, new default scoring.
+    var setup = h.Service.GetSetup();
+    setup.Events[0].DeviceId = "aabbccddeeff";
+    setup.Events[3].Disabled = true;
+    setup.Scoring = new ScoringRule { BasePoints = 100, MinimumPoints = 50, DecayPoints = 5, DecayEverySeconds = 5 };
+    var saved = h.Service.UpdateSetup(setup);
+    Assert.Equal(recorded.EditionId, saved.EditionId);
+    Assert.Equal(true, saved.Events[3].Disabled);
+    Assert.Equal("AABBCCDDEEFF", saved.Events[0].DeviceId);
+
+    // The run already played is untouched and stays on the leaderboard.
+    var history = h.Service.GetOperatorSnapshot().History.Single(item => item.Id == recorded.Id);
+    Assert.Equal(4, history.Events.Count);
+    Assert.Equal("station-01", history.Events.Single(e => e.EventId == "event-01").DeviceId);
+    Assert.Equal(90, history.TotalPoints);
+    Assert.Equal(90, h.Service.GetOperatorSnapshot().Leaderboard.Single().Points);
+
+    // New runs skip the turned-off event, use the new button, and score with the new defaults.
+    Assert.True(h.Service.GetOperatorSnapshot().Events.Select(e => e.EventId).SequenceEqual(["event-01", "event-02", "event-03"]));
+    Assert.True(h.Service.Preflight().All(result => result.EventId != "event-04"));
+    var second = h.AddCompetitor("Second competitor");
+    var next = h.Service.ArmCompetitor(second.Id, RunCategory.Official);
+    Assert.True(next.Events.Select(e => e.EventId).SequenceEqual(["event-01", "event-02", "event-03"]));
+    Assert.Equal("AABBCCDDEEFF", next.Events.Single(e => e.EventId == "event-01").DeviceId);
+    Assert.Equal(100, next.Edition.Scoring.BasePoints);
+    h.StartRun();
+    h.Service.PressEvent(next.Id, "event-01");
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    h.Service.PressEvent(next.Id, "event-01");
+    Assert.Throws<CommandException>(() => h.Service.PressEvent(next.Id, "event-04"));
+    h.Service.Finish();
+    var nextRecorded = h.Service.Record();
+    Assert.Equal(95, nextRecorded.TotalPoints);
+
+    var leaderboard = h.Service.GetOperatorSnapshot().Leaderboard;
+    Assert.True(leaderboard.Select(row => row.Points).SequenceEqual([95, 90]));
+    // One official run per competitor still holds across the change.
+    Assert.Throws<CommandException>(() => h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official));
+
+    // A historical correction still uses the old run's own rules.
+    var corrected = h.Service.EditHistoricalRun(recorded.Id, new EditRunRequest
+    {
+        ExpectedRevision = history.Revision,
+        Reason = "Correct timing after the setup change",
+        Events = [new EventEditRequest { EventId = "event-04", FinishElapsedMs = history.Events.Single(e => e.EventId == "event-04").StartElapsedMs!.Value + 10_000 }]
+    });
+    Assert.Equal(40, corrected.Events.Single(e => e.EventId == "event-04").Score);
+
+    // Setup keeps the turned-off event after a restart, and it can be turned back on.
+    var path = h.Path;
+    h.Store.Dispose();
+    using var reopenedStore = new RunStore(path);
+    var reopened = new RunService(reopenedStore, MakeEdition(), new TestClock());
+    var persisted = reopened.GetSetup();
+    Assert.Equal(true, persisted.Events[3].Disabled);
+    Assert.Equal(100, persisted.Scoring!.BasePoints);
+    Assert.True(reopened.GetOperatorSnapshot().Events.All(e => e.EventId != "event-04"));
+    persisted.Events[3].Disabled = false;
+    reopened.UpdateSetup(persisted);
+    Assert.True(reopened.GetOperatorSnapshot().Events.Any(e => e.EventId == "event-04"));
+
+    var allOff = reopened.GetSetup();
+    allOff.Events.ForEach(e => e.Disabled = true);
+    Assert.Throws<CommandException>(() => reopened.UpdateSetup(allOff));
 }
 
 static void LegacyScoringFallback()
@@ -491,6 +599,14 @@ static void PhysicalSpokeProtocolAndSession()
     Assert.Equal(testPress, parsedTest);
     Assert.True(!MasterProtocolCodec.TryParseButtonTest("GG1 TEST boot-A_1 aabbccddeeff 12", out _));
     Assert.True(!MasterProtocolCodec.TryParseButtonTest("GG1 TEST boot-A_1 AABBCCDDEEFF 0", out _));
+    Assert.True(MasterProtocolCodec.TryParseSpokeNote("GG1 NOTE boot-A_1 AABBCCDDEEFF BOOT:BROWNOUT", out var bootNote));
+    Assert.Equal(new MasterSpokeNote("boot-A_1", "AABBCCDDEEFF", "BOOT:BROWNOUT"), bootNote);
+    Assert.True(MasterProtocolCodec.DescribeSpokeNote(bootNote.Note).Contains("battery"));
+    Assert.True(MasterProtocolCodec.TryParseSpokeNote("GG1 NOTE boot-A_1 AABBCCDDEEFF REJOIN:2400:1", out var rejoinNote));
+    Assert.True(MasterProtocolCodec.DescribeSpokeNote(rejoinNote.Note).Contains("2400 ms"));
+    Assert.True(!MasterProtocolCodec.TryParseSpokeNote("GG1 NOTE boot-A_1 AABBCCDDEEFF boot:x", out _));
+    Assert.True(!MasterProtocolCodec.TryParseSpokeNote("GG1 NOTE boot-A_1 AABBCCDDEEFF", out _));
+    Assert.True(!MasterProtocolCodec.TryParseSpokeNote("GG1 NOTE boot-A_1 aabbccddeeff BOOT:SW", out _));
     Assert.Equal("GG1 IDENTIFY AABBCCDDEEFF 9", MasterProtocolCodec.FormatIdentifyCommand("aabbccddeeff", 9));
     Assert.Equal("0011223344556677",
         MasterProtocolCodec.GetGarageRunToken("run-00112233445566778899AABBCCDDEEFF"));
@@ -1512,13 +1628,17 @@ static void RecordPromotesNextCompetitor()
     Assert.Equal(RunStatus.Completed, recorded.Status);
     Assert.Equal(nextCompetitor.Id, selected.SelectedCompetitorId);
     Assert.Equal(RunCategory.Playoff, selected.SelectedRunCategory);
-    Assert.Equal(0, selected.Queue.Count);
+    Assert.Equal(1, selected.Queue.Count);
     Assert.True(!h.Service.IsCurrentRun(firstRun.Id), "Promotion must select the next competitor without starting their run.");
+    // The recorded run stays on the TV and the selected competitor stays on deck until they start.
+    var board = h.Service.GetScoreboard();
+    Assert.Equal("Next competitor", board.OnDeckName);
+    Assert.Equal(RunStatus.Completed, board.CurrentRun!.Status);
 
     var persisted = h.Store.Load();
     Assert.Equal(nextCompetitor.Id, persisted.SelectedCompetitorId);
     Assert.Equal(RunCategory.Playoff, persisted.SelectedRunCategory);
-    Assert.Equal(0, persisted.Queue.Count);
+    Assert.Equal(1, persisted.Queue.Count);
 
     h.Store.Dispose();
     using var reopenedStore = new RunStore(h.Path);
@@ -1529,7 +1649,10 @@ static void RecordPromotesNextCompetitor()
     Assert.True(!reopenedService.IsCurrentRun(firstRun.Id), "Reloading the selected competitor must not start a run.");
 
     var nextRun = reopenedService.ArmCompetitor(nextCompetitor.Id, RunCategory.Playoff);
+    Assert.Equal(null, reopenedService.GetScoreboard().OnDeckName);
+    Assert.Equal(1, reopenedService.GetOperatorSnapshot().Queue.Count);
     reopenedService.CompleteCountdown(reopenedService.StartMaster().Id);
+    Assert.Equal(0, reopenedService.GetOperatorSnapshot().Queue.Count);
     reopenedService.Finish();
     reopenedService.Record();
     selected = reopenedService.GetOperatorSnapshot();
@@ -1795,12 +1918,12 @@ static void SetupPersistenceAndRosterIsolation()
     setup.Events[0].GraceSeconds = 0;
     var saved = h.Service.UpdateSetup(setup);
 
-    Assert.True(saved.EditionId != priorEditionId, "Changing event points after recorded runs must start a separate leaderboard edition.");
+    Assert.Equal(priorEditionId, saved.EditionId);
     Assert.Equal(40, saved.Events[0].BasePoints);
     Assert.Equal(null, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Edition.Events[0].BasePoints);
     Assert.Equal(45, h.Service.GetOperatorSnapshot().History.Single(item => item.Id == run.Id).Events[0].Score);
     Assert.Equal(saved.EditionId, h.Service.GetOperatorSnapshot().EditionId);
-    Assert.Equal(0, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+    Assert.Equal(45, h.Service.GetOperatorSnapshot().Leaderboard.Single().Points);
     Assert.True(Directory.GetFiles(System.IO.Path.Combine(h.Path, "backups"), "*.db").Length >= 1,
         "Changing setup should create a pre-change database backup.");
 
@@ -2371,6 +2494,276 @@ static void KeypadProtocolParsing()
     Assert.Equal($"GG1 RESULT {token} 001122334455 7 ACTIVE", MasterProtocolCodec.FormatKeypadResult(submit, "ACTIVE"));
 }
 
+static EditionDefinition MakeArcadeSpokeEdition() => new()
+{
+    EditionId = "arcade-spoke-test-edition",
+    Name = "Arcade spoke test edition",
+    DurationLimitSeconds = 60,
+    Scoring = new ScoringRule(),
+    BonusGame = new BonusGameSettings { Enabled = false },
+    Events =
+    [
+        new EventDefinition { EventId = "regular", Name = "Regular", DeviceId = "AABBCCDDEEFF", Type = EventKind.Standard },
+        new EventDefinition { EventId = "chaos", Name = "Chaos Heist", DeviceId = "001122334455", Type = EventKind.MagneticArcade }
+    ]
+};
+
+static void ArcadeProtocolParsing()
+{
+    const string token = "0123456789ABCDEF";
+    Assert.True(MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 7 S 40", out var start));
+    Assert.True(!start.Finish);
+    Assert.Equal(7u, start.Sequence);
+    Assert.Equal(40u, start.AgeMilliseconds);
+    Assert.Equal("001122334455", start.DeviceId);
+    Assert.True(MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 8 F 0", out var finish));
+    Assert.True(finish.Finish);
+
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 0 S 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 9 X 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 9 S", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 00112233445 9 S 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot 0123456789abcdef 001122334455 9 S 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 ARCADE boot {token} 001122334455 -9 S 0", out _));
+    Assert.True(!MasterProtocolCodec.TryParseArcadeInput($"GG1 PRESS boot {token} 001122334455 9 0", out _));
+    // Arcade lines are not presses or keypad codes.
+    Assert.True(!MasterProtocolCodec.TryParsePhysicalPress($"GG1 ARCADE boot {token} 001122334455 7 S 40", out _));
+    Assert.True(!MasterProtocolCodec.TryParseKeypadInput($"GG1 ARCADE boot {token} 001122334455 7 S 40", out _));
+    Assert.Equal($"GG1 RESULT {token} 001122334455 7 ACTIVE", MasterProtocolCodec.FormatArcadeResult(start, "ACTIVE"));
+    Assert.Equal($"spoke-arcade:{token}:001122334455:7", MasterProtocolCodec.GetArcadeMessageId(token, "001122334455", 7));
+}
+
+static void PhysicalArcadeStationFlow()
+{
+    const string regularMac = "AABBCCDDEEFF";
+    const string arcadeMac = "001122334455";
+    using var h = new TestHarness(MakeArcadeSpokeEdition(), NewPath(), simulatedDevicesOnline: false);
+    // The arcade station missed the scan; a valid signal from it is enough to bring it online.
+    h.Service.RecordDeviceScan(true, true, [regularMac]);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+
+    var protocol = new MasterProtocolState();
+    InputResult ReceiveStart(string boot, ulong sequence, bool allowed) => h.Service.ReceivePhysicalMasterStart(boot, sequence, allowed);
+    MasterPhysicalPressResult? pressResult = null;
+    MasterPhysicalPressResult? arcadeResult = null;
+    MasterPhysicalPressResult ReceivePress(MasterPhysicalPress item, bool allowed) => pressResult = h.Service.ReceivePhysicalSpokePress(item, allowed);
+    MasterPhysicalPressResult ReceiveArcade(MasterArcadeInput item, bool allowed) => arcadeResult = h.Service.ReceivePhysicalArcadeInput(item, allowed);
+    void Line(string line) => protocol.ProcessLine(line, ReceiveStart, ReceivePress, null, ReceiveArcade);
+    EventRecord Arcade() => h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == arcadeMac);
+    Line("GG1 HELLO boot");
+    Line("GG1 MODE IDLE");
+
+    // Armed but not started: seven emeralds cannot start the event.
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 1 S 0");
+    Assert.Equal("REJECTED", arcadeResult!.State);
+    Assert.Equal(EventStatus.Pending, Arcade().Status);
+
+    h.StartRun();
+    // A different master boot (or SPEED mode) is not the current session.
+    Line($"GG1 ARCADE other {token} {arcadeMac} 2 S 0");
+    Assert.Equal("REJECTED", arcadeResult!.State);
+    Assert.Equal(EventStatus.Pending, Arcade().Status);
+
+    // Signals only reach the matching event kind.
+    Line($"GG1 PRESS boot {token} {arcadeMac} 3 0");
+    Assert.Equal(MessageDisposition.UnknownStation, pressResult!.Disposition);
+    Line($"GG1 ARCADE boot {token} {regularMac} 3 S 0");
+    Assert.Equal(MessageDisposition.UnknownStation, arcadeResult!.Disposition);
+    Assert.Equal(EventStatus.Pending, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == regularMac).Status);
+
+    // Twenty rings before the emeralds cannot finish it.
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 4 F 0");
+    Assert.Equal(MessageDisposition.InvalidSignal, arcadeResult!.Disposition);
+    Assert.Equal("REJECTED", arcadeResult.State);
+
+    // All seven emeralds: the event starts at the time they were placed, not when the radio arrived.
+    h.Clock.Advance(TimeSpan.FromSeconds(3));
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 5 S 200");
+    Assert.Equal(MessageDisposition.Accepted, arcadeResult!.Disposition);
+    Assert.Equal("ACTIVE", arcadeResult.State);
+    Assert.Equal<long?>(2_800L, Arcade().StartElapsedMs);
+    Assert.Equal(DeviceAvailability.Online, h.Service.GetOperatorSnapshot().Devices.Single(d => d.DeviceId == arcadeMac).Availability);
+    Assert.Contains(h.Service.GetMasterStatuses().EventSnapshot.Events, item => item.DeviceId == arcadeMac && item.State == "ACTIVE");
+
+    // A radio retry of the same signal is a duplicate and reports the running state again.
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 5 S 260");
+    Assert.Equal(MessageDisposition.Duplicate, arcadeResult!.Disposition);
+    Assert.Equal("ACTIVE", arcadeResult.State);
+    // A second start (for example, emeralds swapped mid-event) never restarts the timer.
+    h.Clock.Advance(TimeSpan.FromSeconds(1));
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 6 S 0");
+    Assert.Equal(MessageDisposition.InvalidSignal, arcadeResult!.Disposition);
+    Assert.Equal<long?>(2_800L, Arcade().StartElapsedMs);
+    Assert.Equal(EventStatus.Active, Arcade().Status);
+
+    // The 20th ring finishes and scores it exactly once.
+    h.Clock.Advance(TimeSpan.FromSeconds(10));
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 7 F 0");
+    Assert.Equal(MessageDisposition.Accepted, arcadeResult!.Disposition);
+    Assert.Equal("COMPLETED", arcadeResult.State);
+    Assert.Equal<long?>(14_000L, Arcade().FinishElapsedMs);
+    Assert.True(Arcade().Score > 0,"A finished arcade event is scored like any timed event.");
+    var finishedRevision = h.Service.GetOperatorSnapshot().CurrentRun!.Revision;
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 7 F 50");
+    Assert.Equal(MessageDisposition.Duplicate, arcadeResult!.Disposition);
+    Assert.Equal("COMPLETED", arcadeResult.State);
+    Line($"GG1 ARCADE boot {token} {arcadeMac} 8 F 0");
+    Assert.Equal(MessageDisposition.AlreadyCompleted, arcadeResult!.Disposition);
+    Assert.Equal("COMPLETED", arcadeResult.State);
+    Assert.Equal<long?>(14_000L, Arcade().FinishElapsedMs);
+    Assert.Equal(finishedRevision, h.Service.GetOperatorSnapshot().CurrentRun!.Revision);
+
+    // A signal carrying another run's token never touches this run.
+    Line($"GG1 ARCADE boot FEDCBA9876543210 {arcadeMac} 9 S 0");
+    Assert.Equal("REJECTED", arcadeResult!.State);
+    Assert.Equal(1, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Count(e => e.Status == EventStatus.Completed));
+}
+
+static void ArcadePauseLateAndVirtualFallback()
+{
+    const string regularMac = "AABBCCDDEEFF";
+    const string arcadeMac = "001122334455";
+    using var h = new TestHarness(MakeArcadeSpokeEdition(), NewPath(), simulatedDevicesOnline: false);
+    h.Service.RecordDeviceScan(true, true, [regularMac, arcadeMac]);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    MasterPhysicalPressResult Arcade(uint sequence, bool finish, uint ageMs) =>
+        h.Service.ReceivePhysicalArcadeInput(new MasterArcadeInput("boot", token, arcadeMac, sequence, finish, ageMs), sessionAllowed: true);
+    EventRecord Event() => h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).Events.Single(e => e.DeviceId == arcadeMac);
+
+    Assert.Equal(MessageDisposition.Accepted, Arcade(1, false, 0).Disposition);
+
+    // Paused: a 20th ring entered before the pause but arriving after it still counts at its time.
+    h.Clock.Advance(TimeSpan.FromSeconds(5));
+    h.Service.Pause();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(100));
+    Assert.Equal(MessageDisposition.Paused, Arcade(2, true, 50).Disposition);
+    Assert.Equal(EventStatus.Active, Event().Status);
+    var late = Arcade(3, true, 400);
+    Assert.Equal(MessageDisposition.Accepted, late.Disposition);
+    Assert.Equal("COMPLETED", late.State);
+    Assert.Equal<long?>(4_700L, Event().FinishElapsedMs);
+    h.Service.Resume();
+
+    // The operator can run the same event from its tile when the station is unavailable.
+    using var v = new TestHarness(MakeArcadeSpokeEdition(), NewPath());
+    var virtualRun = v.ArmAndStart();
+    Assert.Equal(MessageDisposition.Accepted, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
+    Assert.Equal(EventStatus.Active, v.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "chaos").Status);
+    // A double tap on the tile is ignored rather than scoring a near-zero time.
+    v.Clock.Advance(TimeSpan.FromMilliseconds(300));
+    Assert.Equal(MessageDisposition.TooSoon, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
+    Assert.Equal(EventStatus.Active, v.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "chaos").Status);
+    v.Clock.Advance(TimeSpan.FromMilliseconds(3_700));
+    Assert.Equal(MessageDisposition.Accepted, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
+    var virtualEvent = v.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "chaos");
+    Assert.Equal(EventStatus.Completed, virtualEvent.Status);
+    Assert.Equal<long?>(4_000L, virtualEvent.FinishElapsedMs);
+    Assert.Equal(MessageDisposition.AlreadyCompleted, v.Service.PressEvent(virtualRun.Id, "chaos").Disposition);
+
+    // A mistaken tap can be undone like a button press: the finish, then the start.
+    var undoneFinish = v.Service.UndoLastEventPress().Events.Single(e => e.EventId == "chaos");
+    Assert.Equal(EventStatus.Active, undoneFinish.Status);
+    Assert.Equal<long?>(null, undoneFinish.FinishElapsedMs);
+    Assert.Equal<long?>(0L, undoneFinish.StartElapsedMs);
+    var undoneStart = v.Service.UndoEventPress("chaos").Events.Single(e => e.EventId == "chaos");
+    Assert.Equal(EventStatus.Pending, undoneStart.Status);
+    Assert.Equal<long?>(null, undoneStart.StartElapsedMs);
+}
+
+static void ArcadeStationStatusIsShownWhileFresh()
+{
+    Assert.True(MasterProtocolCodec.TryParseArcadeStatus("GG1 ARCSTAT boot 001122334455 C 3", out var clear));
+    Assert.Equal("clear", clear.Attention);
+    Assert.Equal(3, clear.Emeralds);
+    Assert.True(MasterProtocolCodec.TryParseArcadeStatus("GG1 ARCSTAT boot 001122334455 R 7", out var replace));
+    Assert.Equal("replace", replace.Attention);
+    Assert.True(MasterProtocolCodec.TryParseArcadeStatus("GG1 ARCSTAT boot 001122334455 O 0", out var ok));
+    Assert.Equal<string?>(null, ok.Attention);
+    foreach (var bad in new[]
+    {
+        "GG1 ARCSTAT boot 001122334455 X 3",
+        "GG1 ARCSTAT boot 001122334455 C 8",
+        "GG1 ARCSTAT boot 001122334455 C",
+        "GG1 ARCSTAT boot 00112233445 C 3",
+        "GG1 ARCSTAT boot 001122334455 C 3 extra",
+    })
+    {
+        Assert.True(!MasterProtocolCodec.TryParseArcadeStatus(bad, out _), bad);
+    }
+
+    using var h = new TestHarness(MakeArcadeSpokeEdition(), NewPath());
+    Assert.Equal(0, h.Service.GetOperatorSnapshot().ArcadeStations.Count);
+    h.Service.ReceiveArcadeStationStatus(clear);
+    var shown = h.Service.GetOperatorSnapshot().ArcadeStations.Single();
+    Assert.Equal("001122334455", shown.DeviceId);
+    Assert.Equal("clear", shown.Attention);
+    // The shrine repeats it every second; a silent shrine's last request disappears.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.ArcadeStatusFreshMilliseconds + 1));
+    Assert.Equal(0, h.Service.GetOperatorSnapshot().ArcadeStations.Count);
+}
+
+static void ArcadeEventStartsBonusButIsNeverATarget()
+{
+    EditionDefinition Edition(bool bonusEnabled)
+    {
+        var edition = MakeArcadeSpokeEdition();
+        edition.BonusGame = new BonusGameSettings { Enabled = bonusEnabled };
+        edition.Events.Add(new EventDefinition { EventId = "second", Name = "Second", DeviceId = "0A0B0C0D0E0F", Type = EventKind.Standard });
+        return edition;
+    }
+
+    void FinishAllButChaos(TestHarness h, RunRecord run)
+    {
+        h.Service.PressEvent(run.Id, "regular");
+        h.Service.PressEvent(run.Id, "second");
+        h.Service.PressEvent(run.Id, "chaos");
+        h.Clock.Advance(TimeSpan.FromSeconds(1));
+        h.Service.PressEvent(run.Id, "regular");
+        h.Service.PressEvent(run.Id, "second");
+    }
+
+    using (var h = new TestHarness(Edition(bonusEnabled: true), NewPath()))
+    {
+        var run = h.ArmAndStart();
+        FinishAllButChaos(h, run);
+        // Not every event is done yet: no bonus.
+        Assert.Equal<BonusGameRecord?>(null, h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame);
+        // Finishing the Chaos Heist event last starts the bonus round.
+        Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, "chaos").Disposition);
+        var current = h.Service.GetOperatorSnapshot().CurrentRun!;
+        Assert.Equal(RunStatus.Active, current.Status);
+        Assert.True(current.BonusGame is not null, "The bonus round starts once every event, including Chaos Heist, is done.");
+
+        // Nothing answered the poll, yet only button events are ever lit.
+        h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+        h.Service.TickBonusGame();
+        for (var hit = 0; hit < 6; hit++)
+        {
+            var target = h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame!.TargetEventId!;
+            Assert.True(target != "chaos", "The Chaos Heist event must never be a bonus target.");
+            // The arcade tile never counts as a bonus hit.
+            Assert.True(h.Service.PressEvent(run.Id, "chaos").Disposition != MessageDisposition.Accepted);
+            h.Clock.Advance(TimeSpan.FromMilliseconds(300));
+            Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, target).Disposition);
+        }
+    }
+
+    // With the bonus round turned off, finishing every event finishes the run.
+    using (var h = new TestHarness(Edition(bonusEnabled: false), NewPath()))
+    {
+        var run = h.ArmAndStart();
+        FinishAllButChaos(h, run);
+        Assert.Equal(RunStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Status);
+        h.Service.PressEvent(run.Id, "chaos");
+        var current = h.Service.GetOperatorSnapshot().CurrentRun!;
+        Assert.Equal(RunStatus.Finished, current.Status);
+        Assert.Equal<BonusGameRecord?>(null, current.BonusGame);
+    }
+}
+
 static void PhysicalKeypadCodeFlow()
 {
     const string regularMac = "AABBCCDDEEFF";
@@ -2457,6 +2850,31 @@ static void PhysicalKeypadCodeFlow()
     Line($"GG1 KEYPAD boot {token} {regularMac} 2 S D5 0");
     Assert.Equal("REJECTED", keypadResult!.State);
     Assert.Equal(EventStatus.Active, h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.DeviceId == regularMac).Status);
+}
+
+static void KeypadTypingSurvivesSpokeReset()
+{
+    const string keypadMac = "001122334455";
+    using var h = new TestHarness(MakeKeypadSpokeEdition(), NewPath());
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    h.Service.PressEvent(run.Id, "keypad");
+    string Shown() => h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Entry;
+    void Type(uint sequence, string entry) =>
+        h.Service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, sequence, false, entry), true);
+
+    Type(500_000, "1");
+    Type(500_001, "12");
+    Assert.Equal("12", Shown());
+    // A late, out-of-order copy of an earlier update is ignored.
+    Type(500_000, "1");
+    Assert.Equal("12", Shown());
+    // The button rebooted (or lost its status) and restarted from a much lower number.
+    Type(42, "7");
+    Assert.Equal("7", Shown());
+    Type(43, "78");
+    Assert.Equal("78", Shown());
 }
 
 static void KeypadOperatorOverrideAndAutoFinish()
@@ -2568,7 +2986,6 @@ static void KeypadAnswerCsv()
     {
         Assert.Equal(expectedCodes[challenge.Prompt], challenge.Answer);
     }
-    Assert.Equal("A2", shipped.Challenges.Single(c => c.Prompt == "rocket pepper 1819").Answer);
 
     // Other grid sizes: nothing assumes four rows or sixteen columns.
     var small = KeypadChallengeCsv.Parse(",1,2,3\nA,a1,a2,a3\nB,b1,,b3\n");
@@ -2588,6 +3005,117 @@ static void KeypadAnswerCsv()
     Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\n,orphan\n"));
     Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\n"));
     Assert.True(KeypadChallengeSet.LoadOrReportError(Path.Combine(NewPath(), "missing.csv")).Error is not null);
+}
+
+static void KeypadHints()
+{
+    // Each "Hint" row gives hints to the answer row directly above it, column by column.
+    var parsed = KeypadChallengeCsv.Parse(",1,2,3\r\nA,a1,a2,a3\r\nHint,first,,\"third, quoted\"\r\nB,b1,b2,\r\nhint,,bee two,\r\n,,,\r\n##,any,,\r\n");
+    Assert.Equal(6, parsed.Count);
+    Assert.Equal<string?>("first", parsed.Single(c => c.Prompt == "a1").Hint);
+    Assert.Equal<string?>(null, parsed.Single(c => c.Prompt == "a2").Hint);
+    Assert.Equal<string?>("third, quoted", parsed.Single(c => c.Prompt == "a3").Hint);
+    Assert.Equal<string?>("bee two", parsed.Single(c => c.Prompt == "b2").Hint);
+    Assert.Equal("B2", parsed.Single(c => c.Prompt == "b2").Answer);
+    Assert.Equal<string?>(null, parsed.Single(c => c.Prompt == "any").Hint);
+    Assert.True(parsed.All(c => c.Prompt is not ("first" or "bee two")), "hints are not messages");
+    Assert.True(parsed.All(c => !c.ColoredDisc), "a hint without '*' is a white disc");
+
+    // A hint ending in '*' marks a colored disc; the '*' is not shown, and '*' alone is a colored
+    // disc with no hint text.
+    var discs = KeypadChallengeCsv.Parse(",1,2,3\nA,a1,a2,a3\nHint,Column*,*,5*star\n");
+    Assert.Equal<string?>("Column", discs.Single(c => c.Prompt == "a1").Hint);
+    Assert.True(discs.Single(c => c.Prompt == "a1").ColoredDisc);
+    Assert.Equal<string?>("", discs.Single(c => c.Prompt == "a2").Hint);
+    Assert.True(discs.Single(c => c.Prompt == "a2").ColoredDisc);
+    Assert.Equal<string?>("5*star", discs.Single(c => c.Prompt == "a3").Hint);
+    Assert.True(!discs.Single(c => c.Prompt == "a3").ColoredDisc);
+
+    Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\nHint,nothing above\nA,a1\n"));
+    Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1,2\nA,a1,\nHint,,no message above\n"));
+    Assert.Throws<InvalidDataException>(() => KeypadChallengeCsv.Parse(",1\nA,a1\nHint,one\nHint,two\n"));
+
+    // The shipped hints file loads, with a hint for every lettered message.
+    var shipped = KeypadChallengeSet.LoadOrReportError(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..", "config", "keypad-answers-hints.csv")));
+    if (!File.Exists(shipped.Source))
+    {
+        shipped = KeypadChallengeSet.LoadOrReportError(Path.Combine(AppContext.BaseDirectory, "config", "keypad-answers-hints.csv"));
+    }
+    Assert.Equal<string?>(null, shipped.Error);
+    Assert.True(shipped.Challenges.Where(c => c.Answer != "##").All(c => c.Hint is not null));
+    Assert.Equal<string?>("Column", shipped.Challenges.Single(c => c.Answer == "A1").Hint);
+
+    // On the TV the hint appears once the message has gone unsolved for 15 seconds of run time,
+    // and the next message starts its own 15 seconds.
+    const string keypadMac = "001122334455";
+    var edition = MakeKeypadSpokeEdition();
+    var keypadDefinition = edition.Events.Single(e => e.EventId == "keypad");
+    keypadDefinition.Prompt = null;
+    keypadDefinition.Answer = null;
+    keypadDefinition.RequiredSuccesses = 2;
+    var pool = new KeypadChallengeSet(
+        Enumerable.Range(1, 3).Select(i => new KeypadChallengeDefinition { Prompt = $"message {i}", Answer = $"A{i}", Hint = $"hint {i}", ColoredDisc = i == 2 }).ToList(),
+        "test", null);
+    using var h = new TestHarness(edition, NewPath(), keypadChallenges: pool);
+    var run = h.Service.Arm(h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    h.StartRun();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    uint sequence = 0;
+    ScoreboardKeypadChallenge Shown() => h.Service.GetScoreboard().CurrentRun!.KeypadChallenge!;
+    MasterPhysicalPressResult Submit(string code) =>
+        h.Service.ReceivePhysicalKeypadInput(new MasterKeypadInput("boot", token, keypadMac, ++sequence, true, code), true)!;
+    string HintFor(string prompt) => pool.Challenges.Single(c => c.Prompt == prompt).Hint!;
+
+    h.Service.PressEvent(run.Id, "keypad");
+    Assert.Equal<string?>(null, Shown().Hint);
+    h.Clock.Advance(TimeSpan.FromSeconds(10));
+    Submit("99"); // A wrong code does not restart the wait.
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.KeypadHintDelayMilliseconds - 10_001));
+    Assert.Equal<string?>(null, Shown().Hint);
+
+    // Paused time does not count toward the wait.
+    h.Service.Pause();
+    h.Clock.Advance(TimeSpan.FromSeconds(30));
+    Assert.Equal<string?>(null, Shown().Hint);
+    h.Service.Resume();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(1));
+    var first = Shown();
+    Assert.Equal<string?>(HintFor(first.Prompt), first.Hint);
+    Assert.Equal<string?>(pool.Challenges.Single(c => c.Prompt == first.Prompt).ColoredDisc ? "colored" : "white", first.HintDisc);
+
+    var answer = h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad").Keypad!.Current!.Answer;
+    Assert.Equal("NEXT", Submit(answer).State);
+    var second = Shown();
+    Assert.True(second.Prompt != first.Prompt);
+    Assert.Equal<string?>(null, second.Hint);
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.KeypadHintDelayMilliseconds));
+    Assert.Equal<string?>(HintFor(second.Prompt), Shown().Hint);
+
+    // A short bong plays once as each hint appears (ticked like RunTimingHostedService).
+    using var ticked = new TestHarness(edition, NewPath(), keypadChallenges: pool);
+    var sounds = new RecordingSoundPlayer();
+    ticked.Service.SoundCueRequested += cue => sounds.Play(cue);
+    var tickedRun = ticked.Service.Arm(ticked.Service.GetOperatorSnapshot().Queue.Single().Id);
+    ticked.StartRun();
+    ticked.Service.PressEvent(tickedRun.Id, "keypad");
+    void RunFor(long milliseconds)
+    {
+        for (var step = 0L; step < milliseconds; step += 15)
+        {
+            ticked.Clock.Advance(TimeSpan.FromMilliseconds(15));
+            ticked.Service.TickBonusGame();
+        }
+    }
+    int Bongs() => sounds.Played.Count(cue => cue == SoundCue.KeypadHint);
+    RunFor(RunService.KeypadHintDelayMilliseconds - 30);
+    Assert.Equal(0, Bongs());
+    Assert.Equal<string?>(null, ticked.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Hint);
+    RunFor(60);
+    Assert.Equal(1, Bongs());
+    Assert.True(ticked.Service.GetScoreboard().CurrentRun!.KeypadChallenge!.Hint is not null);
+    RunFor(5_000);
+    Assert.Equal(1, Bongs());
 }
 
 static void KeypadMultipleCodes()
@@ -2685,6 +3213,56 @@ static void KeypadMultipleCodes()
     Cleanup(path);
 }
 
+static void TimeRemainingCallouts()
+{
+    using var h = new TestHarness(MakeMvpEdition(300), NewPath());
+    var sounds = new RecordingSoundPlayer();
+    h.Service.SoundCueRequested += cue => sounds.Play(cue);
+    h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official);
+    h.StartRun();
+    sounds.Played.Clear();
+
+    // Ticked like RunTimingHostedService: each callout once, as the clock passes it.
+    void RunFor(long milliseconds)
+    {
+        for (var step = 0L; step < milliseconds; step += 15)
+        {
+            h.Clock.Advance(TimeSpan.FromMilliseconds(15));
+            h.Service.TickBonusGame();
+        }
+    }
+    RunFor(59_985);
+    Assert.Equal(0, sounds.Played.Count);
+    RunFor(30);
+    Assert.Equal(SoundCue.FourMinutesRemaining, sounds.Played.Single());
+
+    // Paused time doesn't count toward a callout.
+    h.Service.Pause();
+    h.Clock.Advance(TimeSpan.FromMinutes(5));
+    h.Service.TickBonusGame();
+    h.Service.Resume();
+    Assert.Equal(1, sounds.Played.Count);
+
+    RunFor(240_100);
+    Assert.Equal(string.Join(",", new[]
+        {
+            SoundCue.FourMinutesRemaining, SoundCue.ThreeMinutesRemaining, SoundCue.TwoMinutesRemaining, SoundCue.OneMinuteRemaining,
+            SoundCue.FinalCountdown, SoundCue.TimeUp
+        }), string.Join(",", sounds.Played));
+    Assert.Equal(RunStatus.TimedOut, h.Service.GetScoreboard().CurrentRun!.Status);
+
+    // A stall skips the callouts it jumped past instead of stacking them late.
+    using var stalled = new TestHarness(MakeMvpEdition(300), NewPath());
+    var stalledSounds = new RecordingSoundPlayer();
+    stalled.Service.SoundCueRequested += cue => stalledSounds.Play(cue);
+    stalled.Service.ArmCompetitor(stalled.CompetitorId, RunCategory.Official);
+    stalled.StartRun();
+    stalledSounds.Played.Clear();
+    stalled.Clock.Advance(TimeSpan.FromSeconds(150));
+    stalled.Service.TickBonusGame();
+    Assert.Equal(0, stalledSounds.Played.Count);
+}
+
 static void ServerCountdownAndSounds()
 {
     using var h = new TestHarness(MakeKeypadSpokeEdition(), NewPath());
@@ -2724,6 +3302,15 @@ static void ServerCountdownAndSounds()
     Assert.Equal(SoundCue.KeypadWrong, sounds.Played.Last());
     h.Service.ReceivePhysicalKeypadInput(wrongCode, true);
     Assert.Equal(3, sounds.Played.Count);
+
+    // Solving the last required message finishes the keypad event with its own chime.
+    while (h.Service.GetOperatorSnapshot().CurrentRun!.Events.Single(e => e.EventId == "keypad").Status != EventStatus.Completed)
+    {
+        h.Clock.Advance(TimeSpan.FromSeconds(1));
+        h.Service.PressEvent(run.Id, "keypad");
+    }
+    Assert.Equal(SoundCue.KeypadComplete, sounds.Played.Last());
+    Assert.Equal(1, sounds.Played.Count(cue => cue == SoundCue.KeypadComplete));
 
     // A countdown first noticed well after it began still starts on time, but without a
     // voice that would be out of step with Go.
@@ -2851,6 +3438,76 @@ static void BonusRoundSwapsDeadButtons()
     Assert.Equal(RunStatus.Finished, ended.Status);
 }
 
+static void BonusHeartbeatCountsAsPollAnswer()
+{
+    const string physical = "001122334455", late = "AABBCCDDEEFF";
+    using var h = new TestHarness(MakeBonusEdition(), NewPath());
+    var run = h.ArmAndStart();
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    FinishAllEvents(h, run);
+    BonusGameRecord Bonus() => h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame!;
+
+    // The button's single poll answer was lost over the radio, but its heartbeats arrive
+    // during the intro: it still counts, so only it is lit (not every event, virtual or not).
+    h.Service.ReceiveBonusBeat(token, physical, 0);
+    Assert.Equal(physical, Bonus().RespondingDeviceIds.Single());
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+    Assert.True(h.Service.TickBonusGame());
+    Assert.Equal(physical, Bonus().TargetDeviceId);
+
+    // A button first heard after the intro joins the later targets; beats repeat harmlessly.
+    h.Service.ReceiveBonusBeat(token, late, 0);
+    h.Service.ReceiveBonusBeat(token, late, 0);
+    Assert.Equal(2, Bonus().RespondingDeviceIds.Count);
+    Assert.True(Bonus().RespondingDeviceIds.Contains(late));
+    // A button from no event in this run never joins.
+    h.Service.ReceiveBonusBeat(token, "FFFFFFFFFFFF", 0);
+    Assert.Equal(2, Bonus().RespondingDeviceIds.Count);
+}
+
+static void DisabledEventSkipsBonusRound()
+{
+    const string first = "AABBCCDDEEFF", second = "001122334455", third = "0A0B0C0D0E0F";
+    using var h = new TestHarness(MakeBonusEdition(), NewPath());
+    var setup = h.Service.GetSetup();
+    setup.Events.Single(e => e.EventId == "third").Disabled = true;
+    h.Service.UpdateSetup(setup);
+
+    var run = h.ArmAndStart();
+    Assert.True(run.Events.Select(e => e.EventId).SequenceEqual(["first", "second"]));
+    var token = MasterProtocolCodec.GetGarageRunToken(run.Id)!;
+    foreach (var eventId in new[] { "first", "second" })
+    {
+        h.Service.PressEvent(run.Id, eventId);
+        h.Clock.Advance(TimeSpan.FromMilliseconds(500));
+        h.Service.PressEvent(run.Id, eventId);
+    }
+    // Two of two events done is all of them: the bonus round starts.
+    Assert.Equal(RunPhase.Bonus, h.Service.GetOperatorSnapshot().CurrentRun!.Phase);
+    Assert.Throws<CommandException>(() => h.Service.PressEvent(run.Id, "third"));
+
+    // The turned-off button is still powered and answers, but is never lit.
+    BonusGameRecord Bonus() => h.Service.GetOperatorSnapshot().CurrentRun!.BonusGame!;
+    void BeatAll()
+    {
+        foreach (var mac in new[] { first, second, third }) h.Service.ReceiveBonusBeat(token, mac, 0);
+    }
+    foreach (var mac in new[] { first, second, third }) h.Service.ReceiveBonusPollReply(token, mac);
+    BeatAll();
+    h.Clock.Advance(TimeSpan.FromMilliseconds(RunService.BonusIntroMilliseconds));
+    BeatAll();
+    Assert.True(h.Service.TickBonusGame());
+    for (var hit = 0; hit < 12; hit++)
+    {
+        var lit = Bonus().TargetDeviceId!;
+        Assert.True(lit != third, "a turned-off event's button must never be a bonus target");
+        Assert.True(h.Service.ReceiveBonusBeat(token, lit, (uint)Bonus().Sequence));
+        Assert.Equal(MessageDisposition.Accepted, h.Service.PressEvent(run.Id, lit == first ? "first" : "second").Disposition);
+        BeatAll();
+    }
+    Assert.Equal(12, Bonus().Hits);
+}
+
 static void FinishAllEvents(TestHarness h, RunRecord run)
 {
     foreach (var eventId in new[] { "first", "second", "third" })
@@ -2966,6 +3623,8 @@ static void BonusRoundMissEndsRun()
     Assert.Equal(deadline, finished.ActiveElapsedMs);
     Assert.Equal(BonusGamePhase.Ended, finished.BonusGame!.Phase);
     Assert.Equal("miss", finished.BonusGame.EndReason);
+    Assert.Equal(SoundCue.TimeUp, sounds.Last());
+    Assert.Equal(1, sounds.Count(cue => cue == SoundCue.TimeUp));
     Assert.Equal<int?>(25, finished.BonusGame.AwardedPoints);
     Assert.Equal(finished.Events.Sum(e => e.Score) + 25, finished.TotalPoints);
     Assert.Equal("OFF", h.Service.GetMasterBonusStatus().Phase);
@@ -3212,7 +3871,7 @@ static void BonusRoundSetup()
     var changed = h.Service.GetSetup();
     changed.BonusGame!.PointsPerPress = 3;
     var versioned = h.Service.UpdateSetup(changed);
-    Assert.True(versioned.EditionId != setup.EditionId, "changing bonus scoring after recorded runs versions the edition");
+    Assert.Equal(setup.EditionId, versioned.EditionId); // Bonus scoring changes keep the leaderboard too.
     Assert.Equal(12, h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id).Edition.BonusGame!.PointsPerPress);
 
     // New runs carry the name to the TV.
@@ -3321,6 +3980,84 @@ static void DeletingRedoRestoresOriginal()
     Assert.Equal(redo.Id, h.Service.GetScoreboard().Leaderboard.Single().RunId);
 }
 
+static void ChangingRunTypeInHistory()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+    var original = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 300);
+    h.StartRun();
+    h.Service.Finish();
+    h.Service.Record();
+    var redo = h.Service.ArmCompetitor(h.CompetitorId, RunCategory.Official, 300, replaceExistingOfficial: true);
+    h.StartRun();
+    h.Service.Finish();
+    redo = h.Service.Record();
+    RunRecord History(string id) => h.Service.GetOperatorSnapshot().History.Single(r => r.Id == id);
+    Assert.Equal(RunStatus.Superseded, History(original.Id).Status);
+
+    // The official redo becomes a playoff run: the result it replaced counts again.
+    var changed = h.Service.EditRun(redo.Id, new EditRunRequest
+    {
+        ExpectedRevision = redo.Revision, Reason = "Changed the run type from Official to Playoff.", Category = RunCategory.Playoff
+    });
+    Assert.Equal(RunCategory.Playoff, changed.Category);
+    Assert.Equal<string?>(null, changed.SupersedesRunId);
+    Assert.Equal(RunStatus.Completed, History(original.Id).Status);
+    Assert.Equal<string?>(null, History(original.Id).SupersededByRunId);
+    Assert.Equal(RunStatus.Completed, h.Store.Load().Runs.Single(r => r.Id == original.Id).Status);
+    Assert.Equal(RunCategory.Playoff, h.Store.Load().Runs.Single(r => r.Id == redo.Id).Category);
+
+    // Back to Official: refused while another official result stands, unless it replaces it.
+    Assert.Throws<CommandException>(() => h.Service.EditRun(redo.Id, new EditRunRequest
+    {
+        ExpectedRevision = changed.Revision, Reason = "Changed the run type from Playoff to Official.", Category = RunCategory.Official
+    }));
+    var official = h.Service.EditRun(redo.Id, new EditRunRequest
+    {
+        ExpectedRevision = changed.Revision, Reason = "Changed the run type from Playoff to Official.",
+        Category = RunCategory.Official, ReplaceExistingOfficial = true
+    });
+    Assert.Equal(RunCategory.Official, official.Category);
+    Assert.Equal(RunStatus.Superseded, History(original.Id).Status);
+    Assert.Equal(redo.Id, History(original.Id).SupersededByRunId);
+
+    // A plain type change with no official involved just changes the type.
+    var exhibition = h.Service.EditRun(original.Id, new EditRunRequest
+    {
+        ExpectedRevision = History(original.Id).Revision, Reason = "Changed the run type from Official to Exhibition.",
+        Category = RunCategory.Exhibition
+    });
+    Assert.Equal(RunCategory.Exhibition, exhibition.Category);
+    Assert.Equal(RunStatus.Superseded, exhibition.Status);
+}
+
+static void ShufflingOnDeck()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+    h.Service.ShuffleQueue(); // empty: nothing to do
+    var first = h.Service.AddToQueue(h.CompetitorId, RunCategory.Official);
+    h.Service.ShuffleQueue(); // one entry: nothing to do
+    Assert.Equal(first.Id, h.Service.GetOperatorSnapshot().Queue.Single().Id);
+    for (var index = 0; index < 4; index++)
+    {
+        var competitor = h.Service.AddCompetitor($"Shuffle {index}");
+        h.Service.AddToQueue(competitor.Id, RunCategory.Exhibition);
+    }
+    var before = h.Service.GetOperatorSnapshot().Queue.OrderBy(q => q.Position).Select(q => q.Id).ToList();
+    for (var attempt = 0; attempt < 20; attempt++)
+    {
+        h.Service.ShuffleQueue();
+        var after = h.Service.GetOperatorSnapshot().Queue.OrderBy(q => q.Position).ToList();
+        // Same entries, positions 0..n-1, and never the same order twice in a row.
+        Assert.True(!after.Select(q => q.Id).SequenceEqual(before), "a shuffle always changes the order");
+        Assert.True(after.Select(q => q.Id).OrderBy(id => id).SequenceEqual(before.OrderBy(id => id)));
+        Assert.True(after.Select(q => q.Position).SequenceEqual(Enumerable.Range(0, before.Count)));
+        before = after.Select(q => q.Id).ToList();
+    }
+    Assert.True(h.Store.Load().Queue.OrderBy(q => q.Position).Select(q => q.Id).SequenceEqual(before), "the shuffled order is saved");
+}
+
 static void SchemaVersion1UpgradesWithBackup()
 {
     var path = NewPath();
@@ -3396,15 +4133,47 @@ static void CategoryAndTieRank()
     h.Service.Record();
     var promoted = h.Service.GetOperatorSnapshot();
     Assert.Equal(second.Id, promoted.SelectedCompetitorId);
-    Assert.Equal(0, promoted.Queue.Count);
-    Assert.DoesNotContain(promoted.Queue, item => item.Id == officialTwo.Id);
+    Assert.Contains(promoted.Queue, item => item.Id == officialTwo.Id);
     h.Service.ArmCompetitor(second.Id, RunCategory.Official);
     h.StartRun();
+    Assert.DoesNotContain(h.Service.GetOperatorSnapshot().Queue, item => item.Id == officialTwo.Id);
     h.Service.Finish();
     h.Service.Record();
     var leaderboard = h.Service.GetScoreboard().Leaderboard;
     Assert.Equal(2, leaderboard.Count);
     Assert.True(leaderboard.All(row => row.Rank == 1));
+}
+
+static void PublicScoreboardSnapshotListsLeaderboardRuns()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+
+    var official = h.ArmAndStart(RunCategory.Official);
+    h.Service.Finish();
+    h.Service.Record();
+    var exhibition = h.ArmAndStart(RunCategory.Exhibition);
+    h.Service.Finish();
+    h.Service.Record();
+
+    var hidden = h.Service.GetPublicScoreboard();
+    Assert.Equal(1, hidden.Leaderboard.Count);
+    Assert.Equal(official.Id, hidden.Runs.Single().Id);
+    Assert.True(hidden.Events.Count >= h.Service.GetOperatorSnapshot().Events.Count);
+    Assert.True(hidden.Runs.Single().Events.Select(e => e.EventId).ToHashSet()
+        .IsSupersetOf(h.Service.GetOperatorSnapshot().Events.Select(e => e.EventId)));
+    Assert.Equal(hidden.Leaderboard.Single().Points, hidden.Runs.Single().TotalPoints);
+
+    h.Service.SetLeaderboardPreference(true);
+    var shown = h.Service.GetPublicScoreboard();
+    Assert.Equal(2, shown.Runs.Count);
+    Assert.Contains(shown.Runs, run => run.Id == exhibition.Id && run.Category == RunCategory.Exhibition);
+
+    var json = JsonSerializer.Serialize(shown, JsonDefaults.Options);
+    foreach (var privateField in new[] { "\"deviceId\"", "\"prompt\"", "\"answer\"", "\"keypad", "\"competitorId\"", "\"queue\"" })
+    {
+        Assert.True(!json.Contains(privateField, StringComparison.OrdinalIgnoreCase), $"public scoreboard leaked {privateField}");
+    }
+    Assert.True(json.Contains("\"status\":\"completed\"") || json.Contains("\"status\":\"pending\""), "event statuses are lower-case words");
 }
 
 static void LeaderboardPreferenceAndCategories()
@@ -3455,10 +4224,52 @@ static void LeaderboardPreferenceAndCategories()
         [RunCategory.Playoff, RunCategory.Official, RunCategory.Exhibition, RunCategory.Exhibition]));
     Assert.True(included.Leaderboard.Skip(2).Select(row => row.DisplayName).ToHashSet(StringComparer.Ordinal)
         .SetEquals(["Primary competitor (Exhibition 1)", "Primary competitor (Exhibition 2)"]));
+    Assert.True(included.Leaderboard.Select(row => row.Rank).SequenceEqual([1, 1, null, null]));
     Assert.Equal(true, h.Store.Load().ShowExhibitionsOnLeaderboard);
 
     h.Service.SetLeaderboardPreference(false);
     Assert.Equal(2, h.Service.GetOperatorSnapshot().Leaderboard.Count);
+}
+
+static void ExhibitionRowsInterleaveByPointsWithoutRank()
+{
+    using var h = new TestHarness(MakeMvpEdition(), NewPath());
+    h.Service.SetLeaderboardPreference(true);
+
+    RunRecord Record(RunRecord run, int bonus)
+    {
+        h.Service.Finish();
+        h.Service.Record();
+        var recorded = h.Service.GetOperatorSnapshot().History.Single(r => r.Id == run.Id);
+        h.Service.EditHistoricalRun(run.Id, new EditRunRequest
+        {
+            ExpectedRevision = recorded.Revision,
+            Reason = "Test points",
+            BonusPointsOverride = bonus
+        });
+        return run;
+    }
+
+    RunRecord Official(string name, int bonus)
+    {
+        var competitor = h.AddCompetitor(name);
+        foreach (var item in h.Service.GetOperatorSnapshot().Queue) h.Service.RemoveFromQueue(item.Id);
+        h.Service.AddToQueue(competitor.Id, RunCategory.Official);
+        h.Service.ArmCompetitor(competitor.Id, RunCategory.Official);
+        return Record(h.StartRun(), bonus);
+    }
+
+    var low = Official("Low official", 100);
+    var high = Official("High official", 300);
+    var tied = Official("Tied official", 300);
+    var top = Record(h.ArmAndStart(RunCategory.Exhibition), 500);
+    var middle = Record(h.ArmAndStart(RunCategory.Exhibition), 200);
+    var even = Record(h.ArmAndStart(RunCategory.Exhibition), 300);
+
+    var rows = h.Service.GetScoreboard().Leaderboard;
+    Assert.True(rows.Select(row => row.RunId).SequenceEqual([top.Id, high.Id, tied.Id, even.Id, middle.Id, low.Id]));
+    // Exhibitions have no rank and don't push official ranks down; tied officials share one.
+    Assert.True(rows.Select(row => row.Rank).SequenceEqual([null, 1, 1, null, null, 3]));
 }
 
 static void RecoveryAndLock()
